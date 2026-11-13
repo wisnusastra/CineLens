@@ -1,0 +1,31 @@
+name: Build CineLens iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Generate iOS Runner & Preserve Icon, Splash & Native Bridge
+        run: |
+          chmod +x build_ios.sh
+          ./build_ios.sh
+
+      - name: Build Release iOS IPA
+        run: flutter build ipa --release --no-codesign
+
+      - name: Upload Ready-to-Install IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CineLens-iOS-IPA
+          path: build/ios/ipa/*.ipa
