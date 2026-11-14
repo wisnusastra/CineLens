@@ -3,7 +3,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
-import '../../../../core/routing/app_router.dart';
+import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
 
 class CapturedPreviewScreen extends StatefulWidget {

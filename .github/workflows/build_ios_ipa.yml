@@ -18,11 +18,8 @@ jobs:
           channel: stable
           cache: true
 
-      - name: 1. Get Dependencies & Generate iOS
-        run: |
-          flutter pub get
-          rm -rf build/ios
-          flutter create --platforms=ios .
+      - name: 1. Get Dependencies
+        run: flutter pub get
 
       - name: 2. Build iOS Release Unsigned
         run: |

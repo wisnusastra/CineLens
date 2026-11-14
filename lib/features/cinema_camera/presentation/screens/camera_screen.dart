@@ -1,15 +1,24 @@
 // lib/features/cinema_camera/presentation/screens/camera_screen.dart
 
-import 'dart:async';
 import 'package:camera/camera.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:gal/gal.dart';
-import 'package:cinelens_ios/features/options/presentation/providers/camera_options_provider.dart';
-import 'package:cinelens_ios/features/options/presentation/widgets/camera_options_sheet.dart';
-import 'package:cinelens_ios/features/options/presentation/widgets/cinematic_viewfinder_overlay.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../../../core/routing/capture_args.dart';
+import '../../../../core/theme/app_theme.dart';
+import '../../domain/entities/cinema_tone.dart';
+import '../../../options/domain/entities/camera_options_state.dart';
+import '../../../options/presentation/providers/camera_options_provider.dart';
+import '../../../options/presentation/widgets/camera_options_sheet.dart';
+import '../../../options/presentation/widgets/cinematic_viewfinder_overlay.dart';
 import '../providers/cinema_camera_provider.dart';
+import '../providers/cinema_camera_state.dart';
+import '../widgets/custom_tone_editor_sheet.dart';
+import '../widgets/preset_library_io_sheet.dart';
+import '../widgets/tone_selector_strip.dart';
 
 class CameraScreen extends ConsumerStatefulWidget {
   const CameraScreen({super.key});
@@ -18,392 +27,658 @@ class CameraScreen extends ConsumerStatefulWidget {
   ConsumerState<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends ConsumerState<CameraScreen>
-    with WidgetsBindingObserver {
-  List<CameraDescription> _cameras = const [];
-  CameraController? _controller;
-  FlashMode _flashMode = FlashMode.off;
-  bool _isInitializing = true;
-  String? _errorMessage;
-  Offset? _focusPoint;
-  Timer? _focusTimer;
-  Timer? _recordTimer;
-  int _recordSeconds = 0;
+class _CameraScreenState extends ConsumerState<CameraScreen> {
+  bool _isCapturingPhoto = false;
+  bool _isTogglingVideo = false;
+
+  CinemaCameraNotifier get _notifier =>
+      ref.read(cinemaCameraProvider.notifier);
 
   @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _initCameras();
-  }
+  Widget build(BuildContext context) {
+    final asyncState = ref.watch(cinemaCameraProvider);
+    final options = ref.watch(cameraOptionsProvider);
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _focusTimer?.cancel();
-    _recordTimer?.cancel();
-    _controller?.dispose();
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
-
-    if (state == AppLifecycleState.inactive) {
-      controller.dispose();
-      _controller = null;
-    } else if (state == AppLifecycleState.resumed) {
-      final index = ref.read(cinemaCameraProvider).cameraIndex;
-      if (_cameras.isNotEmpty) {
-        _setupCameraController(_cameras[index % _cameras.length]);
-      }
-    }
-  }
-
-  Future<void> _initCameras() async {
-    try {
-      setState(() {
-        _isInitializing = true;
-        _errorMessage = null;
-      });
-      _cameras = await availableCameras();
-      if (_cameras.isEmpty) {
-        setState(() {
-          _isInitializing = false;
-          _errorMessage = 'Kamera tidak ditemukan pada perangkat ini.';
-        });
-        return;
-      }
-      await _setupCameraController(_cameras.first);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _isInitializing = false;
-        _errorMessage = 'Gagal mengakses kamera: $e';
-      });
-    }
-  }
-
-  Future<void> _setupCameraController(CameraDescription description) async {
-    final oldController = _controller;
-    final newController = CameraController(
-      description,
-      ResolutionPreset.high,
-      enableAudio: true,
-      imageFormatGroup: ImageFormatGroup.bgra8888,
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: asyncState.when(
+        loading: () => const _CinemaLoadingView(),
+        error: (error, _) => _CinemaErrorView(
+          message: _describe(error),
+          onRetry: () => ref.invalidate(cinemaCameraProvider),
+        ),
+        data: (state) => _buildCameraStack(state, options),
+      ),
     );
+  }
 
+  // ---------------------------------------------------------------- layout
+
+  Widget _buildCameraStack(CinemaCameraState state, CameraOptionsState options) {
+    final controller = _notifier.controller;
+    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            if (controller != null && controller.value.isInitialized)
+              _buildViewport(
+                controller: controller,
+                state: state,
+                viewport: size,
+                haptics: options.hapticFeedback,
+                isLandscape: isLandscape,
+              )
+            else
+              const _CinemaLoadingView(),
+
+            // Grid / aspect-ratio / HUD overlay
+            CinematicViewfinderOverlay(
+              activeToneName: state.selectedTone.name,
+            ),
+
+            if (state.focusPoint != null)
+              Positioned(
+                left: state.focusPoint!.dx - 32,
+                top: state.focusPoint!.dy - 32,
+                child: IgnorePointer(
+                  child: Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: AppTheme.cinemaAmber, width: 1.6),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ),
+
+            if (state.isRecordingVideo) _buildRecordingBadge(state),
+
+            _buildTopLeftActions(state),
+            _buildTopRightActions(state),
+
+            if (state.isProcessingVideo) _buildProcessingOverlay(),
+
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: _buildControls(state, options.hapticFeedback, isLandscape),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildViewport({
+    required CameraController controller,
+    required CinemaCameraState state,
+    required Size viewport,
+    required bool haptics,
+    required bool isLandscape,
+  }) {
+    final previewSize = controller.value.previewSize ?? const Size(1920, 1080);
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (details) => _handleFocusTap(details, viewport, haptics),
+      child: ColorFiltered(
+        colorFilter: ColorFilter.matrix(state.activeColorMatrix),
+        child: SizedBox.expand(
+          child: FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: isLandscape ? previewSize.width : previewSize.height,
+              height: isLandscape ? previewSize.height : previewSize.width,
+              child: CameraPreview(controller),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------- controls
+
+  Widget _buildControls(
+    CinemaCameraState state,
+    bool haptics,
+    bool isLandscape,
+  ) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: EdgeInsets.fromLTRB(12, 14, 12, isLandscape ? 10 : 18),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.bottomCenter,
+            end: Alignment.topCenter,
+            colors: [
+              Colors.black.withValues(alpha: 0.92),
+              Colors.black.withValues(alpha: 0.45),
+              Colors.transparent,
+            ],
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ToneSelectorStrip(
+              tones: state.tones,
+              selectedTone: state.selectedTone,
+              onToneSelected: _notifier.selectTone,
+              onOpenCustomCreator: _openCustomToneEditor,
+              onDeleteCustomTone: _confirmDeleteTone,
+            ),
+            const SizedBox(height: 6),
+            _buildIntensityRow(state),
+            const SizedBox(height: 4),
+            _buildShutterRow(state, haptics),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIntensityRow(CinemaCameraState state) {
+    return Row(
+      children: [
+        const Icon(
+          CupertinoIcons.slider_horizontal_3,
+          color: AppTheme.textSecondary,
+          size: 16,
+        ),
+        Expanded(
+          child: SizedBox(
+            height: 26,
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 2,
+                activeTrackColor: AppTheme.cinemaAmber,
+                inactiveTrackColor: Colors.white24,
+                thumbColor: AppTheme.cinemaAmber,
+                overlayColor: AppTheme.cinemaAmber.withValues(alpha: 0.2),
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+              ),
+              child: Slider(
+                value: state.intensity.clamp(0.0, 1.0),
+                onChanged: _notifier.setIntensity,
+              ),
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 44,
+          child: Text(
+            '${(state.intensity * 100).round()}%',
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              color: AppTheme.textSecondary,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildShutterRow(CinemaCameraState state, bool haptics) {
+    return Row(
+      children: [
+        SizedBox(width: 92, child: _buildModeToggle(state)),
+        const Spacer(),
+        _buildShutterButton(state, haptics),
+        const Spacer(),
+        SizedBox(
+          width: 92,
+          child: Center(
+            child: _circleButton(
+              icon: Icons.cameraswitch_rounded,
+              active: false,
+              onTap: state.isRecordingVideo ? null : _switchCamera,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildModeToggle(CinemaCameraState state) {
+    final isVideo = state.captureMode == CinemaCaptureMode.video24fps;
+
+    return GestureDetector(
+      onTap: state.isRecordingVideo
+          ? null
+          : () => _notifier.setCaptureMode(
+                isVideo
+                    ? CinemaCaptureMode.photo
+                    : CinemaCaptureMode.video24fps,
+              ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: isVideo
+              ? Colors.redAccent.withValues(alpha: 0.22)
+              : Colors.white.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: isVideo ? Colors.redAccent : Colors.white24,
+          ),
+        ),
+        child: Text(
+          isVideo ? '24 FPS' : 'PHOTO',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: isVideo ? Colors.redAccent : Colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.8,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShutterButton(CinemaCameraState state, bool haptics) {
+    final isVideo = state.captureMode == CinemaCaptureMode.video24fps;
+    final isBusy = state.isCapturing ||
+        _isCapturingPhoto ||
+        _isTogglingVideo ||
+        state.isProcessingVideo;
+
+    return GestureDetector(
+      onTap: isBusy
+          ? null
+          : () => isVideo
+              ? _handleVideoToggle(haptics)
+              : _handlePhotoCapture(haptics),
+      child: Container(
+        width: 78,
+        height: 78,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: isVideo ? Colors.redAccent : Colors.white,
+            width: 4,
+          ),
+        ),
+        child: Center(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            width: state.isRecordingVideo ? 26 : 60,
+            height: state.isRecordingVideo ? 26 : 60,
+            decoration: BoxDecoration(
+              color: isVideo ? Colors.redAccent : Colors.white,
+              borderRadius:
+                  BorderRadius.circular(state.isRecordingVideo ? 6 : 30),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTopLeftActions(CinemaCameraState state) {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _circleButton(
+                icon: Icons.grid_3x3_rounded,
+                active: state.showGrid,
+                onTap: _notifier.toggleGrid,
+              ),
+              const SizedBox(width: 8),
+              _circleButton(
+                icon: Icons.crop_16_9_rounded,
+                active: state.isAnamorphicRatio,
+                onTap: state.isRecordingVideo
+                    ? null
+                    : _notifier.toggleAnamorphicRatio,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTopRightActions(CinemaCameraState state) {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topRight,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _circleButton(
+                icon: _flashIcon(state.flashMode),
+                active: state.flashMode != FlashMode.off,
+                onTap: _notifier.cycleFlashMode,
+              ),
+              const SizedBox(width: 8),
+              _circleButton(
+                icon: Icons.folder_open_rounded,
+                active: false,
+                onTap: _openPresetLibrary,
+              ),
+              const SizedBox(width: 8),
+              const CameraOptionsButton(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRecordingBadge(CinemaCameraState state) {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: Container(
+          margin: const EdgeInsets.only(top: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.red.withValues(alpha: 0.88),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.fiber_manual_record, color: Colors.white, size: 12),
+              const SizedBox(width: 6),
+              Text(
+                'REC ${_formatDuration(state.recordingDuration)}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                  letterSpacing: 1.0,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProcessingOverlay() {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: Colors.black.withValues(alpha: 0.6),
+        child: const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(color: AppTheme.cinemaAmber),
+              SizedBox(height: 14),
+              Text(
+                'Memproses video 24fps...',
+                style: TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _circleButton({
+    required IconData icon,
+    required bool active,
+    required VoidCallback? onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap == null
+          ? null
+          : () {
+              HapticFeedback.selectionClick();
+              onTap();
+            },
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.45),
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: active ? AppTheme.cinemaAmber : Colors.white24,
+          ),
+        ),
+        child: Icon(
+          icon,
+          size: 19,
+          color: active ? AppTheme.cinemaAmber : Colors.white,
+        ),
+      ),
+    );
+  }
+
+  // --------------------------------------------------------------- actions
+
+  Future<void> _handleFocusTap(
+    TapDownDetails details,
+    Size viewport,
+    bool haptics,
+  ) async {
+    if (viewport.isEmpty) return;
+    if (haptics) HapticFeedback.selectionClick();
+
+    final dx = (details.localPosition.dx / viewport.width).clamp(0.0, 1.0);
+    final dy = (details.localPosition.dy / viewport.height).clamp(0.0, 1.0);
+
+    await _notifier.setFocusPoint(Offset(dx, dy), details.localPosition);
+  }
+
+  Future<void> _handlePhotoCapture(bool haptics) async {
+    if (_isCapturingPhoto) return;
+    if (haptics) HapticFeedback.mediumImpact();
+
+    setState(() => _isCapturingPhoto = true);
     try {
-      await oldController?.dispose();
-      await newController.initialize();
-      await newController.setFlashMode(_flashMode);
+      final bytes = await _notifier.captureAndSavePhoto();
+      if (!mounted || bytes == null) return;
 
-      if (!mounted) {
-        await newController.dispose();
-        return;
+      final state = ref.read(cinemaCameraProvider).valueOrNull;
+      if (state == null) return;
+
+      context.push(
+        '/preview',
+        extra: CapturedPreviewArgs.photo(
+          imageBytes: bytes,
+          tone: state.selectedTone,
+          intensity: state.intensity,
+          isAnamorphic: state.isAnamorphicRatio,
+        ),
+      );
+    } catch (error) {
+      _toast('Gagal memotret: ${_describe(error)}', isError: true);
+    } finally {
+      if (mounted) setState(() => _isCapturingPhoto = false);
+    }
+  }
+
+  Future<void> _handleVideoToggle(bool haptics) async {
+    if (_isTogglingVideo) return;
+    if (haptics) HapticFeedback.mediumImpact();
+
+    final state = ref.read(cinemaCameraProvider).valueOrNull;
+    if (state == null) return;
+
+    setState(() => _isTogglingVideo = true);
+    try {
+      if (state.isRecordingVideo) {
+        final path = await _notifier.stopVideo24fpsRecording();
+        if (!mounted || path == null) return;
+
+        context.push(
+          '/preview',
+          extra: CapturedPreviewArgs.video(
+            videoFilePath: path,
+            tone: state.selectedTone,
+            intensity: state.intensity,
+            isAnamorphic: state.isAnamorphicRatio,
+          ),
+        );
+      } else {
+        await _notifier.startVideo24fpsRecording();
       }
-
-      setState(() {
-        _controller = newController;
-        _isInitializing = false;
-        _errorMessage = null;
-      });
-    } catch (e) {
-      await newController.dispose();
-      if (!mounted) return;
-      setState(() {
-        _isInitializing = false;
-        _errorMessage = 'Inisialisasi kamera gagal: $e';
-      });
+    } catch (error) {
+      _toast('Gagal merekam video: ${_describe(error)}', isError: true);
+    } finally {
+      if (mounted) setState(() => _isTogglingVideo = false);
     }
   }
 
   Future<void> _switchCamera() async {
-    if (_cameras.length < 2) return;
-    final cameraState = ref.read(cinemaCameraProvider);
-    if (cameraState.isRecording) return;
-
-    final hapticEnabled = ref.read(cameraOptionsProvider).hapticFeedback;
-    if (hapticEnabled) HapticFeedback.lightImpact();
-
-    final nextIndex = (cameraState.cameraIndex + 1) % _cameras.length;
-    ref.read(cinemaCameraProvider.notifier).setCameraIndex(nextIndex);
-
-    setState(() => _isInitializing = true);
-    await _setupCameraController(_cameras[nextIndex]);
-  }
-
-  Future<void> _cycleFlashMode() async {
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
-
-    final hapticEnabled = ref.read(cameraOptionsProvider).hapticFeedback;
-    if (hapticEnabled) HapticFeedback.selectionClick();
-
-    final nextMode = switch (_flashMode) {
-      FlashMode.off => FlashMode.auto,
-      FlashMode.auto => FlashMode.always,
-      FlashMode.always => FlashMode.torch,
-      FlashMode.torch => FlashMode.off,
-    };
-
     try {
-      await controller.setFlashMode(nextMode);
-      setState(() => _flashMode = nextMode);
-    } catch (_) {}
-  }
-
-  Future<void> _onTapToFocus(
-    TapDownDetails details,
-    BoxConstraints constraints,
-  ) async {
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
-
-    final dx = (details.localPosition.dx / constraints.maxWidth).clamp(0.0, 1.0);
-    final dy =
-        (details.localPosition.dy / constraints.maxHeight).clamp(0.0, 1.0);
-
-    try {
-      await controller.setFocusPoint(Offset(dx, dy));
-      await controller.setExposurePoint(Offset(dx, dy));
-    } catch (_) {}
-
-    final hapticEnabled = ref.read(cameraOptionsProvider).hapticFeedback;
-    if (hapticEnabled) HapticFeedback.selectionClick();
-
-    _focusTimer?.cancel();
-    setState(() => _focusPoint = details.localPosition);
-    _focusTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _focusPoint = null);
-    });
-  }
-
-  Future<void> _handleShutterPressed() async {
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
-
-    final cameraState = ref.read(cinemaCameraProvider);
-    final notifier = ref.read(cinemaCameraProvider.notifier);
-    final hapticEnabled = ref.read(cameraOptionsProvider).hapticFeedback;
-
-    if (hapticEnabled) HapticFeedback.mediumImpact();
-
-    if (cameraState.isVideoMode) {
-      if (cameraState.isRecording) {
-        try {
-          _recordTimer?.cancel();
-          final XFile videoFile = await controller.stopVideoRecording();
-          notifier.setRecording(false);
-          setState(() => _recordSeconds = 0);
-
-          await Gal.putVideo(videoFile.path);
-          _showStatusToast('Video tersimpan ke Galeri');
-        } catch (e) {
-          notifier.setRecording(false);
-          _showStatusToast('Gagal menyimpan video: $e', isError: true);
-        }
-      } else {
-        try {
-          await controller.startVideoRecording();
-          notifier.setRecording(true);
-          setState(() => _recordSeconds = 0);
-          _recordTimer?.cancel();
-          _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-            if (mounted) setState(() => _recordSeconds++);
-          });
-        } catch (e) {
-          _showStatusToast('Gagal mulai merekam: $e', isError: true);
-        }
-      }
-      return;
-    }
-
-    if (cameraState.isCapturing) return;
-    try {
-      notifier.setCapturing(true);
-      final XFile photoFile = await controller.takePicture();
-      await Gal.putImage(photoFile.path);
-      _showStatusToast('Foto (${cameraState.activeTone.name}) tersimpan');
-    } catch (e) {
-      _showStatusToast('Gagal memotret: $e', isError: true);
-    } finally {
-      notifier.setCapturing(false);
+      await _notifier.switchCamera();
+    } catch (error) {
+      _toast('Gagal mengganti kamera: ${_describe(error)}', isError: true);
     }
   }
 
-  void _showStatusToast(String message, {bool isError = false}) {
+  Future<void> _openCustomToneEditor() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => const CustomToneEditorSheet(),
+    );
+  }
+
+  Future<void> _openPresetLibrary() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => const PresetLibraryIoSheet(),
+    );
+  }
+
+  Future<void> _confirmDeleteTone(CinemaTone tone) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: AppTheme.surfaceDark,
+        title: const Text(
+          'Hapus preset?',
+          style: TextStyle(color: AppTheme.textPrimary, fontSize: 16),
+        ),
+        content: Text(
+          'Preset "${tone.name}" akan dihapus permanen dari perangkat ini.',
+          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Batal'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Hapus', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      await _notifier.deleteCustomTone(tone.id);
+      _toast('Preset "${tone.name}" dihapus.');
+    } catch (error) {
+      _toast('Gagal menghapus preset: ${_describe(error)}', isError: true);
+    }
+  }
+
+  // --------------------------------------------------------------- helpers
+
+  void _toast(String message, {bool isError = false}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(
       SnackBar(
         content: Text(
           message,
           style: const TextStyle(fontWeight: FontWeight.w600),
         ),
-        backgroundColor: isError ? Colors.redAccent : const Color(0xFF232328),
+        backgroundColor: isError ? const Color(0xFFB3261E) : AppTheme.surfaceDark,
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 2),
       ),
     );
   }
 
-  String _formatDuration(int totalSeconds) {
-    final minutes = (totalSeconds ~/ 60).toString().padLeft(2, '0');
-    final seconds = (totalSeconds % 60).toString().padLeft(2, '0');
+  String _describe(Object error) {
+    final text = error.toString();
+    return text.startsWith('Exception: ') ? text.substring(11) : text;
+  }
+
+  String _formatDuration(Duration duration) {
+    final minutes = duration.inMinutes.toString().padLeft(2, '0');
+    final seconds = (duration.inSeconds % 60).toString().padLeft(2, '0');
     return '$minutes:$seconds';
   }
 
-  IconData get _flashIcon => switch (_flashMode) {
+  IconData _flashIcon(FlashMode mode) => switch (mode) {
         FlashMode.off => Icons.flash_off_rounded,
         FlashMode.auto => Icons.flash_auto_rounded,
         FlashMode.always => Icons.flash_on_rounded,
         FlashMode.torch => Icons.highlight_rounded,
       };
+}
+
+// ------------------------------------------------------------------ states
+
+class _CinemaLoadingView extends StatelessWidget {
+  const _CinemaLoadingView();
 
   @override
   Widget build(BuildContext context) {
-    final cameraState = ref.watch(cinemaCameraProvider);
-    final options = ref.watch(cameraOptionsProvider);
-    final activeTone = cameraState.activeTone;
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: OrientationBuilder(
-        builder: (context, orientation) {
-          final isLandscape = orientation == Orientation.landscape;
-
-          return LayoutBuilder(
-            builder: (context, constraints) {
-              return Stack(
-                fit: StackFit.expand,
-                children: [
-                  // 1. Pratinjau Kamera Fullscreen Responsif + LUT Filter Real-Time
-                  _buildCameraViewport(
-                    isLandscape: isLandscape,
-                    activeToneMatrix: activeTone.matrix,
-                    constraints: constraints,
-                  ),
-
-                  // 2. Overlay Grid Komposisi, Rasio Sinematik, & HUD
-                  CinematicViewfinderOverlay(
-                    activeToneName: activeTone.name,
-                  ),
-
-                  // 3. Indikator Fokus Sentuh
-                  if (_focusPoint != null)
-                    Positioned(
-                      left: _focusPoint!.dx - 32,
-                      top: _focusPoint!.dy - 32,
-                      child: IgnorePointer(
-                        child: Container(
-                          width: 64,
-                          height: 64,
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                              color: Colors.amberAccent,
-                              width: 1.6,
-                            ),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                      ),
-                    ),
-
-                  // 4. Indikator Timer Rekaman Video
-                  if (cameraState.isRecording)
-                    SafeArea(
-                      child: Align(
-                        alignment: Alignment.topCenter,
-                        child: Container(
-                          margin: const EdgeInsets.only(top: 14),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.red.withOpacity(0.88),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.fiber_manual_record,
-                                color: Colors.white,
-                                size: 12,
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                'REC ${_formatDuration(_recordSeconds)}',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                  letterSpacing: 1.0,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-
-                  // 5. Tombol Flash & Option di Pojok Kanan Atas
-                  SafeArea(
-                    child: Align(
-                      alignment: Alignment.topRight,
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _buildCircleActionButton(
-                              icon: _flashIcon,
-                              color: _flashMode == FlashMode.off
-                                  ? Colors.white70
-                                  : Colors.amberAccent,
-                              onTap: _cycleFlashMode,
-                            ),
-                            const SizedBox(width: 10),
-                            const CameraOptionsButton(),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-
-                  // 6. Panel Kontrol LUT & Shutter (Adaptif Portrait & Landscape)
-                  if (isLandscape)
-                    _buildLandscapeControls(cameraState, options.hapticFeedback)
-                  else
-                    _buildPortraitControls(cameraState, options.hapticFeedback),
-                ],
-              );
-            },
-          );
-        },
+    return const ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: AppTheme.cinemaAmber),
+            SizedBox(height: 16),
+            Text(
+              'Menyiapkan kamera sinematik...',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+            ),
+          ],
+        ),
       ),
     );
   }
+}
 
-  Widget _buildCameraViewport({
-    required bool isLandscape,
-    required List<double> activeToneMatrix,
-    required BoxConstraints constraints,
-  }) {
-    if (_isInitializing) {
-      return const Center(
-        child: CircularProgressIndicator(color: Colors.amberAccent),
-      );
-    }
+class _CinemaErrorView extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
 
-    if (_errorMessage != null ||
-        _controller == null ||
-        !_controller!.value.isInitialized) {
-      return Center(
+  const _CinemaErrorView({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
@@ -416,359 +691,21 @@ class _CameraScreenState extends ConsumerState<CameraScreen>
               ),
               const SizedBox(height: 12),
               Text(
-                _errorMessage ?? 'Kamera belum siap.',
+                message,
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Colors.white70, fontSize: 14),
               ),
               const SizedBox(height: 16),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.amber,
+                  backgroundColor: AppTheme.cinemaAmber,
                   foregroundColor: Colors.black,
                 ),
-                onPressed: _initCameras,
+                onPressed: onRetry,
                 child: const Text('Coba Lagi'),
               ),
             ],
           ),
-        ),
-      );
-    }
-
-    final previewSize =
-        _controller!.value.previewSize ?? const Size(1920, 1080);
-
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (details) => _onTapToFocus(details, constraints),
-      child: ColorFiltered(
-        colorFilter: ColorFilter.matrix(activeToneMatrix),
-        child: SizedBox.expand(
-          child: FittedBox(
-            fit: BoxFit.cover,
-            child: SizedBox(
-              width: isLandscape ? previewSize.width : previewSize.height,
-              height: isLandscape ? previewSize.height : previewSize.width,
-              child: CameraPreview(_controller!),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPortraitControls(
-    CinemaCameraState cameraState,
-    bool hapticEnabled,
-  ) {
-    return SafeArea(
-      child: Align(
-        alignment: Alignment.bottomCenter,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 18),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.bottomCenter,
-              end: Alignment.topCenter,
-              colors: [
-                Colors.black.withOpacity(0.85),
-                Colors.black.withOpacity(0.35),
-                Colors.transparent,
-              ],
-            ),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Pemilih Preset LUT Horizontal
-              SizedBox(
-                height: 36,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  itemCount: cameraState.presets.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemBuilder: (context, index) {
-                    final preset = cameraState.presets[index];
-                    final selected = index == cameraState.selectedToneIndex;
-                    return GestureDetector(
-                      onTap: () {
-                        if (hapticEnabled) HapticFeedback.selectionClick();
-                        ref
-                            .read(cinemaCameraProvider.notifier)
-                            .selectTone(index);
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: selected
-                              ? Colors.amber
-                              : Colors.black.withOpacity(0.55),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: selected ? Colors.amber : Colors.white24,
-                          ),
-                        ),
-                        child: Text(
-                          preset.name,
-                          style: TextStyle(
-                            color: selected ? Colors.black : Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 14),
-
-              // Switch Mode Foto / Video
-              _buildModeSwitcher(cameraState, hapticEnabled),
-              const SizedBox(height: 16),
-
-              // Baris Shutter & Ganti Kamera
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  const SizedBox(width: 48),
-                  _buildShutterButton(cameraState),
-                  _buildCircleActionButton(
-                    icon: Icons.cameraswitch_rounded,
-                    color: Colors.white,
-                    size: 24,
-                    onTap: _switchCamera,
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLandscapeControls(
-    CinemaCameraState cameraState,
-    bool hapticEnabled,
-  ) {
-    return SafeArea(
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: Container(
-          width: 190,
-          margin: const EdgeInsets.only(top: 52, right: 8, bottom: 8),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.62),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.white12),
-          ),
-          child: Row(
-            children: [
-              // Daftar LUT Vertikal di Sisi Kiri Panel
-              Expanded(
-                child: ListView.separated(
-                  itemCount: cameraState.presets.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 6),
-                  itemBuilder: (context, index) {
-                    final preset = cameraState.presets[index];
-                    final selected = index == cameraState.selectedToneIndex;
-                    return GestureDetector(
-                      onTap: () {
-                        if (hapticEnabled) HapticFeedback.selectionClick();
-                        ref
-                            .read(cinemaCameraProvider.notifier)
-                            .selectTone(index);
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 7,
-                        ),
-                        decoration: BoxDecoration(
-                          color: selected
-                              ? Colors.amber
-                              : Colors.white.withOpacity(0.08),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          preset.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: selected ? Colors.black : Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(width: 10),
-
-              // Kolom Tombol Switch Kamera, Shutter, & Mode Foto/Video
-              Column(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _buildCircleActionButton(
-                    icon: Icons.cameraswitch_rounded,
-                    color: Colors.white,
-                    size: 20,
-                    onTap: _switchCamera,
-                  ),
-                  _buildShutterButton(cameraState, diameter: 64),
-                  GestureDetector(
-                    onTap: () {
-                      if (hapticEnabled) HapticFeedback.selectionClick();
-                      ref
-                          .read(cinemaCameraProvider.notifier)
-                          .setVideoMode(!cameraState.isVideoMode);
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white12,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        cameraState.isVideoMode ? 'VIDEO' : 'FOTO',
-                        style: const TextStyle(
-                          color: Colors.amberAccent,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildModeSwitcher(
-    CinemaCameraState cameraState,
-    bool hapticEnabled,
-  ) {
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.6),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildModeChip(
-            label: 'FOTO',
-            selected: !cameraState.isVideoMode,
-            onTap: () {
-              if (hapticEnabled) HapticFeedback.selectionClick();
-              ref.read(cinemaCameraProvider.notifier).setVideoMode(false);
-            },
-          ),
-          _buildModeChip(
-            label: 'VIDEO',
-            selected: cameraState.isVideoMode,
-            onTap: () {
-              if (hapticEnabled) HapticFeedback.selectionClick();
-              ref.read(cinemaCameraProvider.notifier).setVideoMode(true);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildModeChip({
-    required String label,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        decoration: BoxDecoration(
-          color: selected ? Colors.amber : Colors.transparent,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: selected ? Colors.black : Colors.white70,
-            fontWeight: FontWeight.bold,
-            fontSize: 12,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildShutterButton(
-    CinemaCameraState cameraState, {
-    double diameter = 74,
-  }) {
-    final isVideo = cameraState.isVideoMode;
-    final isRecording = cameraState.isRecording;
-
-    return GestureDetector(
-      onTap: _handleShutterPressed,
-      child: Container(
-        width: diameter,
-        height: diameter,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.white, width: 4),
-        ),
-        child: Center(
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            width: isRecording ? diameter * 0.42 : diameter * 0.78,
-            height: isRecording ? diameter * 0.42 : diameter * 0.78,
-            decoration: BoxDecoration(
-              color: isVideo ? Colors.redAccent : Colors.white,
-              borderRadius: BorderRadius.circular(
-                isRecording ? 8 : diameter,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCircleActionButton({
-    required IconData icon,
-    required Color color,
-    required VoidCallback onTap,
-    double size = 22,
-  }) {
-    return Material(
-      color: Colors.black.withOpacity(0.55),
-      shape: const CircleBorder(
-        side: BorderSide(color: Colors.white24, width: 1),
-      ),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(11),
-          child: Icon(icon, color: color, size: size),
         ),
       ),
     );

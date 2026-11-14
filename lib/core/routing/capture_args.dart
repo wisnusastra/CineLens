@@ -1,11 +1,10 @@
 import 'dart:typed_data';
-import 'package:go_router/go_router.dart';
+
 import '../../features/cinema_camera/domain/entities/cinema_tone.dart';
-import '../../features/cinema_camera/presentation/screens/camera_screen.dart';
-import '../../features/cinema_camera/presentation/screens/captured_preview_screen.dart';
 
 enum MediaCaptureType { photo, video }
 
+/// Extra payload used by the `/preview` route.
 class CapturedPreviewArgs {
   final MediaCaptureType mediaType;
   final Uint8List? imageBytes;
@@ -30,22 +29,3 @@ class CapturedPreviewArgs {
   })  : mediaType = MediaCaptureType.video,
         imageBytes = null;
 }
-
-final GoRouter appRouter = GoRouter(
-  initialLocation: '/',
-  routes: [
-    GoRoute(
-      path: '/',
-      name: 'camera',
-      builder: (context, state) => const CameraScreen(),
-    ),
-    GoRoute(
-      path: '/preview',
-      name: 'preview',
-      builder: (context, state) {
-        final args = state.extra as CapturedPreviewArgs;
-        return CapturedPreviewScreen(args: args);
-      },
-    ),
-  ],
-);
