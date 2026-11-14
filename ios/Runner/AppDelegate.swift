@@ -1,41 +1,52 @@
-import Flutter
-import UIKit
 import AVFoundation
 import CoreImage
+import Flutter
+import UIKit
 
 @main
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private static let videoChannelName = "com.cinelens.ios/video_grader"
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GeneratedPluginRegistrant.register(with: self)
-
-    if let controller = window?.rootViewController as? FlutterViewController {
-      let channel = FlutterMethodChannel(
-        name: "com.cinelens.ios/video_grader",
-        binaryMessenger: controller.binaryMessenger
-      )
-
-      channel.setMethodCallHandler { [weak self] call, result in
-        guard call.method == "applyCinemaMatrixToVideo",
-              let args = call.arguments as? [String: Any],
-              let inputPath = args["inputPath"] as? String,
-              let matrix = args["matrix"] as? [Double] else {
-          result(FlutterMethodNotImplemented)
-          return
-        }
-        let anamorphic = (args["anamorphic"] as? Bool) ?? false
-        self?.exportGradedVideo(
-          inputPath: inputPath,
-          matrix: matrix,
-          anamorphic: anamorphic,
-          result: result
-        )
-      }
-    }
-
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  /// UIScene lifecycle entry point for the implicit engine created by the storyboard.
+  ///
+  /// Plugins and application level method channels must be registered here instead of in
+  /// `application(_:didFinishLaunchingWithOptions:)`: UIKit no longer builds the window
+  /// during launch, so the `FlutterViewController` is not available at that point.
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    registerVideoGraderChannel(with: engineBridge.applicationRegistrar)
+  }
+
+  private func registerVideoGraderChannel(with registrar: FlutterApplicationRegistrar) {
+    let channel = FlutterMethodChannel(
+      name: AppDelegate.videoChannelName,
+      binaryMessenger: registrar.messenger()
+    )
+
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "applyCinemaMatrixToVideo",
+            let args = call.arguments as? [String: Any],
+            let inputPath = args["inputPath"] as? String,
+            let matrix = args["matrix"] as? [Double] else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+
+      let anamorphic = (args["anamorphic"] as? Bool) ?? false
+      self?.exportGradedVideo(
+        inputPath: inputPath,
+        matrix: matrix,
+        anamorphic: anamorphic,
+        result: result
+      )
+    }
   }
 
   private func exportGradedVideo(
