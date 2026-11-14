@@ -25,7 +25,12 @@ jobs:
           flutter create --platforms=ios .
 
       - name: 2. Build iOS Release Unsigned
-        run: flutter build ios --release --no-codesign
+        run: |
+          # Paksa mode manual agar Xcode tidak mencari Development Team / akun Apple
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/ProvisioningStyle = Automatic;/ProvisioningStyle = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
+          
+          flutter build ios --release --no-codesign --no-pub
 
       - name: 3. Pack to IPA
         run: |
