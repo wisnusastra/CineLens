@@ -17,7 +17,7 @@ class CinemaTone {
     required this.accentColorHex,
     required this.matrix,
     this.isCustom = false,
-  }) : assert(matrix.length == 20, 'Color matrix must have 20 elements');
+  }); 
 
   static const List<double> identityMatrix = <double>[
     1, 0, 0, 0, 0,
