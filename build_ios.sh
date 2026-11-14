@@ -32,13 +32,25 @@ if [ -d "/tmp/ios_backup/Assets.xcassets" ]; then
   cp -r /tmp/ios_backup/Assets.xcassets ios/Runner/Assets.xcassets
 fi
 
-echo "=== 4. Mengunduh Dependensi & Build iOS (No Codesign) ==="
+echo "=== 4. Mengunduh Dependensi & Menyiapkan Konfigurasi Xcode ==="
 flutter pub get
-flutter build ios --release --no-codesign
+flutter build ios --config-only --release --no-codesign
 
-echo "=== 5. Mengemas File .ipa ==="
+echo "=== 5. Build iOS Tanpa Code Signing via xcodebuild ==="
+xcodebuild -workspace ios/Runner.xcworkspace \
+  -scheme Runner \
+  -configuration Release \
+  -sdk iphoneos \
+  -derivedDataPath build/ios_xcode \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGNING_ALLOWED=NO \
+  DEVELOPMENT_TEAM="" \
+  build
+
+echo "=== 6. Mengemas File .ipa ==="
 mkdir -p build/ios/ipa/Payload
-cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+cp -r build/ios_xcode/Build/Products/Release-iphoneos/Runner.app build/ios/ipa/Payload/
 cd build/ios/ipa
 zip -r CineLens_iOS.ipa Payload
 echo "Build selesai: build/ios/ipa/CineLens_iOS.ipa"
