@@ -1,29 +1,44 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -e
 
 echo "=== 1. Mencadangkan Konfigurasi Native iOS, App Icon, & Splash Screen ==="
-mkdir -p /tmp/cinelens_ios_backup
-cp ios/Runner/Info.plist /tmp/cinelens_ios_backup/Info.plist
-cp ios/Runner/AppDelegate.swift /tmp/cinelens_ios_backup/AppDelegate.swift
-cp ios/Runner/Base.lproj/LaunchScreen.storyboard /tmp/cinelens_ios_backup/LaunchScreen.storyboard
-cp -R ios/Runner/Assets.xcassets/AppIcon.appiconset /tmp/cinelens_ios_backup/AppIcon.appiconset
+mkdir -p /tmp/ios_backup
 
-echo "=== 2. Membangkitkan Kerangka Proyek Xcode iOS ==="
-flutter create . --platforms=ios --org com.cinelens --project-name cinelens_ios
+if [ -f "ios/Runner/Info.plist" ]; then
+  cp ios/Runner/Info.plist /tmp/ios_backup/Info.plist
+  echo "Info.plist ditemukan dan dicadangkan."
+else
+  echo "Folder ios/ belum ada di repo, akan dibuat otomatis oleh Flutter."
+fi
 
-echo "=== 3. Memulihkan Native Bridge, Cinema App Icon, & Dark LaunchScreen ==="
-cp /tmp/cinelens_ios_backup/Info.plist ios/Runner/Info.plist
-cp /tmp/cinelens_ios_backup/AppDelegate.swift ios/Runner/AppDelegate.swift
-mkdir -p ios/Runner/Base.lproj
-cp /tmp/cinelens_ios_backup/LaunchScreen.storyboard ios/Runner/Base.lproj/LaunchScreen.storyboard
-rm -rf ios/Runner/Assets.xcassets/AppIcon.appiconset
-cp -R /tmp/cinelens_ios_backup/AppIcon.appiconset ios/Runner/Assets.xcassets/AppIcon.appiconset
+if [ -d "ios/Runner/Assets.xcassets" ]; then
+  cp -r ios/Runner/Assets.xcassets /tmp/ios_backup/Assets.xcassets
+fi
 
-echo "=== 4. Mengunduh Paket Flutter & CocoaPods iOS ==="
+echo "=== 2. Membuat Ulang Struktur Native iOS ==="
+flutter create --platforms=ios .
+
+echo "=== 3. Memulihkan atau Mengatur Konfigurasi Info.plist ==="
+if [ -f "/tmp/ios_backup/Info.plist" ]; then
+  cp /tmp/ios_backup/Info.plist ios/Runner/Info.plist
+else
+  /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'CineLens membutuhkan akses kamera untuk merekam dan memotret.'" ios/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'CineLens membutuhkan akses mikrofon untuk merekam audio video.'" ios/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 'CineLens membutuhkan izin menyimpan foto dan video ke galeri.'" ios/Runner/Info.plist || true
+fi
+
+if [ -d "/tmp/ios_backup/Assets.xcassets" ]; then
+  rm -rf ios/Runner/Assets.xcassets
+  cp -r /tmp/ios_backup/Assets.xcassets ios/Runner/Assets.xcassets
+fi
+
+echo "=== 4. Mengunduh Dependensi & Build iOS (No Codesign) ==="
 flutter pub get
-dart run flutter_launcher_icons
-cd ios && pod install && cd ..
+flutter build ios --release --no-codesign
 
-echo "=== SELESAI! Aplikasi CineLens iOS Siap Dijalankan / Dibuild ==="
-echo "• Jalankan langsung ke iPhone : flutter run --release"
-echo "• Buat installer .ipa iOS     : flutter build ipa --no-codesign"
+echo "=== 5. Mengemas File .ipa ==="
+mkdir -p build/ios/ipa/Payload
+cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+cd build/ios/ipa
+zip -r CineLens_iOS.ipa Payload
+echo "Build selesai: build/ios/ipa/CineLens_iOS.ipa"
