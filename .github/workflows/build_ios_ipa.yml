@@ -1,10 +1,9 @@
 name: Build CineLens iOS IPA
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build-ios:
@@ -16,15 +15,14 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
           cache: true
 
-      - name: Build & Kemas CineLens iOS IPA (Unsigned)
-        run: |
-          chmod +x build_ios.sh
-          ./build_ios.sh
+      - name: Build iOS IPA
+        run: bash build_ios.sh
 
-      - name: Upload CineLens iOS IPA Artifact
+      - name: Upload Artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: CineLens-iOS-IPA
