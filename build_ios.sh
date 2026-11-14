@@ -32,25 +32,23 @@ if [ -d "/tmp/ios_backup/Assets.xcassets" ]; then
   cp -r /tmp/ios_backup/Assets.xcassets ios/Runner/Assets.xcassets
 fi
 
-echo "=== 4. Mengunduh Dependensi & Menyiapkan Konfigurasi Xcode ==="
+echo "=== 4. Mengunduh Dependensi & Build iOS (No Codesign) ==="
 flutter pub get
-flutter build ios --config-only --release --no-codesign
+flutter build ios --release --no-codesign || true
 
-echo "=== 5. Build iOS Tanpa Code Signing via xcodebuild ==="
-xcodebuild -workspace ios/Runner.xcworkspace \
-  -scheme Runner \
-  -configuration Release \
-  -sdk iphoneos \
-  -derivedDataPath build/ios_xcode \
-  CODE_SIGN_IDENTITY="" \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGNING_ALLOWED=NO \
-  DEVELOPMENT_TEAM="" \
-  build
+echo "=== 5. Memverifikasi Hasil Kompilasi Runner.app ==="
+APP_PATH=$(find build/ios -name "Runner.app" -type d | head -n 1)
+
+if [ -z "$APP_PATH" ]; then
+  echo "ERROR: Runner.app tidak ditemukan. Silakan cek baris bertuliskan 'error:' di log Xcode bagian atas."
+  exit 1
+fi
+
+echo "Runner.app berhasil ditemukan di: $APP_PATH"
 
 echo "=== 6. Mengemas File .ipa ==="
 mkdir -p build/ios/ipa/Payload
-cp -r build/ios_xcode/Build/Products/Release-iphoneos/Runner.app build/ios/ipa/Payload/
+cp -r "$APP_PATH" build/ios/ipa/Payload/
 cd build/ios/ipa
 zip -r CineLens_iOS.ipa Payload
 echo "Build selesai: build/ios/ipa/CineLens_iOS.ipa"
