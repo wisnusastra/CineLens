@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/cinema_tone_preset_package.dart';
 import '../datasources/cinema_tones_preset_source.dart';
@@ -157,7 +157,42 @@ class CinemaCameraRepository {
     await prefs.setDouble(AppConstants.prefToneIntensity, intensity);
   }
 
+  /// Applies the cinematic LUT to a still and returns JPEG bytes.
+  ///
+  /// The native path keeps the full sensor resolution and encodes lossless
+  /// JPEG without ever materialising a PNG, which is what made large stills
+  /// slow and blurry. If the channel is unavailable the Dart renderer below
+  /// is used instead.
   Future<Uint8List> renderGradedImage({
+    required Uint8List rawBytes,
+    required List<double> colorMatrix,
+    required bool applyAnamorphicBars,
+  }) async {
+    try {
+      final graded = await _videoChannel.invokeMethod<Uint8List>(
+        'applyCinemaMatrixToPhoto',
+        <String, dynamic>{
+          'inputBytes': rawBytes,
+          'matrix': colorMatrix,
+          'anamorphic': applyAnamorphicBars,
+          'quality': 0.98,
+        },
+      );
+      if (graded != null && graded.isNotEmpty) return graded;
+    } on MissingPluginException {
+      // No native grader on this platform.
+    } on PlatformException {
+      // Fall through to the Dart renderer.
+    }
+
+    return _renderGradedImageInDart(
+      rawBytes: rawBytes,
+      colorMatrix: colorMatrix,
+      applyAnamorphicBars: applyAnamorphicBars,
+    );
+  }
+
+  Future<Uint8List> _renderGradedImageInDart({
     required Uint8List rawBytes,
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
@@ -222,6 +257,7 @@ class CinemaCameraRepository {
     required String rawVideoPath,
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
+    required int fps,
   }) async {
     try {
       final gradedPath = await _videoChannel.invokeMethod<String>(
@@ -230,6 +266,7 @@ class CinemaCameraRepository {
           'inputPath': rawVideoPath,
           'matrix': colorMatrix,
           'anamorphic': applyAnamorphicBars,
+          'fps': fps,
         },
       );
       if (gradedPath != null && gradedPath.isNotEmpty) {
@@ -246,6 +283,172 @@ class CinemaCameraRepository {
   Future<void> saveVideoToGallery(String videoPath) async {
     await _ensureGalleryPermission();
     await Gal.putVideo(videoPath, album: AppConstants.albumName);
+  }
+
+  // ------------------------------------------------------------ app gallery
+
+  /// Copies a capture into the app private library and indexes it.
+  ///
+  /// The gallery never depends on Apple Photos permissions: the bytes are
+  /// written under the documents directory and the metadata goes into
+  /// SharedPreferences.
+  Future<CapturedMedia> storePhoto({
+    required Uint8List jpegBytes,
+    required String toneId,
+    required String toneName,
+    required double intensity,
+    required bool isAnamorphic,
+  }) async {
+    final directory = await _mediaDirectory();
+    final createdAt = DateTime.now();
+    final id = 'photo_${createdAt.millisecondsSinceEpoch}';
+    final file = File('${directory.path}${Platform.pathSeparator}$id.jpg');
+    await file.writeAsBytes(jpegBytes, flush: true);
+
+    final media = CapturedMedia(
+      id: id,
+      type: CapturedMediaType.photo,
+      path: file.path,
+      createdAt: createdAt,
+      toneId: toneId,
+      toneName: toneName,
+      intensity: intensity,
+      isAnamorphic: isAnamorphic,
+    );
+    await _prependToLibrary(media);
+    return media;
+  }
+
+  Future<CapturedMedia> storeVideo({
+    required String sourcePath,
+    required String toneId,
+    required String toneName,
+    required double intensity,
+    required bool isAnamorphic,
+  }) async {
+    final directory = await _mediaDirectory();
+    final createdAt = DateTime.now();
+    final id = 'video_${createdAt.millisecondsSinceEpoch}';
+    final extension = sourcePath.toLowerCase().endsWith('.mov') ? 'mov' : 'mp4';
+    final target = File('${directory.path}${Platform.pathSeparator}$id.$extension');
+
+    final source = File(sourcePath);
+    if (await source.exists()) {
+      if (source.absolute.path != target.absolute.path) {
+        await source.copy(target.path);
+      }
+    }
+
+    final media = CapturedMedia(
+      id: id,
+      type: CapturedMediaType.video,
+      path: target.path,
+      createdAt: createdAt,
+      toneId: toneId,
+      toneName: toneName,
+      intensity: intensity,
+      isAnamorphic: isAnamorphic,
+    );
+    await _prependToLibrary(media);
+    return media;
+  }
+
+  Future<List<CapturedMedia>> loadCapturedMedia() async {
+    final prefs = await SharedPreferences.getInstance();
+    final rawJson = prefs.getString(AppConstants.prefMediaLibraryJson);
+    if (rawJson == null || rawJson.isEmpty) return [];
+
+    try {
+      final decoded = jsonDecode(rawJson);
+      if (decoded is! List) return [];
+
+      final entries = decoded
+          .whereType<Map<String, dynamic>>()
+          .map(CapturedMedia.tryParse)
+          .whereType<CapturedMedia>()
+          .toList();
+
+      // Drop entries whose file disappeared (for example after iOS cleaned
+      // the temporaries up).
+      final alive = <CapturedMedia>[];
+      for (final media in entries) {
+        if (await File(media.path).exists()) alive.add(media);
+      }
+      return alive;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> deleteCapturedMedia(CapturedMedia media) async {
+    final entries = await loadCapturedMedia();
+    final remaining = entries.where((entry) => entry.id != media.id).toList();
+    await _writeLibrary(remaining);
+
+    try {
+      final file = File(media.path);
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // The index is already updated; a stale file is harmless.
+    }
+  }
+
+  Future<Directory> _mediaDirectory() async {
+    final documents = await getApplicationDocumentsDirectory();
+    final directory = Directory(
+      '${documents.path}${Platform.pathSeparator}${AppConstants.mediaFolderName}',
+    );
+    if (!await directory.exists()) {
+      await directory.create(recursive: true);
+    }
+    return directory;
+  }
+
+  Future<void> _prependToLibrary(CapturedMedia media) async {
+    final entries = await loadCapturedMedia();
+    final updated = <CapturedMedia>[media, ...entries];
+
+    final dropped = updated.length > AppConstants.maxGalleryEntries
+        ? updated.sublist(AppConstants.maxGalleryEntries)
+        : const <CapturedMedia>[];
+
+    await _writeLibrary(
+      updated.take(AppConstants.maxGalleryEntries).toList(),
+    );
+
+    for (final old in dropped) {
+      try {
+        final file = File(old.path);
+        if (await file.exists()) await file.delete();
+      } catch (_) {
+        // Best effort cleanup.
+      }
+    }
+  }
+
+  Future<void> _writeLibrary(List<CapturedMedia> entries) async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = jsonEncode(entries.map((entry) => entry.toJson()).toList());
+    await prefs.setString(AppConstants.prefMediaLibraryJson, encoded);
+  }
+
+  // -------------------------------------------------------- capture settings
+
+  Future<({String? resolution, int? frameRate})> loadCaptureSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (
+      resolution: prefs.getString(AppConstants.prefCaptureResolution),
+      frameRate: prefs.getInt(AppConstants.prefCaptureFrameRate),
+    );
+  }
+
+  Future<void> saveCaptureSettings({
+    required String resolution,
+    required int frameRate,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(AppConstants.prefCaptureResolution, resolution);
+    await prefs.setInt(AppConstants.prefCaptureFrameRate, frameRate);
   }
 
   Future<void> _ensureGalleryPermission() async {

@@ -112,7 +112,7 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
           icon: const Icon(CupertinoIcons.back, color: Colors.white),
           onPressed: _close,
         ),
-        title: Text(_isVideo ? 'CINEMA REEL • 24FPS' : 'CINEMA STILL'),
+        title: Text(_isVideo ? 'CINEMA REEL' : 'CINEMA STILL'),
       ),
       body: SafeArea(
         child: Column(
@@ -124,10 +124,7 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
                   borderRadius: BorderRadius.circular(14),
                   child: _isVideo
                       ? _buildVideoPreview()
-                      : Image.memory(
-                          widget.args.imageBytes!,
-                          fit: BoxFit.contain,
-                        ),
+                      : _buildPhotoPreview(),
                 ),
               ),
             ),
@@ -154,7 +151,9 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Tersimpan di Apple Photos (${widget.args.tone.name})',
+                          widget.args.imageBytes != null || _isVideo
+                              ? 'Tersimpan di Apple Photos (${widget.args.tone.name})'
+                              : 'Tersimpan di galeri CineLens (${widget.args.tone.name})',
                           style: const TextStyle(
                             color: AppTheme.textPrimary,
                             fontSize: 13,
@@ -163,7 +162,7 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '${_isVideo ? '24fps Cinema Video' : widget.args.tone.filmReference} • Intensitas ${(widget.args.intensity * 100).round()}% • ${widget.args.isAnamorphic ? '2.39:1' : 'Full'}',
+                          '${_isVideo ? 'Cinema Reel' : widget.args.tone.filmReference} • Intensitas ${(widget.args.intensity * 100).round()}% • ${widget.args.isAnamorphic ? '2.39:1' : 'Full'}',
                           style: const TextStyle(
                             color: AppTheme.textSecondary,
                             fontSize: 11,
@@ -192,6 +191,32 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
         ),
       ),
     );
+  }
+
+  Widget _buildPhotoPreview() {
+    final bytes = widget.args.imageBytes;
+    if (bytes != null) {
+      return Image.memory(bytes, fit: BoxFit.contain);
+    }
+
+    final path = widget.args.imageFilePath;
+    if (path != null) {
+      return Image.file(
+        File(path),
+        fit: BoxFit.contain,
+        errorBuilder: (context, error, stackTrace) => const ColoredBox(
+          color: Colors.black,
+          child: Center(
+            child: Text(
+              'Foto tidak dapat dibuka.',
+              style: TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return const ColoredBox(color: Colors.black);
   }
 
   Widget _buildVideoPreview() {

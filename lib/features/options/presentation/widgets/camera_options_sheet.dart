@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../about/presentation/screens/about_screen.dart';
+import '../../../cinema_camera/presentation/providers/cinema_camera_provider.dart';
+import '../../../cinema_camera/presentation/providers/cinema_camera_state.dart';
 import '../../domain/entities/camera_options_state.dart';
 import '../providers/camera_options_provider.dart';
 
@@ -55,6 +57,9 @@ class CameraOptionsSheet extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final options = ref.watch(cameraOptionsProvider);
     final notifier = ref.read(cameraOptionsProvider.notifier);
+    final cameraState = ref.watch(cinemaCameraProvider).valueOrNull;
+    final cameraNotifier = ref.read(cinemaCameraProvider.notifier);
+    final isBusy = cameraState?.isRecordingVideo ?? false;
 
     return SafeArea(
       child: DraggableScrollableSheet(
@@ -103,6 +108,88 @@ class CameraOptionsSheet extends ConsumerWidget {
                 ],
               ),
               const SizedBox(height: 16),
+              if (cameraState != null) ...[
+                const Text(
+                  'RESOLUSI & FRAME RATE',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: CaptureResolution.values.map((value) {
+                    final selected = cameraState.resolution == value;
+                    return ChoiceChip(
+                      label: Text(value.label),
+                      selected: selected,
+                      selectedColor: Colors.amber,
+                      backgroundColor: const Color(0xFF222226),
+                      labelStyle: TextStyle(
+                        color: selected ? Colors.black : Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
+                      onSelected: isBusy
+                          ? null
+                          : (_) {
+                              if (options.hapticFeedback) {
+                                HapticFeedback.selectionClick();
+                              }
+                              _applyProfile(
+                                context,
+                                () => cameraNotifier.setResolution(value),
+                                'resolusi ${value.label}',
+                              );
+                            },
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  isBusy
+                      ? 'Resolusi tidak dapat diubah saat merekam.'
+                      : 'MAX memakai sensor penuh untuk foto. Video dibatasi 4K '
+                          'agar encoder iOS tetap stabil.',
+                  style: const TextStyle(color: Colors.white38, fontSize: 10),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: CaptureFrameRate.values.map((value) {
+                    final selected = cameraState.frameRate == value;
+                    return ChoiceChip(
+                      label: Text('${value.label} FPS'),
+                      selected: selected,
+                      selectedColor: Colors.amber,
+                      backgroundColor: const Color(0xFF222226),
+                      labelStyle: TextStyle(
+                        color: selected ? Colors.black : Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
+                      onSelected: isBusy
+                          ? null
+                          : (_) {
+                              if (options.hapticFeedback) {
+                                HapticFeedback.selectionClick();
+                              }
+                              _applyProfile(
+                                context,
+                                () => cameraNotifier.setFrameRate(value),
+                                'frame rate ${value.label} fps',
+                              );
+                            },
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 20),
+              ],
               const Text(
                 'PANDUAN GRID KOMPOSISI',
                 style: TextStyle(
@@ -271,5 +358,30 @@ class CameraOptionsSheet extends ConsumerWidget {
         },
       ),
     );
+  }
+
+  /// Keeps a failed session rebuild visible instead of silently doing nothing.
+  Future<void> _applyProfile(
+    BuildContext context,
+    Future<void> Function() action,
+    String label,
+  ) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      await action();
+    } catch (error) {
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text('Gagal mengganti $label: ${_describe(error)}'),
+          backgroundColor: const Color(0xFFB3261E),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  String _describe(Object error) {
+    final text = error.toString();
+    return text.startsWith('Exception: ') ? text.substring(11) : text;
   }
 }

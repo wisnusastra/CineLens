@@ -5,6 +5,55 @@ import '../../domain/services/color_matrix_builder.dart';
 
 enum CinemaCaptureMode { photo, video24fps }
 
+/// Output resolution offered to the user.
+///
+/// Photos and video are treated differently on purpose:
+/// * video is capped at 4K because the plugin's H.264/HEVC writer cannot
+///   encode a 12–48 MP sensor format, and
+/// * photos only reach the full sensor with [ResolutionPreset.max], because
+///   the iOS plugin turns `isHighResolutionPhotoEnabled` on **only** for that
+///   preset. That is why every still used to come out at 1080p.
+enum CaptureResolution {
+  fullHD('1080p', 'Full HD 1920×1080', ResolutionPreset.veryHigh),
+  uhd4K('4K', 'Ultra HD 3840×2160', ResolutionPreset.ultraHigh),
+  maxSensor('MAX', 'Sensor penuh (foto)', ResolutionPreset.max);
+
+  const CaptureResolution(this.label, this.description, this.preset);
+
+  final String label;
+  final String description;
+  final ResolutionPreset preset;
+
+  bool get isMaxSensor => this == CaptureResolution.maxSensor;
+
+  ResolutionPreset get photoPreset => preset;
+
+  ResolutionPreset get videoPreset =>
+      isMaxSensor ? ResolutionPreset.ultraHigh : preset;
+}
+
+/// Recording frame rate. The iOS plugin resolves the closest rate the active
+/// format actually supports, so an unsupported combination (for example
+/// 4K60 on older hardware) silently falls back instead of failing.
+enum CaptureFrameRate {
+  fps24(24, '24', 'Cinema'),
+  fps30(30, '30', 'Standard'),
+  fps60(60, '60', 'Smooth');
+
+  const CaptureFrameRate(this.value, this.label, this.description);
+
+  final int value;
+  final String label;
+  final String description;
+
+  static CaptureFrameRate fromValue(int? value) {
+    return CaptureFrameRate.values.firstWhere(
+      (rate) => rate.value == value,
+      orElse: () => CaptureFrameRate.fps24,
+    );
+  }
+}
+
 class CinemaCameraState {
   final List<CinemaTone> tones;
   final CinemaTone selectedTone;
@@ -23,6 +72,11 @@ class CinemaCameraState {
   final Duration recordingDuration;
   final Offset? focusPoint;
   final CustomGradeParameters? liveDraftParameters;
+  final CaptureResolution resolution;
+  final CaptureFrameRate frameRate;
+  final double zoomLevel;
+  final double minZoom;
+  final double maxZoom;
 
   const CinemaCameraState({
     required this.tones,
@@ -42,6 +96,11 @@ class CinemaCameraState {
     this.recordingDuration = Duration.zero,
     this.focusPoint,
     this.liveDraftParameters,
+    this.resolution = CaptureResolution.maxSensor,
+    this.frameRate = CaptureFrameRate.fps24,
+    this.zoomLevel = 1.0,
+    this.minZoom = 1.0,
+    this.maxZoom = 8.0,
   });
 
   List<double> get activeColorMatrix {
@@ -50,6 +109,11 @@ class CinemaCameraState {
     }
     return selectedTone.blendedMatrix(intensity);
   }
+
+  /// Label used by the viewfinder chips, e.g. `4K · 24FPS`.
+  String get qualityLabel => '${resolution.label} · ${frameRate.value}FPS';
+
+  bool get isZoomed => zoomLevel > minZoom + 0.01;
 
   CinemaCameraState copyWith({
     List<CinemaTone>? tones,
@@ -71,6 +135,11 @@ class CinemaCameraState {
     bool clearFocusPoint = false,
     CustomGradeParameters? liveDraftParameters,
     bool clearLiveDraft = false,
+    CaptureResolution? resolution,
+    CaptureFrameRate? frameRate,
+    double? zoomLevel,
+    double? minZoom,
+    double? maxZoom,
   }) {
     return CinemaCameraState(
       tones: tones ?? this.tones,
@@ -92,6 +161,11 @@ class CinemaCameraState {
       liveDraftParameters: clearLiveDraft
           ? null
           : (liveDraftParameters ?? this.liveDraftParameters),
+      resolution: resolution ?? this.resolution,
+      frameRate: frameRate ?? this.frameRate,
+      zoomLevel: zoomLevel ?? this.zoomLevel,
+      minZoom: minZoom ?? this.minZoom,
+      maxZoom: maxZoom ?? this.maxZoom,
     );
   }
 }

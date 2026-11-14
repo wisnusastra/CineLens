@@ -8,11 +8,22 @@ class AppConstants {
   static const String prefSelectedToneId = 'selected_cinema_tone_id';
   static const String prefToneIntensity = 'selected_cinema_intensity';
   static const String prefCustomTonesJson = 'custom_cinema_tones_json';
+  static const String prefCaptureResolution = 'capture_resolution_preset';
+  static const String prefCaptureFrameRate = 'capture_frame_rate';
+  static const String prefMediaLibraryJson = 'captured_media_library_json';
   static const String videoGraderChannel = 'com.cinelens.ios/video_grader';
 
   static const int presetJsonSchemaVersion = 1;
   static const double anamorphicAspectRatio = 2.39;
   static const int cinemaTargetFps = 24;
+
+  /// Folder inside the app documents directory that keeps a local copy of
+  /// every capture so the in-app gallery works without Photos permission.
+  static const String mediaFolderName = 'cinelens_media';
+
+  /// How many captures the gallery index keeps. Older entries are pruned from
+  /// the index (and their files deleted) so preferences cannot grow forever.
+  static const int maxGalleryEntries = 300;
 
   /// Orientations the app is allowed to rotate into.
   ///

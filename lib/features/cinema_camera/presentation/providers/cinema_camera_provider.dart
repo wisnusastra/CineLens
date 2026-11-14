@@ -1,16 +1,16 @@
 import 'dart:async';
 import 'dart:typed_data';
-import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../data/repositories/cinema_camera_repository_impl.dart';
+import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/services/color_matrix_builder.dart';
 import 'cinema_camera_state.dart';
 
-/// Outcome of stopping a 24fps recording.
+/// Outcome of stopping a recording.
 ///
 /// [path] always points at a playable file; [warning] is non-null when the LUT
 /// export or the Apple Photos upload failed but the raw footage survived.
@@ -19,6 +19,14 @@ class VideoStopResult {
   final String? warning;
 
   const VideoStopResult({required this.path, this.warning});
+}
+
+/// Outcome of a still capture. [bytes] is always safe to preview.
+class PhotoCaptureResult {
+  final Uint8List bytes;
+  final String? warning;
+
+  const PhotoCaptureResult({required this.bytes, this.warning});
 }
 
 final cinemaCameraRepositoryProvider = Provider<CinemaCameraRepository>((ref) {
@@ -39,6 +47,13 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   Timer? _recordingTimer;
   bool _disposed = false;
 
+  /// Profile the live controller was created with, used to skip needless
+  /// rebuilds when the user re-selects the same quality.
+  ResolutionPreset? _profilePreset;
+  int? _profileFps;
+  bool _isSwitchingProfile = false;
+  double _lastAppliedZoom = 1.0;
+
   CameraController? get controller => _controller;
 
   @override
@@ -56,10 +71,19 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final repository = ref.read(cinemaCameraRepositoryProvider);
     final tones = await repository.getAllTones();
     final savedPrefs = await repository.loadSavedPreferences();
+    final captureSettings = await repository.loadCaptureSettings();
 
     final selectedTone = tones.firstWhere(
       (t) => t.id == savedPrefs.toneId,
       orElse: () => tones.first,
+    );
+
+    final resolution = CaptureResolution.values.firstWhere(
+      (value) => value.name == captureSettings.resolution,
+      orElse: () => CaptureResolution.maxSensor,
+    );
+    final frameRate = CaptureFrameRate.fromValue(
+      captureSettings.frameRate ?? AppConstants.cinemaTargetFps,
     );
 
     _availableCameras = await availableCameras();
@@ -72,21 +96,63 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       orElse: () => _availableCameras.first,
     );
 
-    final exposureBounds = await _initializeCameraController(backCamera);
+    final bounds = await _initializeCameraController(
+      backCamera,
+      resolution: resolution,
+      frameRate: frameRate,
+      mode: CinemaCaptureMode.photo,
+    );
 
     return CinemaCameraState(
       tones: tones,
       selectedTone: selectedTone,
       intensity: savedPrefs.intensity,
-      minExposure: exposureBounds.min,
-      maxExposure: exposureBounds.max,
+      minExposure: bounds.minExposure,
+      maxExposure: bounds.maxExposure,
       lensDirection: backCamera.lensDirection,
+      resolution: resolution,
+      frameRate: frameRate,
+      zoomLevel: bounds.minZoom,
+      minZoom: bounds.minZoom,
+      maxZoom: bounds.maxZoom,
     );
   }
 
-  Future<({double min, double max})> _initializeCameraController(
-    CameraDescription cameraDescription,
-  ) async {
+  // -------------------------------------------------------------- profiles
+
+  /// Highest bitrate the encoder can be pushed to without refusing the file.
+  /// The stock plugin writes a very conservative stream, which is why 4K
+  /// footage looked soft once you zoomed.
+  int _videoBitrateFor(
+    CaptureResolution resolution,
+    CaptureFrameRate frameRate,
+  ) {
+    final base = resolution == CaptureResolution.fullHD ? 30000000 : 60000000;
+    return frameRate == CaptureFrameRate.fps60 ? base * 3 ~/ 2 : base;
+  }
+
+  ResolutionPreset _presetFor(
+    CaptureResolution resolution,
+    CinemaCaptureMode mode,
+  ) {
+    return mode == CinemaCaptureMode.photo
+        ? resolution.photoPreset
+        : resolution.videoPreset;
+  }
+
+  Future<
+      ({
+        double minExposure,
+        double maxExposure,
+        double minZoom,
+        double maxZoom,
+      })> _initializeCameraController(
+    CameraDescription cameraDescription, {
+    required CaptureResolution resolution,
+    required CaptureFrameRate frameRate,
+    required CinemaCaptureMode mode,
+  }) async {
+    final preset = _presetFor(resolution, mode);
     final previousController = _controller;
     _controller = null;
     if (previousController != null) {
@@ -99,9 +165,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     final newController = CameraController(
       cameraDescription,
-      ResolutionPreset.veryHigh,
+      preset,
       enableAudio: true,
-      fps: AppConstants.cinemaTargetFps,
+      fps: frameRate.value,
+      videoBitrate: _videoBitrateFor(resolution, frameRate),
+      audioBitrate: 192000,
       imageFormatGroup: ImageFormatGroup.bgra8888,
     );
 
@@ -111,16 +179,158 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final minExp = await newController.getMinExposureOffset();
     final maxExp = await newController.getMaxExposureOffset();
 
+    var minZoom = 1.0;
+    var maxZoom = 1.0;
+    try {
+      minZoom = await newController.getMinZoomLevel();
+      maxZoom = await newController.getMaxZoomLevel();
+    } catch (_) {
+      // Some front cameras report no zoom support.
+    }
+
     _controller = newController;
     _activeCamera = cameraDescription;
-    return (min: minExp, max: maxExp);
+    _profilePreset = preset;
+    _profileFps = frameRate.value;
+    _lastAppliedZoom = minZoom;
+    return (
+      minExposure: minExp,
+      maxExposure: maxExp,
+      minZoom: minZoom,
+      maxZoom: maxZoom,
+    );
   }
 
-  void setCaptureMode(CinemaCaptureMode mode) {
+  /// Switches mode, resolution or frame rate and rebuilds the capture session
+  /// only when the underlying profile actually changes.
+  ///
+  /// Photo mode runs at [ResolutionPreset.max] so the still output keeps the
+  /// full sensor, video mode is kept at 4K where the writer is reliable.
+  Future<void> applyCaptureProfile({
+    CinemaCaptureMode? mode,
+    CaptureResolution? resolution,
+    CaptureFrameRate? frameRate,
+  }) async {
     final current = state.valueOrNull;
-    if (current == null || current.isRecordingVideo) return;
-    state = AsyncData(current.copyWith(captureMode: mode));
+    final description = _activeCamera;
+    if (current == null || description == null || _isSwitchingProfile) return;
+    if (current.isRecordingVideo || current.isCapturing) return;
+
+    final nextMode = mode ?? current.captureMode;
+    final nextResolution = resolution ?? current.resolution;
+    final nextFrameRate = frameRate ?? current.frameRate;
+    final nextPreset = _presetFor(nextResolution, nextMode);
+
+    final needsRebuild = _controller == null ||
+        _profilePreset != nextPreset ||
+        _profileFps != nextFrameRate.value;
+
+    _isSwitchingProfile = true;
+    state = AsyncData(
+      current.copyWith(
+        captureMode: nextMode,
+        resolution: nextResolution,
+        frameRate: nextFrameRate,
+      ),
+    );
+
+    if (!needsRebuild) {
+      _isSwitchingProfile = false;
+      await _persistCaptureSettings(nextResolution, nextFrameRate);
+      return;
+    }
+
+    try {
+      final bounds = await _initializeCameraController(
+        description,
+        resolution: nextResolution,
+        frameRate: nextFrameRate,
+        mode: nextMode,
+      );
+      if (_disposed) return;
+
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(
+        latest.copyWith(
+          captureMode: nextMode,
+          resolution: nextResolution,
+          frameRate: nextFrameRate,
+          exposureOffset: 0.0,
+          minExposure: bounds.minExposure,
+          maxExposure: bounds.maxExposure,
+          zoomLevel: bounds.minZoom,
+          minZoom: bounds.minZoom,
+          maxZoom: bounds.maxZoom,
+          clearFocusPoint: true,
+        ),
+      );
+      await _persistCaptureSettings(nextResolution, nextFrameRate);
+    } catch (error) {
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(
+        latest.copyWith(
+          captureMode: current.captureMode,
+          resolution: current.resolution,
+          frameRate: current.frameRate,
+        ),
+      );
+      rethrow;
+    } finally {
+      _isSwitchingProfile = false;
+    }
   }
+
+  Future<void> _persistCaptureSettings(
+    CaptureResolution resolution,
+    CaptureFrameRate frameRate,
+  ) async {
+    try {
+      await ref.read(cinemaCameraRepositoryProvider).saveCaptureSettings(
+            resolution: resolution.name,
+            frameRate: frameRate.value,
+          );
+    } catch (_) {
+      // Preferences are best effort; the session already runs correctly.
+    }
+  }
+
+  Future<void> setCaptureMode(CinemaCaptureMode mode) {
+    return applyCaptureProfile(mode: mode);
+  }
+
+  Future<void> setResolution(CaptureResolution resolution) {
+    return applyCaptureProfile(resolution: resolution);
+  }
+
+  Future<void> setFrameRate(CaptureFrameRate frameRate) {
+    return applyCaptureProfile(frameRate: frameRate);
+  }
+
+  // ------------------------------------------------------------------ zoom
+
+  Future<void> setZoomLevel(double target) async {
+    final current = state.valueOrNull;
+    final cam = _controller;
+    if (current == null || cam == null || !cam.value.isInitialized) return;
+
+    final clamped = target.clamp(current.minZoom, current.maxZoom);
+    if ((clamped - current.zoomLevel).abs() > 0.001) {
+      state = AsyncData(current.copyWith(zoomLevel: clamped));
+    }
+    if ((clamped - _lastAppliedZoom).abs() < 0.004) return;
+
+    _lastAppliedZoom = clamped;
+    try {
+      await cam.setZoomLevel(clamped);
+    } catch (_) {
+      // Zoom can be rejected while the session is reconfiguring.
+    }
+  }
+
+  Future<void> resetZoom() =>
+      setZoomLevel(state.valueOrNull?.minZoom ?? 1.0);
+
+  // ------------------------------------------------------------ tones etc.
 
   void selectTone(CinemaTone tone) {
     final current = state.valueOrNull;
@@ -321,7 +531,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     state = AsyncData(current.copyWith(exposureOffset: clamped));
   }
 
-  Future<void> setFocusPoint(Offset normalizedPoint, Offset screenTapPosition) async {
+  Future<void> setFocusPoint(
+    Offset normalizedPoint,
+    Offset screenTapPosition,
+  ) async {
     final current = state.valueOrNull;
     final cam = _controller;
     if (current == null || cam == null || !cam.value.isInitialized) return;
@@ -345,6 +558,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final current = state.valueOrNull;
     if (current == null ||
         current.isRecordingVideo ||
+        _isSwitchingProfile ||
         _availableCameras.length < 2) {
       return;
     }
@@ -358,26 +572,42 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       orElse: () => _availableCameras.first,
     );
 
-    final bounds = await _initializeCameraController(targetCamera);
-    state = AsyncData(
-      current.copyWith(
-        lensDirection: targetDirection,
-        flashMode: FlashMode.off,
-        exposureOffset: 0.0,
-        minExposure: bounds.min,
-        maxExposure: bounds.max,
-        clearFocusPoint: true,
-      ),
-    );
+    _isSwitchingProfile = true;
+    try {
+      final bounds = await _initializeCameraController(
+        targetCamera,
+        resolution: current.resolution,
+        frameRate: current.frameRate,
+        mode: current.captureMode,
+      );
+      if (_disposed) return;
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(
+        latest.copyWith(
+          lensDirection: targetDirection,
+          flashMode: FlashMode.off,
+          exposureOffset: 0.0,
+          minExposure: bounds.minExposure,
+          maxExposure: bounds.maxExposure,
+          zoomLevel: bounds.minZoom,
+          minZoom: bounds.minZoom,
+          maxZoom: bounds.maxZoom,
+          clearFocusPoint: true,
+        ),
+      );
+    } finally {
+      _isSwitchingProfile = false;
+    }
   }
 
-  Future<Uint8List?> captureAndSavePhoto() async {
+  Future<PhotoCaptureResult?> captureAndSavePhoto() async {
     final current = state.valueOrNull;
     final cam = _controller;
     if (current == null ||
         cam == null ||
         !cam.value.isInitialized ||
-        current.isCapturing) {
+        current.isCapturing ||
+        _isSwitchingProfile) {
       return null;
     }
 
@@ -394,12 +624,33 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         applyAnamorphicBars: current.isAnamorphicRatio,
       );
 
-      await repository.saveImageToIosGallery(gradedBytes);
+      String? warning;
+      try {
+        await repository.storePhoto(
+          jpegBytes: gradedBytes,
+          toneId: current.selectedTone.id,
+          toneName: current.selectedTone.name,
+          intensity: current.intensity,
+          isAnamorphic: current.isAnamorphicRatio,
+        );
+      } catch (error) {
+        warning = 'Foto tidak masuk galeri CineLens: ${_describeError(error)}';
+      }
 
-      state = AsyncData(current.copyWith(isCapturing: false));
-      return gradedBytes;
+      try {
+        await repository.saveImageToIosGallery(gradedBytes);
+      } catch (error) {
+        final message =
+            'Gagal menyimpan ke Apple Photos: ${_describeError(error)}';
+        warning = warning == null ? message : '$warning · $message';
+      }
+
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(latest.copyWith(isCapturing: false));
+      return PhotoCaptureResult(bytes: gradedBytes, warning: warning);
     } catch (e) {
-      state = AsyncData(current.copyWith(isCapturing: false));
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(latest.copyWith(isCapturing: false));
       rethrow;
     }
   }
@@ -428,10 +679,16 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (!cam.value.isRecordingVideo) return cam;
 
     final description = _activeCamera;
-    if (description == null) return null;
+    final current = state.valueOrNull;
+    if (description == null || current == null) return null;
 
     try {
-      await _initializeCameraController(description);
+      await _initializeCameraController(
+        description,
+        resolution: current.resolution,
+        frameRate: current.frameRate,
+        mode: current.captureMode,
+      );
       cam = _controller;
       return cam;
     } catch (_) {
@@ -441,7 +698,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   Future<void> startVideo24fpsRecording() async {
     final current = state.valueOrNull;
-    if (current == null || current.isRecordingVideo) return;
+    if (current == null || current.isRecordingVideo || _isSwitchingProfile) {
+      return;
+    }
 
     final cam = await _ensureControllerIdle();
     if (cam == null || !cam.value.isInitialized) {
@@ -480,7 +739,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     });
   }
 
-  /// Stops the 24fps recording and always leaves the UI in a usable state.
+  /// Stops the recording and always leaves the UI in a usable state.
   ///
   /// Returns `null` only when no usable file exists (the system already
   /// dropped the recording); otherwise the returned path is always playable,
@@ -527,10 +786,25 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         rawVideoPath: rawPath,
         colorMatrix: current.activeColorMatrix,
         applyAnamorphicBars: current.isAnamorphicRatio,
+        fps: current.frameRate.value,
       );
     } catch (error) {
       finalPath = rawPath;
       warning = 'LUT gagal diterapkan: ${_describeError(error)}';
+    }
+
+    try {
+      await repository.storeVideo(
+        sourcePath: finalPath,
+        toneId: current.selectedTone.id,
+        toneName: current.selectedTone.name,
+        intensity: current.intensity,
+        isAnamorphic: current.isAnamorphicRatio,
+      );
+    } catch (error) {
+      final message = 'Video tidak masuk galeri CineLens: '
+          '${_describeError(error)}';
+      warning = warning == null ? message : '$warning · $message';
     }
 
     try {
@@ -589,10 +863,30 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     try {
       final file = await cam.stopVideoRecording();
       final repository = ref.read(cinemaCameraRepositoryProvider);
+      try {
+        await repository.storeVideo(
+          sourcePath: file.path,
+          toneId: current.selectedTone.id,
+          toneName: current.selectedTone.name,
+          intensity: current.intensity,
+          isAnamorphic: current.isAnamorphicRatio,
+        );
+      } catch (_) {
+        // The gallery index is best effort here.
+      }
       await repository.saveVideoToGallery(file.path);
     } catch (_) {
       // Nothing was written, or the system already aborted the file.
     }
+  }
+
+  /// Loads the local gallery index. Used by the gallery screen.
+  Future<List<CapturedMedia>> loadCapturedMedia() {
+    return ref.read(cinemaCameraRepositoryProvider).loadCapturedMedia();
+  }
+
+  Future<void> deleteCapturedMedia(CapturedMedia media) {
+    return ref.read(cinemaCameraRepositoryProvider).deleteCapturedMedia(media);
   }
 
   String _describeError(Object error) {

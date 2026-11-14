@@ -11,6 +11,9 @@ class ToneSelectorStrip extends StatelessWidget {
   final VoidCallback onOpenCustomCreator;
   final ValueChanged<CinemaTone>? onDeleteCustomTone;
 
+  /// Shorter cards used in landscape, where the tray must stay out of the way.
+  final bool compact;
+
   const ToneSelectorStrip({
     super.key,
     required this.tones,
@@ -18,12 +21,16 @@ class ToneSelectorStrip extends StatelessWidget {
     required this.onToneSelected,
     required this.onOpenCustomCreator,
     this.onDeleteCustomTone,
+    this.compact = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final cardHeight = compact ? 52.0 : 76.0;
+    final cardPadding = compact ? 8.0 : 10.0;
+
     return SizedBox(
-      height: 76,
+      height: cardHeight,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -37,8 +44,8 @@ class ToneSelectorStrip extends StatelessWidget {
                 onOpenCustomCreator();
               },
               child: Container(
-                width: 92,
-                padding: const EdgeInsets.all(10),
+                width: compact ? 74 : 92,
+                padding: EdgeInsets.all(cardPadding),
                 decoration: BoxDecoration(
                   color: AppTheme.surfaceDark,
                   borderRadius: BorderRadius.circular(12),
@@ -87,8 +94,8 @@ class ToneSelectorStrip extends StatelessWidget {
                 : null,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              width: 122,
-              padding: const EdgeInsets.all(10),
+              width: compact ? 104 : 122,
+              padding: EdgeInsets.all(cardPadding),
               decoration: BoxDecoration(
                 color: isSelected
                     ? AppTheme.cinemaAmber.withValues(alpha: 0.18)
@@ -133,16 +140,20 @@ class ToneSelectorStrip extends StatelessWidget {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    tone.isCustom ? '★ ${tone.filmReference}' : tone.filmReference,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: AppTheme.textSecondary,
-                      fontSize: 10,
+                  if (!compact) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      tone.isCustom
+                          ? '★ ${tone.filmReference}'
+                          : tone.filmReference,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 10,
+                      ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ),
