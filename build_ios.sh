@@ -13,7 +13,7 @@ if [ -d "ios/Runner/Assets.xcassets" ]; then
   cp -r ios/Runner/Assets.xcassets /tmp/ios_backup/Assets.xcassets
 fi
 
-echo "=== 2. Siapkan Struktur Native iOS ==="
+echo "=== 2. Siapkan Struktur Native iOS & Orientasi Landscape ==="
 flutter create --platforms=ios .
 
 if [ -f "/tmp/ios_backup/Info.plist" ]; then
@@ -23,6 +23,13 @@ else
   /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'CineLens membutuhkan akses mikrofon untuk merekam audio video.'" ios/Runner/Info.plist || true
   /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 'CineLens membutuhkan izin menyimpan foto dan video ke galeri.'" ios/Runner/Info.plist || true
 fi
+
+# Aktifkan Portrait, Landscape Left, dan Landscape Right pada iPhone
+/usr/libexec/PlistBuddy -c "Delete :UISupportedInterfaceOrientations" ios/Runner/Info.plist || true
+/usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations array" ios/Runner/Info.plist
+/usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationPortrait" ios/Runner/Info.plist
+/usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeLeft" ios/Runner/Info.plist
+/usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:2 string UIInterfaceOrientationLandscapeRight" ios/Runner/Info.plist
 
 if [ -d "/tmp/ios_backup/Assets.xcassets" ]; then
   rm -rf ios/Runner/Assets.xcassets
