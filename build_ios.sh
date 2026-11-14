@@ -1,25 +1,21 @@
 #!/bin/bash
 set -e
 
-echo "=== 1. Membersihkan Sisa Build Lama & Mencadangkan Konfigurasi iOS ==="
+echo "=== 1. Bersihkan Build Lama & Cadangkan Konfigurasi iOS ==="
 rm -rf build/ios
 mkdir -p /tmp/ios_backup
 
 if [ -f "ios/Runner/Info.plist" ]; then
   cp ios/Runner/Info.plist /tmp/ios_backup/Info.plist
-  echo "Info.plist ditemukan dan dicadangkan."
-else
-  echo "Folder ios/ belum ada di repo, akan dibuat otomatis oleh Flutter."
 fi
 
 if [ -d "ios/Runner/Assets.xcassets" ]; then
   cp -r ios/Runner/Assets.xcassets /tmp/ios_backup/Assets.xcassets
 fi
 
-echo "=== 2. Membuat Ulang Struktur Native iOS ==="
+echo "=== 2. Siapkan Struktur Native iOS ==="
 flutter create --platforms=ios .
 
-echo "=== 3. Memulihkan atau Mengatur Konfigurasi Info.plist ==="
 if [ -f "/tmp/ios_backup/Info.plist" ]; then
   cp /tmp/ios_backup/Info.plist ios/Runner/Info.plist
 else
@@ -33,38 +29,53 @@ if [ -d "/tmp/ios_backup/Assets.xcassets" ]; then
   cp -r /tmp/ios_backup/Assets.xcassets ios/Runner/Assets.xcassets
 fi
 
-echo "=== 4. Mengunduh Dependensi & Build iOS Release (No Codesign) ==="
+sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
+sed -i '' 's/ProvisioningStyle = Automatic;/ProvisioningStyle = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
+
+echo "=== 3. Cek Dependensi, Kode Dart & Aset ==="
 flutter pub get
-flutter build ios --release --no-codesign || true
+flutter build bundle --release
+flutter build ios --config-only --release --no-codesign
 
-echo "=== 5. Memverifikasi Kelengkapan Runner.app ==="
-APP_PATH="build/ios/iphoneos/Runner.app"
+echo "=== 4. Kompilasi iOS Release (Unsigned) ==="
+BUILD_OUTPUT_DIR="$(pwd)/build/ios"
 
-if [ ! -f "$APP_PATH/Runner" ]; then
-  echo "ERROR: Binary utama Runner.app/Runner tidak ditemukan. Cek pesan error Dart/Flutter di atas."
+xcodebuild \
+  -workspace ios/Runner.xcworkspace \
+  -scheme Runner \
+  -configuration Release \
+  -sdk iphoneos \
+  -destination "generic/platform=iOS" \
+  BUILD_DIR="$BUILD_OUTPUT_DIR" \
+  VERBOSE_SCRIPT_LOGGING=YES \
+  COMPILER_INDEX_STORE_ENABLE=NO \
+  CODE_SIGN_STYLE=Manual \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGNING_ALLOWED=NO \
+  DEVELOPMENT_TEAM="" \
+  PROVISIONING_PROFILE_SPECIFIER="" \
+  build
+
+echo "=== 5. Verifikasi Binary & Kemas File .ipa ==="
+APP_PATH="$BUILD_OUTPUT_DIR/Release-iphoneos/Runner.app"
+
+if [ ! -f "$APP_PATH/Runner" ] || [ ! -d "$APP_PATH/Frameworks/Flutter.framework" ]; then
+  echo "ERROR: Runner.app tidak lengkap di $APP_PATH"
   exit 1
 fi
 
-if [ ! -d "$APP_PATH/Frameworks/Flutter.framework" ] || [ ! -d "$APP_PATH/Frameworks/App.framework" ]; then
-  echo "ERROR: Flutter.framework atau App.framework tidak ditemukan di dalam Runner.app!"
-  exit 1
-fi
-
-echo "Runner.app lengkap ditemukan di: $APP_PATH"
-du -sh "$APP_PATH"
-
-echo "=== 6. Mengemas & Memvalidasi Ukuran File .ipa ==="
-mkdir -p build/ios/ipa/Payload
-cp -r "$APP_PATH" build/ios/ipa/Payload/
-cd build/ios/ipa
+mkdir -p "$BUILD_OUTPUT_DIR/ipa/Payload"
+cp -r "$APP_PATH" "$BUILD_OUTPUT_DIR/ipa/Payload/"
+cd "$BUILD_OUTPUT_DIR/ipa"
 zip -ry CineLens_iOS.ipa Payload
 
 IPA_SIZE_KB=$(du -k CineLens_iOS.ipa | cut -f1)
 echo "Ukuran akhir CineLens_iOS.ipa: ${IPA_SIZE_KB} KB"
 
 if [ "$IPA_SIZE_KB" -lt 5000 ]; then
-  echo "ERROR: Ukuran .ipa terlalu kecil (${IPA_SIZE_KB} KB), hasil kompilasi tidak utuh!"
+  echo "ERROR: Ukuran .ipa terlalu kecil (${IPA_SIZE_KB} KB)."
   exit 1
 fi
 
-echo "Build sukses dan valid: build/ios/ipa/CineLens_iOS.ipa"
+echo "SUKSES: build/ios/ipa/CineLens_iOS.ipa siap diunduh."
