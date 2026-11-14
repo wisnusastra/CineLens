@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-echo "=== 1. Mencadangkan Konfigurasi Native iOS, App Icon, & Splash Screen ==="
+echo "=== 1. Membersihkan Sisa Build Lama & Mencadangkan Konfigurasi iOS ==="
+rm -rf build/ios
 mkdir -p /tmp/ios_backup
 
 if [ -f "ios/Runner/Info.plist" ]; then
@@ -32,41 +33,27 @@ if [ -d "/tmp/ios_backup/Assets.xcassets" ]; then
   cp -r /tmp/ios_backup/Assets.xcassets ios/Runner/Assets.xcassets
 fi
 
-echo "=== 4. Mengunduh Dependensi & Konfigurasi Flutter iOS ==="
+echo "=== 4. Mengunduh Dependensi & Build iOS Release (No Codesign) ==="
 flutter pub get
-flutter build ios --config-only --release --no-codesign
+flutter build ios --release --no-codesign || true
 
-echo "=== 5. Kompilasi Release iOS via xcodebuild (Tanpa Signing) ==="
-xcodebuild -workspace ios/Runner.xcworkspace \
-  -scheme Runner \
-  -configuration Release \
-  -sdk iphoneos \
-  CODE_SIGN_STYLE=Manual \
-  CODE_SIGN_IDENTITY="" \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGNING_ALLOWED=NO \
-  DEVELOPMENT_TEAM="" \
-  PROVISIONING_PROFILE_SPECIFIER="" \
-  build
+echo "=== 5. Memverifikasi Kelengkapan Runner.app ==="
+APP_PATH="build/ios/iphoneos/Runner.app"
 
-echo "=== 6. Memverifikasi Binary & Frameworks di Dalam Runner.app ==="
-APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData build/ios -name "Runner.app" -path "*/Release-iphoneos/Runner.app" -type d 2>/dev/null | head -n 1)
-
-if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-  echo "ERROR: Binary utama Runner.app/Runner tidak ditemukan!"
+if [ ! -f "$APP_PATH/Runner" ]; then
+  echo "ERROR: Binary utama Runner.app/Runner tidak ditemukan. Cek pesan error Dart/Flutter di atas."
   exit 1
 fi
 
-if [ ! -d "$APP_PATH/Frameworks/Flutter.framework" ]; then
-  echo "ERROR: Flutter.framework tidak ditemukan di dalam Runner.app!"
+if [ ! -d "$APP_PATH/Frameworks/Flutter.framework" ] || [ ! -d "$APP_PATH/Frameworks/App.framework" ]; then
+  echo "ERROR: Flutter.framework atau App.framework tidak ditemukan di dalam Runner.app!"
   exit 1
 fi
 
-echo "Runner.app valid ditemukan di: $APP_PATH"
+echo "Runner.app lengkap ditemukan di: $APP_PATH"
 du -sh "$APP_PATH"
 
-echo "=== 7. Mengemas & Memvalidasi Ukuran File .ipa ==="
-rm -rf build/ios/ipa
+echo "=== 6. Mengemas & Memvalidasi Ukuran File .ipa ==="
 mkdir -p build/ios/ipa/Payload
 cp -r "$APP_PATH" build/ios/ipa/Payload/
 cd build/ios/ipa
@@ -76,7 +63,7 @@ IPA_SIZE_KB=$(du -k CineLens_iOS.ipa | cut -f1)
 echo "Ukuran akhir CineLens_iOS.ipa: ${IPA_SIZE_KB} KB"
 
 if [ "$IPA_SIZE_KB" -lt 5000 ]; then
-  echo "ERROR: Ukuran .ipa terlalu kecil (${IPA_SIZE_KB} KB), build belum lengkap!"
+  echo "ERROR: Ukuran .ipa terlalu kecil (${IPA_SIZE_KB} KB), hasil kompilasi tidak utuh!"
   exit 1
 fi
 
