@@ -55,14 +55,18 @@ class CinematicViewfinderOverlay extends ConsumerWidget {
                         left: 0,
                         right: 0,
                         height: barH,
-                        child: Container(color: Colors.black.withOpacity(0.72)),
+                        child: Container(
+                          color: Colors.black.withValues(alpha: 0.72),
+                        ),
                       ),
                       Positioned(
                         bottom: 0,
                         left: 0,
                         right: 0,
                         height: barH,
-                        child: Container(color: Colors.black.withOpacity(0.72)),
+                        child: Container(
+                          color: Colors.black.withValues(alpha: 0.72),
+                        ),
                       ),
                     ],
                     if (barW > 0) ...[
@@ -71,14 +75,18 @@ class CinematicViewfinderOverlay extends ConsumerWidget {
                         bottom: 0,
                         left: 0,
                         width: barW,
-                        child: Container(color: Colors.black.withOpacity(0.72)),
+                        child: Container(
+                          color: Colors.black.withValues(alpha: 0.72),
+                        ),
                       ),
                       Positioned(
                         top: 0,
                         bottom: 0,
                         right: 0,
                         width: barW,
-                        child: Container(color: Colors.black.withOpacity(0.72)),
+                        child: Container(
+                          color: Colors.black.withValues(alpha: 0.72),
+                        ),
                       ),
                     ],
                     Center(
@@ -87,7 +95,7 @@ class CinematicViewfinderOverlay extends ConsumerWidget {
                         height: frameH,
                         decoration: BoxDecoration(
                           border: Border.all(
-                            color: Colors.amberAccent.withOpacity(0.45),
+                            color: Colors.amberAccent.withValues(alpha: 0.45),
                             width: 1,
                           ),
                         ),
@@ -101,38 +109,48 @@ class CinematicViewfinderOverlay extends ConsumerWidget {
             SafeArea(
               child: Align(
                 alignment: Alignment.topLeft,
-                child: Container(
-                  margin: const EdgeInsets.all(14),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.55),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.white24),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.fiber_manual_record,
-                        color: Colors.amber,
-                        size: 10,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        '${isLandscape ? "LANDSCAPE" : "PORTRAIT"}  •  '
-                        '${options.aspectRatio.label.toUpperCase()}  •  '
-                        'LUT: ${activeToneName.toUpperCase()}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.6,
+                child: Padding(
+                  // Starts below the two 40px action buttons in the top-left
+                  // corner (12 padding + 40 button + 10 gap) so the telemetry
+                  // line can never overlap them or the top-right icons.
+                  padding: const EdgeInsets.fromLTRB(14, 62, 14, 0),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.fiber_manual_record,
+                          color: Colors.amber,
+                          size: 10,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            '${isLandscape ? "LANDSCAPE" : "PORTRAIT"}  •  '
+                            '${options.aspectRatio.label.toUpperCase()}  •  '
+                            'LUT: ${activeToneName.toUpperCase()}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.6,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -151,7 +169,7 @@ class _GridOverlayPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = Colors.white.withOpacity(0.35)
+      ..color = Colors.white.withValues(alpha: 0.35)
       ..strokeWidth = 0.9;
 
     if (gridType == GridOverlayType.ruleOfThirds) {

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/constants/app_constants.dart';
 import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../domain/entities/cinema_tone.dart';
@@ -30,9 +31,21 @@ class CameraScreen extends ConsumerStatefulWidget {
 class _CameraScreenState extends ConsumerState<CameraScreen> {
   bool _isCapturingPhoto = false;
   bool _isTogglingVideo = false;
+  bool _orientationLocked = false;
 
   CinemaCameraNotifier get _notifier =>
       ref.read(cinemaCameraProvider.notifier);
+
+  @override
+  void dispose() {
+    if (_orientationLocked) {
+      // Never leave the rest of the app stuck in the recording orientation.
+      SystemChrome.setPreferredOrientations(
+        AppConstants.supportedOrientations,
+      );
+    }
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -517,29 +530,79 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     final state = ref.read(cinemaCameraProvider).valueOrNull;
     if (state == null) return;
 
+    final wasRecording = state.isRecordingVideo;
     setState(() => _isTogglingVideo = true);
     try {
-      if (state.isRecordingVideo) {
-        final path = await _notifier.stopVideo24fpsRecording();
-        if (!mounted || path == null) return;
+      if (wasRecording) {
+        final result = await _notifier.stopVideo24fpsRecording();
+        await _unlockOrientation();
+        if (!mounted) return;
+
+        if (result == null) {
+          _toast(
+            'Rekaman tidak dapat disimpan. Silakan rekam ulang.',
+            isError: true,
+          );
+          return;
+        }
+        if (result.warning != null) _toast(result.warning!);
 
         context.push(
           '/preview',
           extra: CapturedPreviewArgs.video(
-            videoFilePath: path,
+            videoFilePath: result.path,
             tone: state.selectedTone,
             intensity: state.intensity,
             isAnamorphic: state.isAnamorphicRatio,
           ),
         );
       } else {
+        await _lockOrientationForRecording();
+        if (!mounted) return;
         await _notifier.startVideo24fpsRecording();
       }
     } catch (error) {
+      await _unlockOrientation();
       _toast('Gagal merekam video: ${_describe(error)}', isError: true);
     } finally {
       if (mounted) setState(() => _isTogglingVideo = false);
     }
+  }
+
+  /// Locks the UI to the orientation the phone is held in.
+  ///
+  /// The camera plugin samples the *physical* device orientation and cannot
+  /// change it once recording started, so letting the UI keep rotating while
+  /// filming is what produces a "upright frame with a tilted video". The
+  /// plugin's own value is preferred over `MediaQuery.orientation` because the
+  /// latter still reports the previous orientation right after a turn.
+  Future<void> _lockOrientationForRecording() async {
+    final deviceOrientation = _notifier.controller?.value.deviceOrientation;
+
+    final bool lockLandscape;
+    if (deviceOrientation == DeviceOrientation.landscapeLeft ||
+        deviceOrientation == DeviceOrientation.landscapeRight) {
+      lockLandscape = true;
+    } else if (deviceOrientation == DeviceOrientation.portraitUp ||
+        deviceOrientation == DeviceOrientation.portraitDown) {
+      lockLandscape = false;
+    } else {
+      lockLandscape =
+          MediaQuery.of(context).orientation == Orientation.landscape;
+    }
+
+    _orientationLocked = true;
+    await SystemChrome.setPreferredOrientations(
+      lockLandscape ? AppConstants.landscapeOnly : AppConstants.portraitOnly,
+    );
+  }
+
+  Future<void> _unlockOrientation() async {
+    if (!_orientationLocked) return;
+    _orientationLocked = false;
+    await SystemChrome.setPreferredOrientations(
+      AppConstants.supportedOrientations,
+    );
   }
 
   Future<void> _switchCamera() async {

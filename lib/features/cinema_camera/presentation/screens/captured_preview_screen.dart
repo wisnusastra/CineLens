@@ -18,47 +18,101 @@ class CapturedPreviewScreen extends StatefulWidget {
 class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
   VideoPlayerController? _videoController;
   bool _isVideoReady = false;
+  bool _isInitializingVideo = false;
+  String? _videoError;
+
+  bool get _isVideo => widget.args.mediaType == MediaCaptureType.video;
 
   @override
   void initState() {
     super.initState();
-    if (widget.args.mediaType == MediaCaptureType.video &&
-        widget.args.videoFilePath != null) {
+    if (_isVideo && widget.args.videoFilePath != null) {
       _initVideoPlayer(widget.args.videoFilePath!);
-    }
-  }
-
-  Future<void> _initVideoPlayer(String path) async {
-    final controller = VideoPlayerController.file(File(path));
-    await controller.initialize();
-    await controller.setLooping(true);
-    await controller.play();
-    if (mounted) {
-      setState(() {
-        _videoController = controller;
-        _isVideoReady = true;
-      });
     }
   }
 
   @override
   void dispose() {
+    // Pause before disposing: leaving a player running while the camera
+    // session is re-created is what made the preview keep "playing on its own".
+    _videoController?.pause();
     _videoController?.dispose();
+    _videoController = null;
     super.dispose();
+  }
+
+  Future<void> _initVideoPlayer(String path) async {
+    if (_isInitializingVideo) return;
+    _isInitializingVideo = true;
+
+    final previous = _videoController;
+    _videoController = null;
+
+    if (mounted) {
+      setState(() {
+        _isVideoReady = false;
+        _videoError = null;
+      });
+    }
+
+    try {
+      await previous?.pause();
+      await previous?.dispose();
+    } catch (_) {
+      // Ignore teardown failures of the previous controller.
+    }
+
+    final controller = VideoPlayerController.file(File(path));
+    try {
+      await controller.initialize();
+      // Muted playback keeps the iOS audio session on the camera capture
+      // category instead of switching it to playback.
+      await controller.setVolume(0);
+      await controller.setLooping(true);
+      await controller.play();
+
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+      setState(() {
+        _videoController = controller;
+        _isVideoReady = true;
+        _videoError = null;
+      });
+    } catch (error) {
+      await controller.dispose();
+      if (!mounted) return;
+      setState(() {
+        _videoController = null;
+        _isVideoReady = false;
+        _videoError = _describeVideoError(error);
+      });
+    } finally {
+      _isInitializingVideo = false;
+    }
+  }
+
+  String _describeVideoError(Object error) {
+    final text = error.toString();
+    return text.startsWith('Exception: ') ? text.substring(11) : text;
+  }
+
+  void _close() {
+    _videoController?.pause();
+    context.pop();
   }
 
   @override
   Widget build(BuildContext context) {
-    final isVideo = widget.args.mediaType == MediaCaptureType.video;
-
     return Scaffold(
       backgroundColor: AppTheme.backgroundBlack,
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(CupertinoIcons.back, color: Colors.white),
-          onPressed: () => context.pop(),
+          onPressed: _close,
         ),
-        title: Text(isVideo ? 'CINEMA REEL • 24FPS' : 'CINEMA STILL'),
+        title: Text(_isVideo ? 'CINEMA REEL • 24FPS' : 'CINEMA STILL'),
       ),
       body: SafeArea(
         child: Column(
@@ -68,7 +122,7 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
                 padding: const EdgeInsets.all(16),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(14),
-                  child: isVideo
+                  child: _isVideo
                       ? _buildVideoPreview()
                       : Image.memory(
                           widget.args.imageBytes!,
@@ -109,7 +163,7 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '${isVideo ? '24fps Cinema Video' : widget.args.tone.filmReference} • Intensitas ${(widget.args.intensity * 100).round()}% • ${widget.args.isAnamorphic ? '2.39:1' : 'Full'}',
+                          '${_isVideo ? '24fps Cinema Video' : widget.args.tone.filmReference} • Intensitas ${(widget.args.intensity * 100).round()}% • ${widget.args.isAnamorphic ? '2.39:1' : 'Full'}',
                           style: const TextStyle(
                             color: AppTheme.textSecondary,
                             fontSize: 11,
@@ -126,9 +180,9 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
               child: SizedBox(
                 width: double.infinity,
                 child: CupertinoButton.filled(
-                  onPressed: () => context.pop(),
+                  onPressed: _close,
                   child: Text(
-                    isVideo ? 'Rekam Adegan Berikutnya' : 'Ambil Foto Lainnya',
+                    _isVideo ? 'Rekam Adegan Berikutnya' : 'Ambil Foto Lainnya',
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
@@ -141,40 +195,92 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
   }
 
   Widget _buildVideoPreview() {
-    final controller = _videoController;
-    if (!_isVideoReady || controller == null) {
-      return const Center(
-        child: CupertinoActivityIndicator(color: AppTheme.cinemaAmber),
+    if (_videoError != null) {
+      return ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.videocam_off_rounded,
+                  color: Colors.white54,
+                  size: 42,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Video tidak dapat diputar.\n$_videoError',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+                const SizedBox(height: 14),
+                CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  onPressed: () {
+                    final path = widget.args.videoFilePath;
+                    if (path != null) _initVideoPlayer(path);
+                  },
+                  child: const Text(
+                    'Coba lagi',
+                    style: TextStyle(color: AppTheme.cinemaAmber),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       );
     }
 
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          controller.value.isPlaying ? controller.pause() : controller.play();
-        });
-      },
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          AspectRatio(
+    final controller = _videoController;
+    if (!_isVideoReady || controller == null) {
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: CupertinoActivityIndicator(color: AppTheme.cinemaAmber),
+        ),
+      );
+    }
+
+    return ColoredBox(
+      color: Colors.black,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          setState(() {
+            if (controller.value.isPlaying) {
+              controller.pause();
+            } else {
+              controller.play();
+            }
+          });
+        },
+        child: Center(
+          child: AspectRatio(
             aspectRatio: controller.value.aspectRatio,
-            child: VideoPlayer(controller),
-          ),
-          if (!controller.value.isPlaying)
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: const BoxDecoration(
-                color: Colors.black54,
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                CupertinoIcons.play_fill,
-                color: Colors.white,
-                size: 36,
-              ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                VideoPlayer(controller),
+                if (!controller.value.isPlaying)
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: const BoxDecoration(
+                      color: Colors.black54,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      CupertinoIcons.play_fill,
+                      color: Colors.white,
+                      size: 36,
+                    ),
+                  ),
+              ],
             ),
-        ],
+          ),
+        ),
       ),
     );
   }

@@ -214,14 +214,15 @@ class CinemaCameraRepository {
     );
   }
 
-  Future<String> renderAndSaveGradedVideo({
+  /// Exports a LUT-graded copy of [rawVideoPath] and returns its path.
+  ///
+  /// Falls back to [rawVideoPath] when the native grader is unavailable
+  /// (for example a simulator build or a platform without the channel).
+  Future<String> renderGradedVideo({
     required String rawVideoPath,
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
   }) async {
-    await _ensureGalleryPermission();
-
-    String finalVideoPath = rawVideoPath;
     try {
       final gradedPath = await _videoChannel.invokeMethod<String>(
         'applyCinemaMatrixToVideo',
@@ -232,14 +233,19 @@ class CinemaCameraRepository {
         },
       );
       if (gradedPath != null && gradedPath.isNotEmpty) {
-        finalVideoPath = gradedPath;
+        return gradedPath;
       }
     } on MissingPluginException {
-      finalVideoPath = rawVideoPath;
+      // No native grader on this platform.
+    } on PlatformException {
+      // Native export failed; the raw footage is still usable.
     }
+    return rawVideoPath;
+  }
 
-    await Gal.putVideo(finalVideoPath, album: AppConstants.albumName);
-    return finalVideoPath;
+  Future<void> saveVideoToGallery(String videoPath) async {
+    await _ensureGalleryPermission();
+    await Gal.putVideo(videoPath, album: AppConstants.albumName);
   }
 
   Future<void> _ensureGalleryPermission() async {

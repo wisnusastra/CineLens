@@ -1,3 +1,5 @@
+import 'package:flutter/services.dart';
+
 class AppConstants {
   AppConstants._();
 
@@ -11,4 +13,23 @@ class AppConstants {
   static const int presetJsonSchemaVersion = 1;
   static const double anamorphicAspectRatio = 2.39;
   static const int cinemaTargetFps = 24;
+
+  /// Orientations the app is allowed to rotate into.
+  ///
+  /// Keep this in sync with `UISupportedInterfaceOrientations` in
+  /// `ios/Runner/Info.plist`; iOS intersects both lists.
+  static const List<DeviceOrientation> supportedOrientations = [
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ];
+
+  static const List<DeviceOrientation> portraitOnly = [
+    DeviceOrientation.portraitUp,
+  ];
+
+  static const List<DeviceOrientation> landscapeOnly = [
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ];
 }
