@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== 0. Sinkronisasi Otomatis Seluruh File Modul Flutter ==="
+echo "=== 0. Sinkronisasi Otomatis File & Dependensi Flutter ==="
 if [ -d "features" ] && [ -d "lib/features" ]; then
   rm -rf features
 fi
@@ -1555,3 +1555,449 @@ class _CameraScreenState extends ConsumerState<CameraScreen>
       behavior: HitTestBehavior.opaque,
       onTapDown: (details) => _onTapToFocus(details, constraints),
       child: ColorFiltered(
+        colorFilter: ColorFilter.matrix(activeToneMatrix),
+        child: SizedBox.expand(
+          child: FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: isLandscape ? previewSize.width : previewSize.height,
+              height: isLandscape ? previewSize.height : previewSize.width,
+              child: CameraPreview(_controller!),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPortraitControls(
+    CinemaCameraState cameraState,
+    bool hapticEnabled,
+  ) {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 18),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.bottomCenter,
+              end: Alignment.topCenter,
+              colors: [
+                Colors.black.withOpacity(0.85),
+                Colors.black.withOpacity(0.35),
+                Colors.transparent,
+              ],
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                height: 36,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  itemCount: cameraState.presets.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (context, index) {
+                    final preset = cameraState.presets[index];
+                    final selected = index == cameraState.selectedToneIndex;
+                    return GestureDetector(
+                      onTap: () {
+                        if (hapticEnabled) HapticFeedback.selectionClick();
+                        ref
+                            .read(cinemaCameraProvider.notifier)
+                            .selectTone(index);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: selected
+                              ? Colors.amber
+                              : Colors.black.withOpacity(0.55),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: selected ? Colors.amber : Colors.white24,
+                          ),
+                        ),
+                        child: Text(
+                          preset.name,
+                          style: TextStyle(
+                            color: selected ? Colors.black : Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 14),
+              _buildModeSwitcher(cameraState, hapticEnabled),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  const SizedBox(width: 48),
+                  _buildShutterButton(cameraState),
+                  _buildCircleActionButton(
+                    icon: Icons.cameraswitch_rounded,
+                    color: Colors.white,
+                    size: 24,
+                    onTap: _switchCamera,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLandscapeControls(
+    CinemaCameraState cameraState,
+    bool hapticEnabled,
+  ) {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: Container(
+          width: 190,
+          margin: const EdgeInsets.only(top: 52, right: 8, bottom: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.62),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: ListView.separated(
+                  itemCount: cameraState.presets.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 6),
+                  itemBuilder: (context, index) {
+                    final preset = cameraState.presets[index];
+                    final selected = index == cameraState.selectedToneIndex;
+                    return GestureDetector(
+                      onTap: () {
+                        if (hapticEnabled) HapticFeedback.selectionClick();
+                        ref
+                            .read(cinemaCameraProvider.notifier)
+                            .selectTone(index);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 7,
+                        ),
+                        decoration: BoxDecoration(
+                          color: selected
+                              ? Colors.amber
+                              : Colors.white.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          preset.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: selected ? Colors.black : Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(width: 10),
+              Column(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _buildCircleActionButton(
+                    icon: Icons.cameraswitch_rounded,
+                    color: Colors.white,
+                    size: 20,
+                    onTap: _switchCamera,
+                  ),
+                  _buildShutterButton(cameraState, diameter: 64),
+                  GestureDetector(
+                    onTap: () {
+                      if (hapticEnabled) HapticFeedback.selectionClick();
+                      ref
+                          .read(cinemaCameraProvider.notifier)
+                          .setVideoMode(!cameraState.isVideoMode);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white12,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        cameraState.isVideoMode ? 'VIDEO' : 'FOTO',
+                        style: const TextStyle(
+                          color: Colors.amberAccent,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeSwitcher(
+    CinemaCameraState cameraState,
+    bool hapticEnabled,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.6),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildModeChip(
+            label: 'FOTO',
+            selected: !cameraState.isVideoMode,
+            onTap: () {
+              if (hapticEnabled) HapticFeedback.selectionClick();
+              ref.read(cinemaCameraProvider.notifier).setVideoMode(false);
+            },
+          ),
+          _buildModeChip(
+            label: 'VIDEO',
+            selected: cameraState.isVideoMode,
+            onTap: () {
+              if (hapticEnabled) HapticFeedback.selectionClick();
+              ref.read(cinemaCameraProvider.notifier).setVideoMode(true);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModeChip({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected ? Colors.amber : Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.black : Colors.white70,
+            fontWeight: FontWeight.bold,
+            fontSize: 12,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShutterButton(
+    CinemaCameraState cameraState, {
+    double diameter = 74,
+  }) {
+    final isVideo = cameraState.isVideoMode;
+    final isRecording = cameraState.isRecording;
+
+    return GestureDetector(
+      onTap: _handleShutterPressed,
+      child: Container(
+        width: diameter,
+        height: diameter,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 4),
+        ),
+        child: Center(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            width: isRecording ? diameter * 0.42 : diameter * 0.78,
+            height: isRecording ? diameter * 0.42 : diameter * 0.78,
+            decoration: BoxDecoration(
+              color: isVideo ? Colors.redAccent : Colors.white,
+              borderRadius: BorderRadius.circular(
+                isRecording ? 8 : diameter,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCircleActionButton({
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+    double size = 22,
+  }) {
+    return Material(
+      color: Colors.black.withOpacity(0.55),
+      shape: const CircleBorder(
+        side: BorderSide(color: Colors.white24, width: 1),
+      ),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(11),
+          child: Icon(icon, color: color, size: size),
+        ),
+      ),
+    );
+  }
+}
+DART_FILE_EOF
+
+PKG_NAME=$(grep '^name:' pubspec.yaml | awk '{print $2}' | tr -d '\r')
+if [ -f "test/widget_test.dart" ] && [ -n "$PKG_NAME" ]; then
+  cat << DART_TEST_EOF > test/widget_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:${PKG_NAME}/main.dart';
+
+void main() {
+  testWidgets('CineLensApp smoke test', (WidgetTester tester) async {
+    await tester.pumpWidget(const ProviderScope(child: CineLensApp()));
+    expect(find.byType(CineLensApp), findsOneWidget);
+  });
+}
+DART_TEST_EOF
+fi
+
+echo "=== 1. Bersihkan Build Lama & Cadangkan Konfigurasi iOS ==="
+rm -rf build/ios
+mkdir -p /tmp/ios_backup
+
+if [ -f "ios/Runner/Info.plist" ]; then
+  cp ios/Runner/Info.plist /tmp/ios_backup/Info.plist
+fi
+
+if [ -d "ios/Runner/Assets.xcassets" ]; then
+  cp -r ios/Runner/Assets.xcassets /tmp/ios_backup/Assets.xcassets
+fi
+
+echo "=== 2. Siapkan Struktur Native iOS & Orientasi Landscape ==="
+flutter create --platforms=ios .
+
+if [ -f "/tmp/ios_backup/Info.plist" ]; then
+  cp /tmp/ios_backup/Info.plist ios/Runner/Info.plist
+else
+  /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'CineLens membutuhkan akses kamera untuk merekam dan memotret.'" ios/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'CineLens membutuhkan akses mikrofon untuk merekam audio video.'" ios/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 'CineLens membutuhkan izin menyimpan foto dan video ke galeri.'" ios/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string 'CineLens membutuhkan akses galeri untuk menyimpan foto dan video.'" ios/Runner/Info.plist || true
+fi
+
+/usr/libexec/PlistBuddy -c "Delete :UISupportedInterfaceOrientations" ios/Runner/Info.plist || true
+/usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations array" ios/Runner/Info.plist
+/usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationPortrait" ios/Runner/Info.plist
+/usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeLeft" ios/Runner/Info.plist
+/usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:2 string UIInterfaceOrientationLandscapeRight" ios/Runner/Info.plist
+
+if [ -d "/tmp/ios_backup/Assets.xcassets" ]; then
+  rm -rf ios/Runner/Assets.xcassets
+  cp -r /tmp/ios_backup/Assets.xcassets ios/Runner/Assets.xcassets
+fi
+
+if [ -f "ios/Podfile" ]; then
+  sed -i '' "s/# platform :ios, '12.0'/platform :ios, '14.0'/g" ios/Podfile
+  sed -i '' "s/platform :ios, '12.0'/platform :ios, '14.0'/g" ios/Podfile
+  sed -i '' "s/platform :ios, '13.0'/platform :ios, '14.0'/g" ios/Podfile
+fi
+
+sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
+sed -i '' 's/ProvisioningStyle = Automatic;/ProvisioningStyle = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
+
+echo "=== 3. Pastikan Dependensi & Kompilasi Bundle Dart ==="
+for pkg in flutter_riverpod camera gal share_plus; do
+  if ! grep -q "^[[:space:]]*${pkg}:" pubspec.yaml; then
+    echo "Menambahkan paket yang belum terdaftar di pubspec.yaml: $pkg"
+    flutter pub add "$pkg"
+  fi
+done
+
+flutter pub get
+flutter build bundle --release
+flutter build ios --config-only --release --no-codesign
+
+echo "=== 4. Kompilasi iOS Release (Unsigned) ==="
+BUILD_OUTPUT_DIR="$(pwd)/build/ios"
+
+xcodebuild \
+  -workspace ios/Runner.xcworkspace \
+  -scheme Runner \
+  -configuration Release \
+  -sdk iphoneos \
+  -destination "generic/platform=iOS" \
+  BUILD_DIR="$BUILD_OUTPUT_DIR" \
+  SYMROOT="$BUILD_OUTPUT_DIR" \
+  VERBOSE_SCRIPT_LOGGING=YES \
+  COMPILER_INDEX_STORE_ENABLE=NO \
+  CODE_SIGN_STYLE=Manual \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGNING_ALLOWED=NO \
+  DEVELOPMENT_TEAM="" \
+  PROVISIONING_PROFILE_SPECIFIER="" \
+  build
+
+echo "=== 5. Verifikasi Binary & Kemas File .ipa ==="
+APP_PATH="$BUILD_OUTPUT_DIR/Release-iphoneos/Runner.app"
+if [ ! -d "$APP_PATH" ]; then
+  APP_PATH=$(find "$BUILD_OUTPUT_DIR" ~/Library/Developer/Xcode/DerivedData -name "Runner.app" -path "*Release-iphoneos*" 2>/dev/null | head -n 1)
+fi
+
+if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+  echo "ERROR: Runner.app tidak ditemukan setelah xcodebuild."
+  find "$BUILD_OUTPUT_DIR" -maxdepth 4 || true
+  exit 1
+fi
+
+echo "Runner.app ditemukan di: $APP_PATH"
+mkdir -p "$BUILD_OUTPUT_DIR/ipa/Payload"
+cp -r "$APP_PATH" "$BUILD_OUTPUT_DIR/ipa/Payload/"
+cd "$BUILD_OUTPUT_DIR/ipa"
+zip -ry CineLens_iOS.ipa Payload
+
+IPA_SIZE_KB=$(du -k CineLens_iOS.ipa | cut -f1)
+echo "Ukuran akhir CineLens_iOS.ipa: ${IPA_SIZE_KB} KB"
+
+if [ "$IPA_SIZE_KB" -lt 5000 ]; then
+  echo "ERROR: Ukuran .ipa terlalu kecil (${IPA_SIZE_KB} KB)."
+  exit 1
+fi
+
+echo "SUKSES: build/ios/ipa/CineLens_iOS.ipa siap diunduh."
