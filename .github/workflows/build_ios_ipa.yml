@@ -18,11 +18,24 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Build iOS IPA
-        run: bash build_ios.sh
+      - name: 1. Get Dependencies & Generate iOS
+        run: |
+          flutter pub get
+          rm -rf build/ios
+          flutter create --platforms=ios .
+
+      - name: 2. Build iOS Release Unsigned
+        run: flutter build ios --release --no-codesign
+
+      - name: 3. Pack to IPA
+        run: |
+          mkdir -p build/ios/ipa/Payload
+          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          cd build/ios/ipa
+          zip -ry CineLens_iOS.ipa Payload
+          ls -lh CineLens_iOS.ipa
 
       - name: Upload Artifact
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: CineLens-iOS-IPA
