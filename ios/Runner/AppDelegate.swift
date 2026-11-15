@@ -43,6 +43,9 @@ import UIKit
   private var proResPreviousPreset: AVCaptureSession.Preset?
   private var proResPreviousFrameDurations: (min: CMTime, max: CMTime)?
   private var proResAudioInput: AVCaptureDeviceInput?
+  private var proResRecordingURL: URL?
+  private var proResDidStart = false
+  private var proResStartAttempts = 0
 
   /// The LUTs shipped with the app were authored for Flutter's
   /// `ColorFilter.matrix`, which runs on gamma-encoded sRGB values with the
@@ -859,9 +862,50 @@ import UIKit
       for: connection
     )
 
+    proResStartResult = result
+    proResOutput = output
+    proResRecordingURL = url
+    proResDidStart = false
+    proResStartAttempts = 0
+
+    // Switching to the 10-bit format makes the session reconfigure in the
+    // background. Starting the movie file output before the connection is
+    // active makes iOS fail the take with "Cannot Record", so wait for it.
+    waitUntilProResReady(session: session, connection: connection) { [weak self] in
+      self?.launchProResRecording()
+    }
+  }
+
+  /// Polls (max ~2 s) until the session is running and the ProRes connection
+  /// is live, then calls `completion` either way so a take is always attempted.
+  private func waitUntilProResReady(
+    session: AVCaptureSession,
+    connection: AVCaptureConnection,
+    attempt: Int = 0,
+    completion: @escaping () -> Void
+  ) {
+    let ready = session.isRunning && !session.isInterrupted && connection.isActive
+    if ready || attempt >= 14 {
+      completion()
+      return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+      self?.waitUntilProResReady(
+        session: session,
+        connection: connection,
+        attempt: attempt + 1,
+        completion: completion
+      )
+    }
+  }
+
+  private func launchProResRecording() {
+    guard let output = proResOutput, let url = proResRecordingURL else { return }
+
     let delegate = ProResRecordingDelegate(
       onStart: { [weak self] in
         guard let self = self else { return }
+        self.proResDidStart = true
         self.proResStartResult?(true)
         self.proResStartResult = nil
         // Reconfiguring the device drops the manual locks.
@@ -871,11 +915,23 @@ import UIKit
         self?.finishProResRecording(url: fileURL, error: error)
       }
     )
-
-    proResStartResult = result
-    proResOutput = output
     proResDelegate = delegate
+    try? FileManager.default.removeItem(at: url)
     output.startRecording(to: url, recordingDelegate: delegate)
+  }
+
+  /// Human-readable error including domain, code and reason, so a failure such
+  /// as "Cannot Record" can be traced to its actual AVFoundation cause.
+  private func describeRecordingError(_ error: Error) -> String {
+    let ns = error as NSError
+    var text = "\(ns.localizedDescription) [\(ns.domain) \(ns.code)]"
+    if let reason = ns.localizedFailureReason {
+      text += " - \(reason)"
+    }
+    if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+      text += " (\(underlying.domain) \(underlying.code))"
+    }
+    return text
   }
 
   private func stopProResRecording(result: @escaping FlutterResult) {
@@ -919,6 +975,30 @@ import UIKit
 
   /// Called by the recording delegate once the `.mov` is closed on disk.
   private func finishProResRecording(url: URL?, error: Error?) {
+    // The take failed before it ever started: retry up to twice. The first
+    // retry drops the microphone input (it can clash with the plugin's own
+    // audio session); both retries give the session more time to settle.
+    if error != nil,
+       !proResDidStart,
+       proResStartAttempts < 2,
+       proResStartResult != nil,
+       proResOutput != nil,
+       let session = activeSession {
+      proResStartAttempts += 1
+      if let audioInput = proResAudioInput {
+        session.beginConfiguration()
+        if session.inputs.contains(where: { $0 === audioInput }) {
+          session.removeInput(audioInput)
+        }
+        session.commitConfiguration()
+        proResAudioInput = nil
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+        self?.launchProResRecording()
+      }
+      return
+    }
+
     let startResult = proResStartResult
     let stopResult = proResStopResult
     proResStartResult = nil
@@ -934,6 +1014,9 @@ import UIKit
     proResOutput = nil
     proResDelegate = nil
     proResAudioInput = nil
+    proResRecordingURL = nil
+    proResDidStart = false
+    proResStartAttempts = 0
 
     var failure: Error? = error
     if let error = error,
@@ -947,7 +1030,7 @@ import UIKit
     if let failure = failure {
       let flutterError = FlutterError(
         code: "record_failed",
-        message: failure.localizedDescription,
+        message: describeRecordingError(failure),
         details: nil
       )
       startResult?(flutterError)
