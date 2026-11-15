@@ -46,6 +46,9 @@ import UIKit
   private var proResRecordingURL: URL?
   private var proResDidStart = false
   private var proResStartAttempts = 0
+  /// ProRes goes through `AVAssetWriter` (see `ProResWriterTake`); the legacy
+  /// `AVCaptureMovieFileOutput` path stays only as dead code behind this flag.
+  private let proResUsesWriter = true
   // Fallback ProRes path (AVAssetWriter fed by the plugin's video frames).
   private var writerTake: ProResWriterTake?
   private var writerAudioSession: AVCaptureSession?
@@ -702,6 +705,22 @@ import UIKit
     let height = (args["height"] as? NSNumber)?.intValue ?? 1080
     let requestedFrameRate = (args["fps"] as? NSNumber)?.doubleValue ?? 24
 
+    if proResUsesWriter {
+      // AVCaptureMovieFileOutput cannot share the plugin's session (iOS fails
+      // with -11803 and the preview freezes), so ProRes is written from the
+      // plugin's own frames. No format switch, no extra capture output.
+      if !startProResWriterFallback(session: session, result: result) {
+        result(
+          FlutterError(
+            code: "no_video_output",
+            message: "Output video kamera tidak ditemukan untuk ProRes.",
+            details: nil
+          )
+        )
+      }
+      return
+    }
+
     guard let format = proResFormat(
       for: device,
       width: width,
@@ -959,9 +978,12 @@ import UIKit
       return false
     }
 
-    let original = dataOutput.sampleBufferDelegate
-    let queue = dataOutput.sampleBufferCallbackQueue
-      ?? DispatchQueue(label: "cinelens.prores.video")
+    // Without the plugin's own delegate there is nothing to forward frames to,
+    // and taking over would freeze the preview.
+    guard let original = dataOutput.sampleBufferDelegate,
+          let queue = dataOutput.sampleBufferCallbackQueue else {
+      return false
+    }
 
     var audioSession: AVCaptureSession?
     var audioOutput: AVCaptureAudioDataOutput?
@@ -1734,8 +1756,12 @@ final class ProResRecordingDelegate: NSObject,
 ///
 /// It is installed as the sample-buffer delegate of the plugin's
 /// `AVCaptureVideoDataOutput` and forwards every callback to the original
-/// delegate first, so the live preview is unaffected. Audio comes from a
-/// separate audio-only capture session whose buffers share the same clock.
+/// delegate first, so the live preview is unaffected. Each frame is copied into
+/// a buffer from the writer's own pool before it is handed to the encoder:
+/// holding on to the capture buffers themselves starves the camera's small
+/// buffer pool and freezes the preview (worst at 4K). Frames are dropped, never
+/// queued, when the encoder falls behind. Audio comes from a separate
+/// audio-only capture session whose buffers share the same clock.
 final class ProResWriterTake: NSObject,
   AVCaptureVideoDataOutputSampleBufferDelegate,
   AVCaptureAudioDataOutputSampleBufferDelegate {
@@ -1749,8 +1775,11 @@ final class ProResWriterTake: NSObject,
   private let lock = NSLock()
   private var writer: AVAssetWriter?
   private var videoInput: AVAssetWriterInput?
+  private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
   private var audioInput: AVAssetWriterInput?
   private var sessionStart: CMTime?
+  private var frameWidth = 0
+  private var frameHeight = 0
   private var finishing = false
   private var failure: Error?
 
@@ -1772,6 +1801,7 @@ final class ProResWriterTake: NSObject,
     from connection: AVCaptureConnection
   ) {
     if output is AVCaptureVideoDataOutput {
+      // The preview must always get the frame first.
       original?.captureOutput?(output, didOutput: sampleBuffer, from: connection)
       handleVideo(sampleBuffer)
     } else {
@@ -1788,22 +1818,23 @@ final class ProResWriterTake: NSObject,
   }
 
   private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
-    guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+    guard CMSampleBufferDataIsReady(sampleBuffer),
+          let source = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
     lock.lock()
     defer { lock.unlock() }
     if finishing || failure != nil { return }
 
     let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    let width = CVPixelBufferGetWidth(source)
+    let height = CVPixelBufferGetHeight(source)
 
     if writer == nil {
-      guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-        return
-      }
       do {
         try startWriter(
-          width: CVPixelBufferGetWidth(pixelBuffer),
-          height: CVPixelBufferGetHeight(pixelBuffer),
+          width: width,
+          height: height,
+          pixelFormat: CVPixelBufferGetPixelFormatType(source),
           firstPTS: pts
         )
       } catch {
@@ -1816,18 +1847,35 @@ final class ProResWriterTake: NSObject,
 
     guard let writer = writer,
           let input = videoInput,
-          writer.status == .writing else {
-      if let writerError = writer?.error, failure == nil {
+          let adaptor = adaptor else { return }
+
+    if writer.status == .failed {
+      if failure == nil, let writerError = writer.error {
         failure = writerError
         onFailure?(writerError)
       }
       return
     }
 
-    if input.isReadyForMoreMediaData, !input.append(sampleBuffer) {
-      if failure == nil {
-        failure = writer.error
-        if let writerError = writer.error { onFailure?(writerError) }
+    // Drop frames the encoder is not ready for, or whose size changed (for
+    // example after a rotation), instead of blocking the camera.
+    guard writer.status == .writing,
+          input.isReadyForMoreMediaData,
+          width == frameWidth,
+          height == frameHeight,
+          let pool = adaptor.pixelBufferPool else { return }
+
+    var copy: CVPixelBuffer?
+    guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &copy) == kCVReturnSuccess,
+          let destination = copy,
+          ProResWriterTake.copyPixels(from: source, to: destination) else {
+      return
+    }
+
+    if !adaptor.append(destination, withPresentationTime: pts), failure == nil {
+      if let writerError = writer.error {
+        failure = writerError
+        onFailure?(writerError)
       }
     }
   }
@@ -1851,8 +1899,68 @@ final class ProResWriterTake: NSObject,
     }
   }
 
+  /// Plane-by-plane copy that tolerates different row strides.
+  private static func copyPixels(
+    from source: CVPixelBuffer,
+    to destination: CVPixelBuffer
+  ) -> Bool {
+    CVPixelBufferLockBaseAddress(source, .readOnly)
+    CVPixelBufferLockBaseAddress(destination, [])
+    defer {
+      CVPixelBufferUnlockBaseAddress(destination, [])
+      CVPixelBufferUnlockBaseAddress(source, .readOnly)
+    }
+
+    func copyRows(
+      _ from: UnsafeMutableRawPointer?,
+      _ fromStride: Int,
+      _ to: UnsafeMutableRawPointer?,
+      _ toStride: Int,
+      rows: Int
+    ) -> Bool {
+      guard let from = from, let to = to else { return false }
+      if fromStride == toStride {
+        memcpy(to, from, fromStride * rows)
+      } else {
+        let bytes = min(fromStride, toStride)
+        for row in 0..<rows {
+          memcpy(to + row * toStride, from + row * fromStride, bytes)
+        }
+      }
+      return true
+    }
+
+    if CVPixelBufferIsPlanar(source) {
+      let planes = CVPixelBufferGetPlaneCount(source)
+      guard planes == CVPixelBufferGetPlaneCount(destination) else { return false }
+      for plane in 0..<planes {
+        guard copyRows(
+          CVPixelBufferGetBaseAddressOfPlane(source, plane),
+          CVPixelBufferGetBytesPerRowOfPlane(source, plane),
+          CVPixelBufferGetBaseAddressOfPlane(destination, plane),
+          CVPixelBufferGetBytesPerRowOfPlane(destination, plane),
+          rows: CVPixelBufferGetHeightOfPlane(source, plane)
+        ) else { return false }
+      }
+      return true
+    }
+
+    return copyRows(
+      CVPixelBufferGetBaseAddress(source),
+      CVPixelBufferGetBytesPerRow(source),
+      CVPixelBufferGetBaseAddress(destination),
+      CVPixelBufferGetBytesPerRow(destination),
+      rows: CVPixelBufferGetHeight(source)
+    )
+  }
+
   /// Caller must hold `lock`.
-  private func startWriter(width: Int, height: Int, firstPTS: CMTime) throws {
+  private func startWriter(
+    width: Int,
+    height: Int,
+    pixelFormat: OSType,
+    firstPTS: CMTime
+  ) throws {
     try? FileManager.default.removeItem(at: url)
     let newWriter = try AVAssetWriter(outputURL: url, fileType: .mov)
 
@@ -1870,11 +1978,23 @@ final class ProResWriterTake: NSObject,
         domain: "CineLens.ProRes",
         code: 1,
         userInfo: [
-          NSLocalizedDescriptionKey: "Writer menolak input video ProRes."
+          NSLocalizedDescriptionKey:
+            "Perangkat ini tidak bisa menulis video ProRes 422."
         ]
       )
     }
     newWriter.add(video)
+
+    // Must exist before `startWriting()` so the writer builds its buffer pool.
+    let newAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+      assetWriterInput: video,
+      sourcePixelBufferAttributes: [
+        kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
+        kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()
+      ]
+    )
 
     if wantsAudio {
       let settings: [String: Any] = audioSettings ?? [
@@ -1904,7 +2024,10 @@ final class ProResWriterTake: NSObject,
 
     writer = newWriter
     videoInput = video
+    adaptor = newAdaptor
     sessionStart = firstPTS
+    frameWidth = width
+    frameHeight = height
   }
 
   /// Abandons the take without producing a file.
@@ -1913,7 +2036,9 @@ final class ProResWriterTake: NSObject,
     finishing = true
     let current = writer
     lock.unlock()
-    current?.cancelWriting()
+    if current?.status == .writing {
+      current?.cancelWriting()
+    }
     try? FileManager.default.removeItem(at: url)
   }
 
