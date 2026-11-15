@@ -86,6 +86,21 @@ jobs:
           path: build/ios/ipa/CineLens_iOS.ipa
           if-no-files-found: error
 
+      # Artifacts need a signed-in session to download. A release asset does
+      # not, so the newest IPA is also published to a rolling `latest-ipa`
+      # release that anyone can open in a browser.
+      - name: Publish IPA to latest-ipa release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh release view latest-ipa >/dev/null 2>&1 || \
+            gh release create latest-ipa \
+              --title "CineLens iOS IPA (latest)" \
+              --notes "Unsigned IPA built from the latest main build. Sideload with AltStore/Sideloadly."
+          gh release upload latest-ipa build/ios/ipa/CineLens_iOS.ipa --clobber
+
       # Action logs are only readable while signed in, so the tail of every log
       # is pushed to the `ci-debug` branch to keep failures diagnosable.
       - name: Publish failure log
