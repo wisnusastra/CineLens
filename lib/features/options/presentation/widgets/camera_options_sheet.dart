@@ -188,6 +188,64 @@ class CameraOptionsSheet extends ConsumerWidget {
                     );
                   }).toList(),
                 ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E1E22),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: cameraState.videoStabilizationActive
+                          ? Colors.amber.withValues(alpha: 0.5)
+                          : Colors.white12,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.video_stable_rounded,
+                        size: 18,
+                        color: cameraState.videoStabilizationActive
+                            ? Colors.amber
+                            : Colors.white38,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'STABILISASI VIDEO · '
+                              '${cameraState.stabilizationLabel}',
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.4,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              cameraState.videoStabilizationActive
+                                  ? 'Aktif otomatis. iOS memilih mode terbaik '
+                                      'yang didukung format aktif (Cinematic '
+                                      'untuk 1080p, Standard untuk 4K).'
+                                  : 'Belum aktif. Format aktif menolak '
+                                      'stabilisasi, biasanya karena 4K/60. '
+                                      'Turunkan ke 1080p untuk hasil '
+                                      'selengkapnya.',
+                              style: const TextStyle(
+                                color: Colors.white38,
+                                fontSize: 9,
+                                height: 1.35,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 20),
               ],
               const Text(

@@ -285,6 +285,28 @@ class CinemaCameraRepository {
     await Gal.putVideo(videoPath, album: AppConstants.albumName);
   }
 
+  /// Receives the stabilisation status that the native capture pipeline
+  /// reports every time a session starts.
+  ///
+  /// The `camera` plugin does not expose `AVCaptureConnection`, so the status
+  /// arrives through the same method channel that does the grading.
+  void listenToStabilization(
+    void Function(bool active, int mode) onChanged,
+  ) {
+    _videoChannel.setMethodCallHandler((call) async {
+      if (call.method != 'stabilizationChanged') return null;
+
+      final arguments = call.arguments;
+      final map = arguments is Map ? arguments : const <Object?, Object?>{};
+      final rawMode = map['mode'];
+      onChanged(
+        map['active'] == true,
+        rawMode is num ? rawMode.toInt() : 0,
+      );
+      return null;
+    });
+  }
+
   // ------------------------------------------------------------ app gallery
 
   /// Copies a capture into the app private library and indexes it.

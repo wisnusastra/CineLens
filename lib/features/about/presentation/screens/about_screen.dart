@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.0.0';
+  static const String appVersion = '1.0.3';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -103,6 +103,74 @@ class AboutScreen extends StatelessWidget {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // Daftar perbaikan rilis ini
+            // Container is not a const constructor, so the lint cannot apply.
+            // ignore: prefer_const_constructors
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: const Color(0xFF18181C),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.white12),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'PERUBAHAN TERBARU',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.1,
+                    ),
+                  ),
+                  SizedBox(height: 12),
+                  _ChangeEntry(
+                    title: 'Foto resolusi penuh',
+                    detail:
+                        'Foto kini memakai sensor penuh (bukan 1080p) dan '
+                        'di-grading native sebagai JPEG kualitas 0.98.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Pilihan 1080p / 4K & 24 / 30 / 60 FPS',
+                    detail:
+                        'Profil video dibatasi 4K agar encoder iOS tetap stabil, '
+                        'dengan bitrate 30–90 Mbps dan audio 192 kbps.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Stabilizer video aktif otomatis',
+                    detail:
+                        'iOS memilih mode stabilisasi terbaik yang didukung '
+                        'format aktif (Cinematic / Standard). Statusnya tampil '
+                        'di viewfinder dan menu opsi.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Preset lebih menyatu dengan hasil',
+                    detail:
+                        'Grading LUT kini dihitung di ruang warna sRGB yang sama '
+                        'dengan pratinjau, jadi warna hasil foto dan video tidak '
+                        'lagi berbeda dari layar.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Pinch zoom & galeri dalam aplikasi',
+                    detail:
+                        'Cubit layar untuk zoom dengan indikator, dan galeri '
+                        'lokal untuk melihat atau menghapus hasil tanpa izin '
+                        'Apple Photos.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Tray preset landscape bisa disembunyikan',
+                    detail:
+                        'Di mode landscape tray otomatis mengecil dan bisa '
+                        'dibuka kembali lewat tombol palet.',
+                    isLast: true,
                   ),
                 ],
               ),
@@ -288,6 +356,64 @@ class AboutScreen extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// One line of the in-app changelog on the About screen.
+class _ChangeEntry extends StatelessWidget {
+  final String title;
+  final String detail;
+  final bool isLast;
+
+  const _ChangeEntry({
+    required this.title,
+    required this.detail,
+    this.isLast = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: isLast ? 0 : 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 4),
+            child: Icon(
+              Icons.check_circle_rounded,
+              color: Colors.amberAccent,
+              size: 14,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  detail,
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 11.5,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

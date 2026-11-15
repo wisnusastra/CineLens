@@ -1,6 +1,7 @@
 // lib/features/cinema_camera/presentation/screens/camera_screen.dart
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/cupertino.dart';
@@ -192,20 +193,77 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           if (mounted) setState(() => _zoomIndicatorVisible = false);
         });
       },
-      child: ColorFiltered(
-        colorFilter: ColorFilter.matrix(state.activeColorMatrix),
-        child: SizedBox.expand(
-          child: FittedBox(
-            fit: BoxFit.cover,
-            child: SizedBox(
-              width: isLandscape ? previewSize.width : previewSize.height,
-              height: isLandscape ? previewSize.height : previewSize.width,
-              child: CameraPreview(controller),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ColorFiltered(
+            colorFilter: ColorFilter.matrix(state.activeColorMatrix),
+            child: SizedBox.expand(
+              child: FittedBox(
+                fit: BoxFit.cover,
+                child: SizedBox(
+                  width: isLandscape ? previewSize.width : previewSize.height,
+                  height: isLandscape ? previewSize.height : previewSize.width,
+                  child: CameraPreview(controller),
+                ),
+              ),
             ),
           ),
-        ),
+          if (state.isAnamorphicRatio)
+            ..._buildAnamorphicGuide(
+              previewSize: previewSize,
+              viewport: viewport,
+              isLandscape: isLandscape,
+            ),
+        ],
       ),
     );
+  }
+
+  /// Draws the 2.39:1 letterbox the exporter bakes into every capture.
+  ///
+  /// The preview is drawn with `BoxFit.cover`, so the bars are measured from
+  /// the recorded frame instead of the screen: the visible frame can be taller
+  /// than the viewport, and in that case part of the letterbox is already
+  /// cropped away and must not be drawn.
+  List<Widget> _buildAnamorphicGuide({
+    required Size previewSize,
+    required Size viewport,
+    required bool isLandscape,
+  }) {
+    if (viewport.isEmpty) return const [];
+
+    final frameWidth = isLandscape ? previewSize.width : previewSize.height;
+    final frameHeight = isLandscape ? previewSize.height : previewSize.width;
+    if (frameWidth <= 0 || frameHeight <= 0) return const [];
+
+    final scale = math.max(
+      viewport.width / frameWidth,
+      viewport.height / frameHeight,
+    );
+    final visibleFrameHeight = frameHeight * scale;
+    final letterboxHeight = (frameWidth / 2.39) * scale;
+    final barHeight =
+        ((visibleFrameHeight - letterboxHeight) / 2).clamp(0.0, viewport.height);
+    final topInset = (viewport.height - visibleFrameHeight) / 2;
+    final visibleBarHeight = (topInset + barHeight).clamp(0.0, viewport.height);
+
+    if (visibleBarHeight <= 0.5) return const [];
+
+    final bar = ColoredBox(
+      color: Colors.black.withValues(alpha: 0.62),
+    );
+
+    return [
+      Positioned(top: 0, left: 0, right: 0, height: visibleBarHeight, child: bar),
+      Positioned(
+        bottom: 0,
+        left: 0,
+        right: 0,
+        height: visibleBarHeight,
+        child: bar,
+      ),
+    ];
   }
 
   void _flashZoomIndicator() {
@@ -475,6 +533,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   }
 
   Widget _buildLeftSlot(CinemaCameraState state) {
+    final isVideo = state.captureMode == CinemaCaptureMode.video24fps;
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -482,7 +542,57 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         _buildModeToggle(state),
         const SizedBox(height: 4),
         _buildQualityChip(state),
+        if (isVideo) ...[
+          const SizedBox(height: 4),
+          _buildStabilizationChip(state),
+        ],
       ],
+    );
+  }
+
+  /// Shows the stabilisation mode iOS actually sustained for this format,
+  /// so the operator knows when 4K forced it down to standard (or off).
+  Widget _buildStabilizationChip(CinemaCameraState state) {
+    final active = state.videoStabilizationActive;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
+      decoration: BoxDecoration(
+        color: active
+            ? AppTheme.cinemaAmber.withValues(alpha: 0.16)
+            : Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: active
+              ? AppTheme.cinemaAmber.withValues(alpha: 0.7)
+              : Colors.white24,
+        ),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.video_stable_rounded,
+            size: 9,
+            color: active ? AppTheme.cinemaAmber : Colors.white38,
+          ),
+          const SizedBox(width: 3),
+          Flexible(
+            child: Text(
+              'STAB ${state.stabilizationLabel}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: active ? AppTheme.cinemaAmber : Colors.white38,
+                fontSize: 8,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

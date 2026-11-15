@@ -114,14 +114,7 @@ class ToneSelectorStrip extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Container(
-                        width: 10,
-                        height: 10,
-                        decoration: BoxDecoration(
-                          color: tone.accentColor,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
+                      _ToneSwatch(tone: tone, size: compact ? 11 : 13),
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
@@ -159,6 +152,48 @@ class ToneSelectorStrip extends StatelessWidget {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+/// Miniature of the tone applied to a neutral highlight/skin/shadow ramp.
+///
+/// It goes through the exact same matrix as the viewfinder, so a preset card
+/// now shows the colour response the capture will actually have instead of a
+/// decorative accent dot.
+class _ToneSwatch extends StatelessWidget {
+  final CinemaTone tone;
+  final double size;
+
+  const _ToneSwatch({required this.tone, this.size = 12});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: tone.accentColor, width: 0.9),
+      ),
+      child: ClipOval(
+        child: ColorFiltered(
+          colorFilter: ColorFilter.matrix(tone.matrix),
+          child: const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFFF3E0C7),
+                  Color(0xFFB9805C),
+                  Color(0xFF2F4A54),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

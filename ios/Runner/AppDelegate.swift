@@ -7,6 +7,27 @@ import UIKit
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private static let videoChannelName = "com.cinelens.ios/video_grader"
 
+  /// Kept alive so the capture pipeline can push status (stabilisation) back to
+  /// Dart without the Dart side having to poll.
+  private var nativeChannel: FlutterMethodChannel?
+
+  /// The LUTs shipped with the app were authored for Flutter's
+  /// `ColorFilter.matrix`, which runs on gamma-encoded sRGB values with the
+  /// offsets expressed in 0…255. Core Image defaults to a linear working space,
+  /// so grading there used to look flatter/different from the live preview.
+  /// Pinning the working space to sRGB makes preview and export match.
+  private static let gradingContext: CIContext = {
+    let sRGB = CGColorSpace(name: CGColorSpace.sRGB)
+    var options: [CIContextOption: Any] = [
+      .useSoftwareRenderer: false
+    ]
+    if let sRGB = sRGB {
+      options[.workingColorSpace] = sRGB
+      options[.outputColorSpace] = sRGB
+    }
+    return CIContext(options: options)
+  }()
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -29,6 +50,8 @@ import UIKit
       name: AppDelegate.videoChannelName,
       binaryMessenger: registrar.messenger()
     )
+    nativeChannel = channel
+    observeVideoStabilization()
 
     channel.setMethodCallHandler { [weak self] call, result in
       switch call.method {
@@ -72,6 +95,66 @@ import UIKit
         result(FlutterMethodNotImplemented)
       }
     }
+  }
+
+  // MARK: - Video stabilisation
+
+  /// Turns on hardware/optical stabilisation for every capture session the
+  /// camera plugin starts.
+  ///
+  /// The `camera` plugin never exposes `AVCaptureConnection`, so the session is
+  /// reached through its own start notification: by then the plugin has already
+  /// configured the format, and setting `preferredVideoStabilizationMode` on a
+  /// running connection is supported. `.auto` asks iOS for the best mode the
+  /// active format can sustain (cinematic at 1080p, standard at 4K) instead of
+  /// forcing a mode the format would reject.
+  private func observeVideoStabilization() {
+    let center = NotificationCenter.default
+
+    center.addObserver(
+      forName: AVCaptureSession.didStartRunningNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] notification in
+      guard let session = notification.object as? AVCaptureSession else { return }
+      self?.enableStabilization(on: session)
+    }
+
+    center.addObserver(
+      forName: AVCaptureSession.didStopRunningNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.reportStabilization(active: false, mode: 0)
+    }
+  }
+
+  private func enableStabilization(on session: AVCaptureSession) {
+    let stabilizable = session.connections.filter { $0.isVideoStabilizationSupported }
+    guard let connection = stabilizable.first else {
+      reportStabilization(active: false, mode: 0)
+      return
+    }
+
+    for candidate in stabilizable where candidate.preferredVideoStabilizationMode == .off {
+      candidate.preferredVideoStabilizationMode = .auto
+    }
+
+    // The active mode settles asynchronously once the connection reconfigures.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self, weak connection] in
+      guard let connection = connection else { return }
+      let mode = connection.activeVideoStabilizationMode
+      self?.reportStabilization(active: mode != .off, mode: Int(mode.rawValue))
+    }
+  }
+
+  /// `mode` uses the `AVCaptureVideoStabilizationMode` raw values: 0 = off,
+  /// 1 = standard, 2 = cinematic.
+  private func reportStabilization(active: Bool, mode: Int) {
+    nativeChannel?.invokeMethod(
+      "stabilizationChanged",
+      arguments: ["active": active, "mode": mode]
+    )
   }
 
   // MARK: - Still photography
@@ -192,7 +275,7 @@ import UIKit
       return
     }
 
-    let context = CIContext(options: [.useSoftwareRenderer: false])
+    let context = AppDelegate.gradingContext
     let clampedQuality = min(max(quality, 0.5), 1.0)
 
     guard let jpeg = context.jpegRepresentation(
@@ -255,6 +338,7 @@ import UIKit
         width: abs(orientedRect.width).rounded(),
         height: abs(orientedRect.height).rounded()
       )
+      let gradingContext = AppDelegate.gradingContext
 
       let composition = AVMutableVideoComposition(asset: asset) { request in
         let sourceExtent = request.sourceImage.extent
@@ -332,13 +416,18 @@ import UIKit
           }
         }
 
-        request.finish(with: output, context: nil)
+        request.finish(with: output, context: gradingContext)
       }
 
       if renderSize.width > 0, renderSize.height > 0 {
         composition.renderSize = renderSize
       }
       composition.frameDuration = CMTime(value: 1, timescale: frameRate)
+      // Tag the result as Rec.709 so players and the Photos app interpret the
+      // graded frames exactly like the live preview does.
+      composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+      composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+      composition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
 
       guard let exportSession = AVAssetExportSession(
         asset: asset,

@@ -53,6 +53,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   int? _profileFps;
   bool _isSwitchingProfile = false;
   double _lastAppliedZoom = 1.0;
+  bool _stabilizationActive = false;
+  int _stabilizationMode = 0;
 
   CameraController? get controller => _controller;
 
@@ -72,6 +74,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final tones = await repository.getAllTones();
     final savedPrefs = await repository.loadSavedPreferences();
     final captureSettings = await repository.loadCaptureSettings();
+
+    // Subscribe before the session starts: the native side reports the active
+    // stabilisation mode as soon as `AVCaptureSession` starts running.
+    repository.listenToStabilization(_handleStabilizationChanged);
 
     final selectedTone = tones.firstWhere(
       (t) => t.id == savedPrefs.toneId,
@@ -115,6 +121,28 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       zoomLevel: bounds.minZoom,
       minZoom: bounds.minZoom,
       maxZoom: bounds.maxZoom,
+      videoStabilizationActive: _stabilizationActive,
+      videoStabilizationMode: _stabilizationMode,
+    );
+  }
+
+  void _handleStabilizationChanged(bool active, int mode) {
+    _stabilizationActive = active;
+    _stabilizationMode = mode;
+
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (current.videoStabilizationActive == active &&
+        current.videoStabilizationMode == mode) {
+      return;
+    }
+
+    state = AsyncData(
+      current.copyWith(
+        videoStabilizationActive: active,
+        videoStabilizationMode: mode,
+      ),
     );
   }
 

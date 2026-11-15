@@ -78,6 +78,15 @@ class CinemaCameraState {
   final double minZoom;
   final double maxZoom;
 
+  /// Whether iOS actually stabilised the current capture session. Filled from
+  /// the native side, because a requested mode can be rejected by a format
+  /// (for example cinematic stabilisation at 4K).
+  final bool videoStabilizationActive;
+
+  /// `AVCaptureVideoStabilizationMode` raw value: 0 off, 1 standard,
+  /// 2 cinematic.
+  final int videoStabilizationMode;
+
   const CinemaCameraState({
     required this.tones,
     required this.selectedTone,
@@ -101,6 +110,8 @@ class CinemaCameraState {
     this.zoomLevel = 1.0,
     this.minZoom = 1.0,
     this.maxZoom = 8.0,
+    this.videoStabilizationActive = false,
+    this.videoStabilizationMode = 0,
   });
 
   List<double> get activeColorMatrix {
@@ -112,6 +123,12 @@ class CinemaCameraState {
 
   /// Label used by the viewfinder chips, e.g. `4K · 24FPS`.
   String get qualityLabel => '${resolution.label} · ${frameRate.value}FPS';
+
+  /// Human readable stabilisation mode, e.g. `CINEMATIC`.
+  String get stabilizationLabel {
+    if (!videoStabilizationActive) return 'OFF';
+    return videoStabilizationMode == 2 ? 'CINEMATIC' : 'STANDARD';
+  }
 
   bool get isZoomed => zoomLevel > minZoom + 0.01;
 
@@ -140,6 +157,8 @@ class CinemaCameraState {
     double? zoomLevel,
     double? minZoom,
     double? maxZoom,
+    bool? videoStabilizationActive,
+    int? videoStabilizationMode,
   }) {
     return CinemaCameraState(
       tones: tones ?? this.tones,
@@ -166,6 +185,10 @@ class CinemaCameraState {
       zoomLevel: zoomLevel ?? this.zoomLevel,
       minZoom: minZoom ?? this.minZoom,
       maxZoom: maxZoom ?? this.maxZoom,
+      videoStabilizationActive:
+          videoStabilizationActive ?? this.videoStabilizationActive,
+      videoStabilizationMode:
+          videoStabilizationMode ?? this.videoStabilizationMode,
     );
   }
 }
