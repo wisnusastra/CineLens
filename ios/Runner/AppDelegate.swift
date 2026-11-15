@@ -46,6 +46,15 @@ import UIKit
   private var proResRecordingURL: URL?
   private var proResDidStart = false
   private var proResStartAttempts = 0
+  // Fallback ProRes path (AVAssetWriter fed by the plugin's video frames).
+  private var writerTake: ProResWriterTake?
+  private var writerAudioSession: AVCaptureSession?
+  private var writerDataOutput: AVCaptureVideoDataOutput?
+  private var writerOriginalDelegate: AVCaptureVideoDataOutputSampleBufferDelegate?
+  private var writerOriginalQueue: DispatchQueue?
+  private var writerStartResult: FlutterResult?
+  private var writerTimeout: DispatchWorkItem?
+  private var writerDidStart = false
 
   /// The LUTs shipped with the app were authored for Flutter's
   /// `ColorFilter.matrix`, which runs on gamma-encoded sRGB values with the
@@ -643,7 +652,7 @@ import UIKit
     args: [String: Any],
     result: @escaping FlutterResult
   ) {
-    if proResOutput?.isRecording == true {
+    if proResOutput?.isRecording == true || writerTake != nil {
       result(
         FlutterError(
           code: "busy",
@@ -934,7 +943,182 @@ import UIKit
     return text
   }
 
+  // MARK: - ProRes fallback (AVAssetWriter)
+
+  /// Starts a ProRes 422 take by tapping the frames of the plugin's
+  /// `AVCaptureVideoDataOutput`. The preview keeps running because every frame
+  /// is forwarded to the plugin's own delegate first. Frames are the plugin's
+  /// 8-bit BGRA stream, so this is ProRes 422 encoded from 8-bit source, not a
+  /// 10-bit sensor capture.
+  private func startProResWriterFallback(
+    session: AVCaptureSession,
+    result: @escaping FlutterResult
+  ) -> Bool {
+    guard let dataOutput = session.outputs
+      .compactMap({ $0 as? AVCaptureVideoDataOutput }).first else {
+      return false
+    }
+
+    let original = dataOutput.sampleBufferDelegate
+    let queue = dataOutput.sampleBufferCallbackQueue
+      ?? DispatchQueue(label: "cinelens.prores.video")
+
+    var audioSession: AVCaptureSession?
+    var audioOutput: AVCaptureAudioDataOutput?
+    if let audioDevice = AVCaptureDevice.default(for: .audio),
+       let audioInput = try? AVCaptureDeviceInput(device: audioDevice) {
+      let candidateSession = AVCaptureSession()
+      let candidateOutput = AVCaptureAudioDataOutput()
+      if candidateSession.canAddInput(audioInput),
+         candidateSession.canAddOutput(candidateOutput) {
+        candidateSession.addInput(audioInput)
+        candidateSession.addOutput(candidateOutput)
+        audioSession = candidateSession
+        audioOutput = candidateOutput
+      }
+    }
+
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "CINELENS_PRORES_\(Int(Date().timeIntervalSince1970)).mov"
+    )
+    let take = ProResWriterTake(
+      url: url,
+      original: original,
+      wantsAudio: audioOutput != nil,
+      audioSettings: audioOutput?
+        .recommendedAudioSettingsForAssetWriter(writingTo: .mov) as? [String: Any]
+    )
+    take.onFirstFrame = { [weak self] in
+      DispatchQueue.main.async { self?.writerTakeDidStart() }
+    }
+    take.onFailure = { [weak self] error in
+      DispatchQueue.main.async { self?.writerTakeDidFail(error) }
+    }
+
+    writerTake = take
+    writerDataOutput = dataOutput
+    writerOriginalDelegate = original
+    writerOriginalQueue = queue
+    writerAudioSession = audioSession
+    writerStartResult = result
+    writerDidStart = false
+
+    dataOutput.setSampleBufferDelegate(take, queue: queue)
+    if let audioOutput = audioOutput, let audioSession = audioSession {
+      audioOutput.setSampleBufferDelegate(
+        take,
+        queue: DispatchQueue(label: "cinelens.prores.audio")
+      )
+      DispatchQueue.global(qos: .userInitiated).async {
+        audioSession.startRunning()
+      }
+    }
+
+    // The failed attempt may have left the session stopped; frames are needed.
+    if !session.isRunning {
+      DispatchQueue.global(qos: .userInitiated).async {
+        session.startRunning()
+      }
+    }
+
+    let timeout = DispatchWorkItem { [weak self] in
+      guard let self = self, !self.writerDidStart else { return }
+      self.writerTakeDidFail(
+        NSError(
+          domain: "CineLens.ProRes",
+          code: 2,
+          userInfo: [
+            NSLocalizedDescriptionKey:
+              "Kamera tidak mengirim frame video untuk ProRes."
+          ]
+        )
+      )
+    }
+    writerTimeout = timeout
+    DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: timeout)
+    return true
+  }
+
+  private func writerTakeDidStart() {
+    guard writerTake != nil, !writerDidStart else { return }
+    writerDidStart = true
+    writerTimeout?.cancel()
+    writerTimeout = nil
+    writerStartResult?(true)
+    writerStartResult = nil
+  }
+
+  private func writerTakeDidFail(_ error: Error) {
+    guard let take = writerTake else { return }
+    // After the take began, the failure is reported when it is stopped.
+    guard !writerDidStart else { return }
+
+    writerTimeout?.cancel()
+    writerTimeout = nil
+    releaseWriterFeeds()
+    take.cancel()
+    writerTake = nil
+
+    let startResult = writerStartResult
+    writerStartResult = nil
+    startResult?(
+      FlutterError(
+        code: "record_failed",
+        message: describeRecordingError(error),
+        details: nil
+      )
+    )
+  }
+
+  /// Gives the plugin its video delegate back and stops the audio tap.
+  private func releaseWriterFeeds() {
+    writerDataOutput?.setSampleBufferDelegate(
+      writerOriginalDelegate,
+      queue: writerOriginalQueue
+    )
+    writerDataOutput = nil
+    writerOriginalDelegate = nil
+    writerOriginalQueue = nil
+
+    if let audioSession = writerAudioSession {
+      DispatchQueue.global(qos: .userInitiated).async {
+        audioSession.stopRunning()
+      }
+    }
+    writerAudioSession = nil
+  }
+
+  private func stopProResWriterTake(
+    _ take: ProResWriterTake,
+    result: @escaping FlutterResult
+  ) {
+    writerTimeout?.cancel()
+    writerTimeout = nil
+    releaseWriterFeeds()
+
+    take.finish { [weak self] url, error in
+      DispatchQueue.main.async {
+        self?.writerTake = nil
+        self?.writerDidStart = false
+        if let url = url {
+          result(url.path)
+        } else {
+          let message = error.map { self?.describeRecordingError($0) ?? "" }
+            ?? "Rekaman ProRes gagal."
+          result(
+            FlutterError(code: "record_failed", message: message, details: nil)
+          )
+        }
+      }
+    }
+  }
+
   private func stopProResRecording(result: @escaping FlutterResult) {
+    if let take = writerTake {
+      stopProResWriterTake(take, result: result)
+      return
+    }
+
     guard let output = proResOutput, output.isRecording else {
       result(
         FlutterError(
@@ -999,6 +1183,7 @@ import UIKit
       return
     }
 
+    let neverStarted = !proResDidStart
     let startResult = proResStartResult
     let stopResult = proResStopResult
     proResStartResult = nil
@@ -1017,6 +1202,17 @@ import UIKit
     proResRecordingURL = nil
     proResDidStart = false
     proResStartAttempts = 0
+
+    // AVCaptureMovieFileOutput refused to start (typically -11803 on the
+    // plugin's shared session). Fall back to writing ProRes with AVAssetWriter
+    // from the frames the plugin already streams, instead of failing the take.
+    if error != nil,
+       neverStarted,
+       let startResult = startResult,
+       let session = activeSession,
+       startProResWriterFallback(session: session, result: startResult) {
+      return
+    }
 
     var failure: Error? = error
     if let error = error,
@@ -1529,6 +1725,230 @@ final class ProResRecordingDelegate: NSObject,
   ) {
     DispatchQueue.main.async {
       self.onFinish(outputFileURL, error)
+    }
+  }
+}
+
+
+/// Writes ProRes 422 with `AVAssetWriter` from the plugin's video frames.
+///
+/// It is installed as the sample-buffer delegate of the plugin's
+/// `AVCaptureVideoDataOutput` and forwards every callback to the original
+/// delegate first, so the live preview is unaffected. Audio comes from a
+/// separate audio-only capture session whose buffers share the same clock.
+final class ProResWriterTake: NSObject,
+  AVCaptureVideoDataOutputSampleBufferDelegate,
+  AVCaptureAudioDataOutputSampleBufferDelegate {
+  let url: URL
+  var onFirstFrame: (() -> Void)?
+  var onFailure: ((Error) -> Void)?
+
+  private let original: AVCaptureVideoDataOutputSampleBufferDelegate?
+  private let wantsAudio: Bool
+  private let audioSettings: [String: Any]?
+  private let lock = NSLock()
+  private var writer: AVAssetWriter?
+  private var videoInput: AVAssetWriterInput?
+  private var audioInput: AVAssetWriterInput?
+  private var sessionStart: CMTime?
+  private var finishing = false
+  private var failure: Error?
+
+  init(
+    url: URL,
+    original: AVCaptureVideoDataOutputSampleBufferDelegate?,
+    wantsAudio: Bool,
+    audioSettings: [String: Any]?
+  ) {
+    self.url = url
+    self.original = original
+    self.wantsAudio = wantsAudio
+    self.audioSettings = audioSettings
+  }
+
+  func captureOutput(
+    _ output: AVCaptureOutput,
+    didOutput sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
+    if output is AVCaptureVideoDataOutput {
+      original?.captureOutput?(output, didOutput: sampleBuffer, from: connection)
+      handleVideo(sampleBuffer)
+    } else {
+      handleAudio(sampleBuffer)
+    }
+  }
+
+  func captureOutput(
+    _ output: AVCaptureOutput,
+    didDrop sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
+    original?.captureOutput?(output, didDrop: sampleBuffer, from: connection)
+  }
+
+  private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
+    guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+
+    lock.lock()
+    defer { lock.unlock() }
+    if finishing || failure != nil { return }
+
+    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+    if writer == nil {
+      guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+        return
+      }
+      do {
+        try startWriter(
+          width: CVPixelBufferGetWidth(pixelBuffer),
+          height: CVPixelBufferGetHeight(pixelBuffer),
+          firstPTS: pts
+        )
+      } catch {
+        failure = error
+        onFailure?(error)
+        return
+      }
+      onFirstFrame?()
+    }
+
+    guard let writer = writer,
+          let input = videoInput,
+          writer.status == .writing else {
+      if let writerError = writer?.error, failure == nil {
+        failure = writerError
+        onFailure?(writerError)
+      }
+      return
+    }
+
+    if input.isReadyForMoreMediaData, !input.append(sampleBuffer) {
+      if failure == nil {
+        failure = writer.error
+        if let writerError = writer.error { onFailure?(writerError) }
+      }
+    }
+  }
+
+  private func handleAudio(_ sampleBuffer: CMSampleBuffer) {
+    guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+
+    lock.lock()
+    defer { lock.unlock() }
+    guard !finishing,
+          failure == nil,
+          let writer = writer,
+          writer.status == .writing,
+          let input = audioInput,
+          let start = sessionStart else { return }
+
+    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    if CMTimeCompare(pts, start) < 0 { return }
+    if input.isReadyForMoreMediaData {
+      input.append(sampleBuffer)
+    }
+  }
+
+  /// Caller must hold `lock`.
+  private func startWriter(width: Int, height: Int, firstPTS: CMTime) throws {
+    try? FileManager.default.removeItem(at: url)
+    let newWriter = try AVAssetWriter(outputURL: url, fileType: .mov)
+
+    let video = AVAssetWriterInput(
+      mediaType: .video,
+      outputSettings: [
+        AVVideoCodecKey: AVVideoCodecType.proRes422.rawValue,
+        AVVideoWidthKey: width,
+        AVVideoHeightKey: height
+      ]
+    )
+    video.expectsMediaDataInRealTime = true
+    guard newWriter.canAdd(video) else {
+      throw NSError(
+        domain: "CineLens.ProRes",
+        code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey: "Writer menolak input video ProRes."
+        ]
+      )
+    }
+    newWriter.add(video)
+
+    if wantsAudio {
+      let settings: [String: Any] = audioSettings ?? [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVNumberOfChannelsKey: 1,
+        AVSampleRateKey: 44100,
+        AVEncoderBitRateKey: 96000
+      ]
+      let audio = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
+      audio.expectsMediaDataInRealTime = true
+      if newWriter.canAdd(audio) {
+        newWriter.add(audio)
+        audioInput = audio
+      }
+    }
+
+    guard newWriter.startWriting() else {
+      throw newWriter.error ?? NSError(
+        domain: "CineLens.ProRes",
+        code: 3,
+        userInfo: [
+          NSLocalizedDescriptionKey: "Writer ProRes tidak bisa dimulai."
+        ]
+      )
+    }
+    newWriter.startSession(atSourceTime: firstPTS)
+
+    writer = newWriter
+    videoInput = video
+    sessionStart = firstPTS
+  }
+
+  /// Abandons the take without producing a file.
+  func cancel() {
+    lock.lock()
+    finishing = true
+    let current = writer
+    lock.unlock()
+    current?.cancelWriting()
+    try? FileManager.default.removeItem(at: url)
+  }
+
+  func finish(completion: @escaping (URL?, Error?) -> Void) {
+    lock.lock()
+    finishing = true
+    let current = writer
+    let video = videoInput
+    let audio = audioInput
+    let recordedFailure = failure
+    lock.unlock()
+
+    guard let writer = current, writer.status == .writing else {
+      completion(
+        nil,
+        recordedFailure ?? current?.error ?? NSError(
+          domain: "CineLens.ProRes",
+          code: 4,
+          userInfo: [
+            NSLocalizedDescriptionKey: "Tidak ada frame yang berhasil direkam."
+          ]
+        )
+      )
+      return
+    }
+
+    video?.markAsFinished()
+    audio?.markAsFinished()
+    let fileURL = url
+    writer.finishWriting {
+      if writer.status == .completed {
+        completion(fileURL, nil)
+      } else {
+        completion(nil, writer.error)
+      }
     }
   }
 }
