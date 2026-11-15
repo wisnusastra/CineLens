@@ -1,5 +1,7 @@
 import AVFoundation
 import CoreImage
+import CoreMedia
+import CoreVideo
 import Flutter
 import ImageIO
 import UIKit
@@ -11,6 +13,21 @@ import UIKit
   /// Kept alive so the capture pipeline can push status (stabilisation) back to
   /// Dart without the Dart side having to poll.
   private var nativeChannel: FlutterMethodChannel?
+
+  /// The device behind the running `AVCaptureSession`, discovered from the
+  /// session's own start notification because the `camera` plugin never exposes
+  /// it. Manual exposure/white balance/focus and Apple Log are applied to this
+  /// device directly.
+  private weak var activeSession: AVCaptureSession?
+  private var activeDevice: AVCaptureDevice?
+
+  /// Last manual values, re-applied whenever the plugin rebuilds the session
+  /// (resolution/frame-rate changes, front/back switch) because reconfiguring
+  /// an `AVCaptureDevice` resets it to automatic.
+  private var manualExposure: (seconds: Double, iso: Double)?
+  private var manualWhiteBalance: (kelvin: Double, tint: Double)?
+  private var manualFocusPosition: Double?
+  private var appleLogEnabled = false
 
   /// The LUTs shipped with the app were authored for Flutter's
   /// `ColorFilter.matrix`, which runs on gamma-encoded sRGB values with the
@@ -92,6 +109,76 @@ import UIKit
           result: result
         )
 
+      case "cameraCapabilities":
+        result(self?.cameraCapabilities() ?? ["available": false])
+
+      case "setManualExposure":
+        guard let args = call.arguments as? [String: Any],
+              let seconds = (args["seconds"] as? NSNumber)?.doubleValue,
+              let iso = (args["iso"] as? NSNumber)?.doubleValue else {
+          result(
+            FlutterError(
+              code: "bad_args",
+              message: "seconds and iso are required.",
+              details: nil
+            )
+          )
+          return
+        }
+        self?.applyManualExposure(seconds: seconds, iso: iso, result: result)
+
+      case "setAutoExposure":
+        self?.applyAutoExposure(result: result)
+
+      case "setManualWhiteBalance":
+        guard let args = call.arguments as? [String: Any],
+              let kelvin = (args["kelvin"] as? NSNumber)?.doubleValue,
+              let tint = (args["tint"] as? NSNumber)?.doubleValue else {
+          result(
+            FlutterError(
+              code: "bad_args",
+              message: "kelvin and tint are required.",
+              details: nil
+            )
+          )
+          return
+        }
+        self?.applyManualWhiteBalance(kelvin: kelvin, tint: tint, result: result)
+
+      case "setAutoWhiteBalance":
+        self?.applyAutoWhiteBalance(result: result)
+
+      case "setManualFocus":
+        guard let args = call.arguments as? [String: Any],
+              let position = (args["position"] as? NSNumber)?.doubleValue else {
+          result(
+            FlutterError(
+              code: "bad_args",
+              message: "position is required.",
+              details: nil
+            )
+          )
+          return
+        }
+        self?.applyManualFocus(position: position, result: result)
+
+      case "setAutoFocus":
+        self?.applyAutoFocus(result: result)
+
+      case "setAppleLog":
+        guard let args = call.arguments as? [String: Any],
+              let enabled = args["enabled"] as? Bool else {
+          result(
+            FlutterError(
+              code: "bad_args",
+              message: "enabled is required.",
+              details: nil
+            )
+          )
+          return
+        }
+        self?.applyAppleLog(enabled, result: result)
+
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -119,6 +206,7 @@ import UIKit
     ) { [weak self] notification in
       guard let session = notification.object as? AVCaptureSession else { return }
       self?.enableStabilization(on: session)
+      self?.captureActiveDevice(from: session)
     }
 
     center.addObserver(
@@ -156,6 +244,331 @@ import UIKit
       "stabilizationChanged",
       arguments: ["active": active, "mode": mode]
     )
+  }
+
+  // MARK: - Manual camera controls
+
+  /// Remembers the device the plugin is capturing from.
+  ///
+  /// Every session restart (resolution/frame-rate change, lens switch) can hand
+  /// us a different `AVCaptureDevice`, and iOS resets the manual settings while
+  /// reconfiguring, so the stored values are replayed here.
+  private func captureActiveDevice(from session: AVCaptureSession) {
+    activeSession = session
+
+    let device = session.inputs
+      .compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+      .first { $0.hasMediaType(.video) }
+
+    guard let device = device else { return }
+    let changed = activeDevice !== device
+    activeDevice = device
+    if changed {
+      reapplyManualControls()
+    }
+  }
+
+  private func cameraCapabilities() -> [String: Any] {
+    guard let device = activeDevice else {
+      return ["available": false]
+    }
+
+    let format = device.activeFormat
+    var supportsAppleLog = false
+    if #available(iOS 17.0, *) {
+      supportsAppleLog = format.supportedColorSpaces.contains(.appleLog)
+    }
+
+    // Per TN3104 the prerequisite for ProRes 422 is a 10-bit 4:2:2 sensor
+    // format (`x422`). `AVCaptureMovieFileOutput.availableVideoCodecTypes`
+    // cannot answer this here: it only reports codecs once the output is
+    // attached to the running session, which belongs to the camera plugin.
+    let supportsProRes = device.formats.contains { candidate in
+      CMFormatDescriptionGetMediaSubType(candidate.formatDescription)
+        == kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+    }
+
+    return [
+      "available": true,
+      "deviceName": device.localizedName,
+      "minISO": Double(format.minISO),
+      "maxISO": Double(format.maxISO),
+      "minShutterSeconds": CMTimeGetSeconds(format.minExposureDuration),
+      "maxShutterSeconds": CMTimeGetSeconds(format.maxExposureDuration),
+      "supportsAppleLog": supportsAppleLog,
+      "supportsProRes": supportsProRes,
+      "appleLogEnabled": appleLogEnabled,
+    ]
+  }
+
+  /// Runs `body` while the device is locked for configuration.
+  ///
+  /// `lockForConfiguration` throwing means the system is reconfiguring the
+  /// session (or the hardware cannot be driven manually), which is reported to
+  /// Dart instead of silently leaving the preview untouched.
+  private func withActiveDevice(
+    _ result: @escaping FlutterResult,
+    _ body: (AVCaptureDevice) throws -> Any?
+  ) {
+    guard let device = activeDevice else {
+      result(
+        FlutterError(
+          code: "no_device",
+          message: "Kamera belum siap. Coba lagi sebentar.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    do {
+      try device.lockForConfiguration()
+    } catch {
+      result(
+        FlutterError(
+          code: "lock_failed",
+          message: "Kamera sedang dikonfigurasi sistem. Tunggu sebentar lalu "
+            + "coba lagi.",
+          details: nil
+        )
+      )
+      return
+    }
+    defer { device.unlockForConfiguration() }
+
+    do {
+      result(try body(device))
+    } catch {
+      result(
+        FlutterError(
+          code: "config_failed",
+          message: error.localizedDescription,
+          details: nil
+        )
+      )
+    }
+  }
+
+  // MARK: - Manual exposure
+
+  /// Locks exposure to an explicit shutter/ISO pair (real manual exposure, not
+  /// an EV offset). Values are clamped to what the active format supports.
+  private func applyManualExposure(
+    seconds: Double,
+    iso: Double,
+    result: @escaping FlutterResult
+  ) {
+    withActiveDevice(result) { device in
+      guard device.isExposureModeSupported(.custom) else {
+        throw NSError(
+          domain: "CineLens",
+          code: 1,
+          userInfo: [
+            NSLocalizedDescriptionKey:
+              "Kamera ini tidak mendukung exposure manual."
+          ]
+        )
+      }
+
+      let format = device.activeFormat
+      let minSeconds = CMTimeGetSeconds(format.minExposureDuration)
+      let maxSeconds = CMTimeGetSeconds(format.maxExposureDuration)
+      let clampedSeconds = min(max(seconds, minSeconds), maxSeconds)
+      let clampedISO = min(max(Float(iso), format.minISO), format.maxISO)
+
+      device.setExposureModeCustom(
+        duration: CMTime(
+          seconds: clampedSeconds,
+          preferredTimescale: 1_000_000
+        ),
+        iso: clampedISO,
+        completionHandler: nil
+      )
+      self.manualExposure = (seconds: clampedSeconds, iso: Double(clampedISO))
+
+      return [
+        "seconds": clampedSeconds,
+        "iso": Double(clampedISO),
+      ]
+    }
+  }
+
+  private func applyAutoExposure(result: @escaping FlutterResult) {
+    withActiveDevice(result) { device in
+      if device.isExposureModeSupported(.continuousAutoExposure) {
+        device.exposureMode = .continuousAutoExposure
+      }
+      self.manualExposure = nil
+      return true
+    }
+  }
+
+  // MARK: - Manual white balance
+
+  private func applyManualWhiteBalance(
+    kelvin: Double,
+    tint: Double,
+    result: @escaping FlutterResult
+  ) {
+    withActiveDevice(result) { device in
+      guard device.isWhiteBalanceModeSupported(.locked) else {
+        throw NSError(
+          domain: "CineLens",
+          code: 2,
+          userInfo: [
+            NSLocalizedDescriptionKey:
+              "Kamera ini tidak mendukung white balance manual."
+          ]
+        )
+      }
+
+      let clampedKelvin = min(max(kelvin, 1000.0), 14000.0)
+      let clampedTint = min(max(tint, -150.0), 150.0)
+
+      // Temperature/tint has to become device gains first: feeding an
+      // out-of-range pair straight to `setWhiteBalanceModeLocked` raises an
+      // Objective-C exception instead of throwing, which would crash the app.
+      let requested = device.deviceWhiteBalanceGains(
+        for: AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
+          temperature: Float(clampedKelvin),
+          tint: Float(clampedTint)
+        )
+      )
+      let maxGain = device.maxWhiteBalanceGain
+      let gains = AVCaptureDevice.WhiteBalanceGains(
+        redGain: min(max(requested.redGain, 1.0), maxGain),
+        greenGain: min(max(requested.greenGain, 1.0), maxGain),
+        blueGain: min(max(requested.blueGain, 1.0), maxGain)
+      )
+
+      device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+      self.manualWhiteBalance = (kelvin: clampedKelvin, tint: clampedTint)
+
+      return [
+        "kelvin": clampedKelvin,
+        "tint": clampedTint,
+      ]
+    }
+  }
+
+  private func applyAutoWhiteBalance(result: @escaping FlutterResult) {
+    withActiveDevice(result) { device in
+      if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+        device.whiteBalanceMode = .continuousAutoWhiteBalance
+      }
+      self.manualWhiteBalance = nil
+      return true
+    }
+  }
+
+  // MARK: - Manual focus
+
+  /// `position` is the `AVCaptureDevice` lens position: 0.0 = far, 1.0 = near.
+  private func applyManualFocus(
+    position: Double,
+    result: @escaping FlutterResult
+  ) {
+    withActiveDevice(result) { device in
+      guard device.isFocusModeSupported(.locked) else {
+        throw NSError(
+          domain: "CineLens",
+          code: 3,
+          userInfo: [
+            NSLocalizedDescriptionKey:
+              "Kamera ini tidak mendukung focus manual."
+          ]
+        )
+      }
+
+      let clamped = min(max(position, 0.0), 1.0)
+      device.setFocusModeLocked(
+        lensPosition: Float(clamped),
+        completionHandler: nil
+      )
+      self.manualFocusPosition = clamped
+      return clamped
+    }
+  }
+
+  private func applyAutoFocus(result: @escaping FlutterResult) {
+    withActiveDevice(result) { device in
+      if device.isFocusModeSupported(.continuousAutoFocus) {
+        device.focusMode = .continuousAutoFocus
+      }
+      self.manualFocusPosition = nil
+      return true
+    }
+  }
+
+  // MARK: - Apple Log
+
+  /// Switches the device between Apple Log (flat, wide latitude, iOS 17+ and
+  /// iPhone 15 Pro or newer) and the normal sRGB pipeline.
+  ///
+  /// The camera module has to keep its HDR pipeline off, otherwise iOS keeps
+  /// tone mapping the Log signal.
+  private func applyAppleLog(
+    _ enabled: Bool,
+    result: @escaping FlutterResult
+  ) {
+    guard #available(iOS 17.0, *) else {
+      result(
+        FlutterError(
+          code: "unsupported",
+          message: "Apple Log membutuhkan iOS 17 atau lebih baru.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    withActiveDevice(result) { device in
+      let supported = device.activeFormat.supportedColorSpaces.contains(.appleLog)
+      guard !enabled || supported else {
+        throw NSError(
+          domain: "CineLens",
+          code: 4,
+          userInfo: [
+            NSLocalizedDescriptionKey:
+              "Format aktif tidak mendukung Apple Log. Pilih 4K/30 atau 1080p."
+          ]
+        )
+      }
+
+      if device.activeFormat.isVideoHDRSupported {
+        device.automaticallyAdjustsVideoHDREnabled = false
+        device.isVideoHDREnabled = false
+      }
+      device.activeColorSpace = enabled ? .appleLog : .sRGB
+      self.appleLogEnabled = device.activeColorSpace == .appleLog
+      return self.appleLogEnabled
+    }
+  }
+
+  /// Replays the manual settings after the plugin rebuilds its session.
+  private func reapplyManualControls() {
+    let ignored: (Any?) -> Void = { _ in }
+
+    if let exposure = manualExposure {
+      applyManualExposure(
+        seconds: exposure.seconds,
+        iso: exposure.iso,
+        result: ignored
+      )
+    }
+    if let whiteBalance = manualWhiteBalance {
+      applyManualWhiteBalance(
+        kelvin: whiteBalance.kelvin,
+        tint: whiteBalance.tint,
+        result: ignored
+      )
+    }
+    if let focus = manualFocusPosition {
+      applyManualFocus(position: focus, result: ignored)
+    }
+    if appleLogEnabled {
+      applyAppleLog(true, result: ignored)
+    }
   }
 
   // MARK: - Still photography

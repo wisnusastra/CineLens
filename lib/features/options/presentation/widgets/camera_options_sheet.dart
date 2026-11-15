@@ -1,9 +1,12 @@
 // lib/features/options/presentation/widgets/camera_options_sheet.dart
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../about/presentation/screens/about_screen.dart';
+import '../../../cinema_camera/domain/entities/pro_capture_capabilities.dart';
 import '../../../cinema_camera/presentation/providers/cinema_camera_provider.dart';
 import '../../../cinema_camera/presentation/providers/cinema_camera_state.dart';
 import '../../domain/entities/camera_options_state.dart';
@@ -96,10 +99,12 @@ class CameraOptionsSheet extends ConsumerWidget {
                   ),
                   TextButton.icon(
                     onPressed: () {
-                      if (options.hapticFeedback) HapticFeedback.selectionClick();
+                      if (options.hapticFeedback)
+                        HapticFeedback.selectionClick();
                       notifier.resetDefaults();
                     },
-                    icon: const Icon(Icons.refresh, size: 16, color: Colors.amber),
+                    icon: const Icon(Icons.refresh,
+                        size: 16, color: Colors.amber),
                     label: const Text(
                       'Reset',
                       style: TextStyle(color: Colors.amber),
@@ -247,6 +252,12 @@ class CameraOptionsSheet extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 20),
+                _buildProSection(
+                  state: cameraState,
+                  notifier: cameraNotifier,
+                  haptics: options.hapticFeedback,
+                ),
+                const SizedBox(height: 20),
               ],
               const Text(
                 'PANDUAN GRID KOMPOSISI',
@@ -274,7 +285,8 @@ class CameraOptionsSheet extends ConsumerWidget {
                       fontSize: 12,
                     ),
                     onSelected: (_) {
-                      if (options.hapticFeedback) HapticFeedback.selectionClick();
+                      if (options.hapticFeedback)
+                        HapticFeedback.selectionClick();
                       notifier.setGridType(type);
                     },
                   );
@@ -307,7 +319,8 @@ class CameraOptionsSheet extends ConsumerWidget {
                       fontSize: 12,
                     ),
                     onSelected: (_) {
-                      if (options.hapticFeedback) HapticFeedback.selectionClick();
+                      if (options.hapticFeedback)
+                        HapticFeedback.selectionClick();
                       notifier.setAspectRatio(ratio);
                     },
                   );
@@ -332,7 +345,7 @@ class CameraOptionsSheet extends ConsumerWidget {
                 child: Column(
                   children: [
                     SwitchListTile(
-                      activeColor: Colors.amber,
+                      activeThumbColor: Colors.amber,
                       title: const Text(
                         'Tampilkan Telemetry HUD',
                         style: TextStyle(color: Colors.white, fontSize: 14),
@@ -346,7 +359,7 @@ class CameraOptionsSheet extends ConsumerWidget {
                     ),
                     const Divider(height: 1, color: Colors.white12),
                     SwitchListTile(
-                      activeColor: Colors.amber,
+                      activeThumbColor: Colors.amber,
                       title: const Text(
                         'Haptic Feedback (Getar Halus)',
                         style: TextStyle(color: Colors.white, fontSize: 14),
@@ -360,7 +373,7 @@ class CameraOptionsSheet extends ConsumerWidget {
                     ),
                     const Divider(height: 1, color: Colors.white12),
                     SwitchListTile(
-                      activeColor: Colors.amber,
+                      activeThumbColor: Colors.amber,
                       title: const Text(
                         'Mirror Kamera Depan',
                         style: TextStyle(color: Colors.white, fontSize: 14),
@@ -418,6 +431,330 @@ class CameraOptionsSheet extends ConsumerWidget {
     );
   }
 
+  /// Manual exposure / white balance / focus / Apple Log.
+  ///
+  /// Everything is gated on [ProCaptureCapabilities] because the hardware
+  /// differs per iPhone: Apple Log needs an iPhone 15 Pro or newer, ProRes an
+  /// iPhone 13 Pro or newer, and the ISO/shutter ranges come from the format the
+  /// `camera` plugin currently runs.
+  Widget _buildProSection({
+    required CinemaCameraState state,
+    required CinemaCameraNotifier notifier,
+    required bool haptics,
+  }) {
+    final caps = state.proCapabilities;
+    final isRecording = state.isRecordingVideo;
+
+    void tap() {
+      if (haptics) HapticFeedback.selectionClick();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'KONTROL PRO (MANUAL)',
+          style: TextStyle(
+            color: Colors.white54,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.0,
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (!caps.available)
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E1E22),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: const Text(
+              'Menunggu kamera siap. Shutter, ISO, white balance, focus, dan '
+              'Apple Log muncul setelah pratinjau hidup — batas tiap kontrol '
+              'dibaca langsung dari sensor.',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 10,
+                height: 1.35,
+              ),
+            ),
+          )
+        else ...[
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E1E22),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: caps.supportsAppleLog
+                    ? Colors.amber.withValues(alpha: 0.45)
+                    : Colors.white12,
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.camera_rounded,
+                  size: 18,
+                  color: caps.supportsAppleLog ? Colors.amber : Colors.white38,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        caps.deviceName.toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        caps.supportsProRes
+                            ? 'ProRes 422 didukung perangkat ini. Perekam '
+                                'ProRes native menyusul; rekaman sekarang '
+                                'memakai encoder H.264/HEVC kamera.'
+                            : 'ProRes tidak didukung perangkat ini (butuh '
+                                'iPhone 13 Pro atau lebih baru).',
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 9,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (caps.supportsAppleLog) ...[
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E22),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: SwitchListTile(
+                activeThumbColor: Colors.amber,
+                title: const Text(
+                  'Apple Log',
+                  style: TextStyle(color: Colors.white, fontSize: 14),
+                ),
+                subtitle: Text(
+                  state.appleLogEnabled
+                      ? 'Sensor mengirim Log datar. Grading tone/LUT dipakai '
+                          'untuk melihat hasil akhir.'
+                      : 'Gamma Log 10-bit sebelum grading, untuk highlight '
+                          'yang tidak mudah pecah.',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                value: state.appleLogEnabled,
+                onChanged: isRecording
+                    ? null
+                    : (value) {
+                        tap();
+                        notifier.setAppleLog(value);
+                      },
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E1E22),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Column(
+              children: [
+                SwitchListTile(
+                  activeThumbColor: Colors.amber,
+                  title: Text(
+                    'Exposure · ${state.manualExposureEnabled ? 'MANUAL' : 'AUTO'}',
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                  subtitle: Text(
+                    state.manualExposureEnabled
+                        ? 'Shutter ${state.shutterLabel} · ISO '
+                            '${state.iso.round()} terkunci di sensor.'
+                        : 'iOS memilih shutter dan ISO otomatis.',
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                    ),
+                  ),
+                  value: state.manualExposureEnabled,
+                  onChanged: (value) {
+                    tap();
+                    notifier.setManualExposureEnabled(value);
+                  },
+                ),
+                _ProSlider(
+                  label: 'SHUTTER',
+                  value: state.shutterLabel,
+                  sliderValue: _logToSlider(
+                    state.shutterSeconds,
+                    caps.minShutterSeconds,
+                    caps.maxShutterSeconds,
+                  ),
+                  onChanged: (t) => notifier.previewManualExposure(
+                    shutterSeconds: _logFromSlider(
+                      t,
+                      caps.minShutterSeconds,
+                      caps.maxShutterSeconds,
+                    ),
+                  ),
+                  onChangeEnd: (_) => notifier.commitManualExposure(),
+                ),
+                _ProSlider(
+                  label: 'ISO',
+                  value: state.iso.round().toString(),
+                  sliderValue: _logToSlider(
+                    state.iso,
+                    caps.minIso,
+                    caps.maxIso,
+                  ),
+                  onChanged: (t) => notifier.previewManualExposure(
+                    iso: _logFromSlider(t, caps.minIso, caps.maxIso),
+                  ),
+                  onChangeEnd: (_) => notifier.commitManualExposure(),
+                ),
+                const Divider(height: 1, color: Colors.white12),
+                SwitchListTile(
+                  activeThumbColor: Colors.amber,
+                  title: Text(
+                    'White Balance · '
+                    '${state.manualWhiteBalanceEnabled ? 'MANUAL' : 'AUTO'}',
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                  subtitle: Text(
+                    state.manualWhiteBalanceEnabled
+                        ? '${state.whiteBalanceKelvin} K · tint '
+                            '${state.whiteBalanceTint} terkunci.'
+                        : 'iOS mengikuti warna cahaya sekitar.',
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                    ),
+                  ),
+                  value: state.manualWhiteBalanceEnabled,
+                  onChanged: (value) {
+                    tap();
+                    notifier.setManualWhiteBalanceEnabled(value);
+                  },
+                ),
+                _ProSlider(
+                  label: 'SUHU',
+                  value: '${state.whiteBalanceKelvin} K',
+                  sliderValue: (state.whiteBalanceKelvin - 1000) / 13000,
+                  onChanged: (t) => notifier.previewManualWhiteBalance(
+                    kelvin: (1000 + t * 13000).round(),
+                  ),
+                  onChangeEnd: (_) => notifier.commitManualWhiteBalance(),
+                ),
+                _ProSlider(
+                  label: 'TINT',
+                  value: '${state.whiteBalanceTint}',
+                  sliderValue: (state.whiteBalanceTint + 150) / 300,
+                  onChanged: (t) => notifier.previewManualWhiteBalance(
+                    tint: (t * 300 - 150).round(),
+                  ),
+                  onChangeEnd: (_) => notifier.commitManualWhiteBalance(),
+                ),
+                const Divider(height: 1, color: Colors.white12),
+                SwitchListTile(
+                  activeThumbColor: Colors.amber,
+                  title: Text(
+                    'Focus · ${state.manualFocusEnabled ? 'MANUAL' : 'AUTO'}',
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                  subtitle: Text(
+                    state.manualFocusEnabled
+                        ? 'Posisi lensa ${(state.focusPosition * 100).round()}% '
+                            '(0% jauh, 100% dekat).'
+                        : 'Ketuk pratinjau atau pakai slider untuk fokus manual.',
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                    ),
+                  ),
+                  value: state.manualFocusEnabled,
+                  onChanged: (value) {
+                    tap();
+                    notifier.setManualFocusEnabled(value);
+                  },
+                ),
+                _ProSlider(
+                  label: 'FOKUS',
+                  value: '${(state.focusPosition * 100).round()}%',
+                  sliderValue: state.focusPosition,
+                  onChanged: notifier.previewManualFocus,
+                ),
+              ],
+            ),
+          ),
+        ],
+        if (state.proControlError != null) ...[
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF3A1B1B),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: Colors.redAccent.withValues(alpha: 0.6),
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.error_outline_rounded,
+                  size: 16,
+                  color: Colors.redAccent,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    state.proControlError!,
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 10,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Slider positions travel on a log scale, matching how photographers think
+  /// about shutter speed and ISO (each stop doubles the light).
+  double _logToSlider(double value, double min, double max) {
+    if (min <= 0 || max <= 0 || max <= min) return 0;
+    final clamped = value.clamp(min, max).toDouble();
+    return (math.log(clamped) - math.log(min)) /
+        (math.log(max) - math.log(min));
+  }
+
+  double _logFromSlider(double t, double min, double max) {
+    if (min <= 0 || max <= 0 || max <= min) return min;
+    return math.exp(
+        math.log(min) + t.clamp(0.0, 1.0) * (math.log(max) - math.log(min)));
+  }
+
   /// Keeps a failed session rebuild visible instead of silently doing nothing.
   Future<void> _applyProfile(
     BuildContext context,
@@ -441,5 +778,70 @@ class CameraOptionsSheet extends ConsumerWidget {
   String _describe(Object error) {
     final text = error.toString();
     return text.startsWith('Exception: ') ? text.substring(11) : text;
+  }
+}
+
+/// One labelled slider row in the manual control panel.
+class _ProSlider extends StatelessWidget {
+  final String label;
+  final String value;
+  final double sliderValue;
+  final ValueChanged<double> onChanged;
+  final ValueChanged<double>? onChangeEnd;
+
+  const _ProSlider({
+    required this.label,
+    required this.value,
+    required this.sliderValue,
+    required this.onChanged,
+    this.onChangeEnd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white38,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.8,
+                ),
+              ),
+              Text(
+                value,
+                style: const TextStyle(
+                  color: Colors.amber,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 2,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+            ),
+            child: Slider(
+              value: sliderValue.clamp(0.0, 1.0),
+              activeColor: Colors.amber,
+              inactiveColor: Colors.white24,
+              onChanged: onChanged,
+              onChangeEnd: onChangeEnd,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

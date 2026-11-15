@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.0.3';
+  static const String appVersion = '1.1.0';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -133,9 +133,23 @@ class AboutScreen extends StatelessWidget {
                   ),
                   SizedBox(height: 12),
                   _ChangeEntry(
-                    title: 'Foto resolusi penuh',
+                    title: 'Kontrol pro manual: shutter, ISO, WB, focus',
                     detail:
-                        'Foto kini memakai sensor penuh (bukan 1080p) dan '
+                        'Shutter dan ISO kini dikunci langsung di sensor (bukan '
+                        'sekadar EV), plus white balance Kelvin/tint dan focus '
+                        'pull manual. Batas tiap kontrol dibaca dari format aktif, '
+                        'dan statusnya tampil di viewfinder.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Apple Log & deteksi ProRes',
+                    detail:
+                        'iPhone 15 Pro ke atas bisa merekam gamma Apple Log '
+                        '(10-bit) dari panel opsi; ProRes 422 dideteksi per '
+                        'perangkat. Perekam ProRes native menyusul.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Foto resolusi penuh',
+                    detail: 'Foto kini memakai sensor penuh (bukan 1080p) dan '
                         'di-grading native sebagai JPEG kualitas 0.98.',
                   ),
                   _ChangeEntry(
@@ -167,8 +181,7 @@ class AboutScreen extends StatelessWidget {
                   ),
                   _ChangeEntry(
                     title: 'Tray preset landscape bisa disembunyikan',
-                    detail:
-                        'Di mode landscape tray otomatis mengecil dan bisa '
+                    detail: 'Di mode landscape tray otomatis mengecil dan bisa '
                         'dibuka kembali lewat tombol palet.',
                     isLast: true,
                   ),

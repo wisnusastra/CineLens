@@ -1,6 +1,7 @@
 import 'dart:ui';
 import 'package:camera/camera.dart';
 import '../../domain/entities/cinema_tone.dart';
+import '../../domain/entities/pro_capture_capabilities.dart';
 import '../../domain/services/color_matrix_builder.dart';
 
 enum CinemaCaptureMode { photo, video24fps }
@@ -87,6 +88,27 @@ class CinemaCameraState {
   /// 2 cinematic.
   final int videoStabilizationMode;
 
+  /// Hardware limits for the manual controls, reported by the native side.
+  final ProCaptureCapabilities proCapabilities;
+
+  /// When these flags are off, iOS keeps running its own automatic exposure,
+  /// white balance and focus. Turning one on locks only that subsystem.
+  final bool manualExposureEnabled;
+  final double shutterSeconds;
+  final double iso;
+  final bool manualWhiteBalanceEnabled;
+  final int whiteBalanceKelvin;
+  final int whiteBalanceTint;
+  final bool manualFocusEnabled;
+  final double focusPosition;
+
+  /// True while the device streams Apple Log instead of tone-mapped sRGB.
+  final bool appleLogEnabled;
+
+  /// Last refusal from the native controls, shown inside the pro panel so a
+  /// rejected setting is never silent.
+  final String? proControlError;
+
   const CinemaCameraState({
     required this.tones,
     required this.selectedTone,
@@ -112,6 +134,17 @@ class CinemaCameraState {
     this.maxZoom = 8.0,
     this.videoStabilizationActive = false,
     this.videoStabilizationMode = 0,
+    this.proCapabilities = ProCaptureCapabilities.unavailable,
+    this.manualExposureEnabled = false,
+    this.shutterSeconds = 1 / 48,
+    this.iso = 400,
+    this.manualWhiteBalanceEnabled = false,
+    this.whiteBalanceKelvin = 5600,
+    this.whiteBalanceTint = 0,
+    this.manualFocusEnabled = false,
+    this.focusPosition = 0.5,
+    this.appleLogEnabled = false,
+    this.proControlError,
   });
 
   List<double> get activeColorMatrix {
@@ -129,6 +162,26 @@ class CinemaCameraState {
     if (!videoStabilizationActive) return 'OFF';
     return videoStabilizationMode == 2 ? 'CINEMATIC' : 'STANDARD';
   }
+
+  /// Shutter speed as photographers read it: `1/48`, or `0.5s` when slow.
+  String get shutterLabel {
+    if (shutterSeconds <= 0) return '1/48';
+    final denominator = 1 / shutterSeconds;
+    if (denominator >= 1) return '1/${denominator.round()}';
+    return '${shutterSeconds.toStringAsFixed(1)}s';
+  }
+
+  /// Compact pro readout for the viewfinder, e.g. `1/48 · ISO 400`.
+  String get exposureHudLabel => '$shutterLabel · ISO ${iso.round()}';
+
+  String get whiteBalanceLabel => '$whiteBalanceKelvin K';
+
+  /// Whether any manual subsystem is overriding iOS auto behaviour.
+  bool get isManualCaptureActive =>
+      manualExposureEnabled ||
+      manualWhiteBalanceEnabled ||
+      manualFocusEnabled ||
+      appleLogEnabled;
 
   bool get isZoomed => zoomLevel > minZoom + 0.01;
 
@@ -159,6 +212,18 @@ class CinemaCameraState {
     double? maxZoom,
     bool? videoStabilizationActive,
     int? videoStabilizationMode,
+    ProCaptureCapabilities? proCapabilities,
+    bool? manualExposureEnabled,
+    double? shutterSeconds,
+    double? iso,
+    bool? manualWhiteBalanceEnabled,
+    int? whiteBalanceKelvin,
+    int? whiteBalanceTint,
+    bool? manualFocusEnabled,
+    double? focusPosition,
+    bool? appleLogEnabled,
+    String? proControlError,
+    bool clearProControlError = false,
   }) {
     return CinemaCameraState(
       tones: tones ?? this.tones,
@@ -189,6 +254,21 @@ class CinemaCameraState {
           videoStabilizationActive ?? this.videoStabilizationActive,
       videoStabilizationMode:
           videoStabilizationMode ?? this.videoStabilizationMode,
+      proCapabilities: proCapabilities ?? this.proCapabilities,
+      manualExposureEnabled:
+          manualExposureEnabled ?? this.manualExposureEnabled,
+      shutterSeconds: shutterSeconds ?? this.shutterSeconds,
+      iso: iso ?? this.iso,
+      manualWhiteBalanceEnabled:
+          manualWhiteBalanceEnabled ?? this.manualWhiteBalanceEnabled,
+      whiteBalanceKelvin: whiteBalanceKelvin ?? this.whiteBalanceKelvin,
+      whiteBalanceTint: whiteBalanceTint ?? this.whiteBalanceTint,
+      manualFocusEnabled: manualFocusEnabled ?? this.manualFocusEnabled,
+      focusPosition: focusPosition ?? this.focusPosition,
+      appleLogEnabled: appleLogEnabled ?? this.appleLogEnabled,
+      proControlError: clearProControlError
+          ? null
+          : (proControlError ?? this.proControlError),
     );
   }
 }

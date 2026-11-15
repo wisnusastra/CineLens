@@ -12,6 +12,7 @@ import '../../../../core/constants/app_constants.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/cinema_tone_preset_package.dart';
+import '../../domain/entities/pro_capture_capabilities.dart';
 import '../datasources/cinema_tones_preset_source.dart';
 
 class CinemaCameraRepository {
@@ -109,14 +110,16 @@ class CinemaCameraRepository {
     } else if (pickedFile.path != null) {
       rawJson = await File(pickedFile.path!).readAsString();
     } else {
-      throw const FormatException('File JSON tidak dapat dibaca oleh sistem iOS.');
+      throw const FormatException(
+          'File JSON tidak dapat dibaca oleh sistem iOS.');
     }
 
     return importTonesFromJsonString(rawJson);
   }
 
   Future<List<CinemaTone>> importTonesFromJsonString(String rawJson) async {
-    final importedTones = CinemaTonePresetPackage.parseAndValidateTones(rawJson);
+    final importedTones =
+        CinemaTonePresetPackage.parseAndValidateTones(rawJson);
     final prefs = await SharedPreferences.getInstance();
     final existing = await loadCustomTones();
 
@@ -143,8 +146,7 @@ class CinemaCameraRepository {
     final prefs = await SharedPreferences.getInstance();
     final toneId =
         prefs.getString(AppConstants.prefSelectedToneId) ?? 'teal_orange';
-    final intensity =
-        prefs.getDouble(AppConstants.prefToneIntensity) ?? 0.85;
+    final intensity = prefs.getDouble(AppConstants.prefToneIntensity) ?? 0.85;
     return (toneId: toneId, intensity: intensity);
   }
 
@@ -218,7 +220,8 @@ class CinemaCameraRepository {
       if (height > targetHeight) {
         final double barHeight = (height - targetHeight) / 2.0;
         final barPaint = Paint()..color = Colors.black;
-        canvas.drawRect(Rect.fromLTWH(0, 0, width.toDouble(), barHeight), barPaint);
+        canvas.drawRect(
+            Rect.fromLTWH(0, 0, width.toDouble(), barHeight), barPaint);
         canvas.drawRect(
           Rect.fromLTWH(0, height - barHeight, width.toDouble(), barHeight),
           barPaint,
@@ -307,6 +310,89 @@ class CinemaCameraRepository {
     });
   }
 
+  // ------------------------------------------------------------ manual controls
+
+  /// Current device limits for the pro controls.
+  ///
+  /// Returns [ProCaptureCapabilities.unavailable] on a simulator, before the
+  /// session started, or on platforms without the channel.
+  Future<ProCaptureCapabilities> loadProCapabilities() async {
+    try {
+      final map = await _videoChannel.invokeMapMethod<Object?, Object?>(
+        'cameraCapabilities',
+      );
+      if (map != null) return ProCaptureCapabilities.fromMap(map);
+    } on MissingPluginException {
+      // No native camera control on this platform.
+    } on PlatformException {
+      // Treated as unavailable; the pro panel stays hidden.
+    }
+    return ProCaptureCapabilities.unavailable;
+  }
+
+  /// Locks exposure to a real shutter/ISO pair.
+  Future<void> setManualExposure({
+    required double shutterSeconds,
+    required double iso,
+  }) {
+    return _invokeOrThrow('setManualExposure', <String, dynamic>{
+      'seconds': shutterSeconds,
+      'iso': iso,
+    });
+  }
+
+  Future<void> setAutoExposure() => _invokeOrThrow('setAutoExposure');
+
+  Future<void> setManualWhiteBalance({
+    required int kelvin,
+    required int tint,
+  }) {
+    return _invokeOrThrow('setManualWhiteBalance', <String, dynamic>{
+      'kelvin': kelvin,
+      'tint': tint,
+    });
+  }
+
+  Future<void> setAutoWhiteBalance() => _invokeOrThrow('setAutoWhiteBalance');
+
+  /// `position` follows `AVCaptureDevice` lens position: 0.0 far, 1.0 near.
+  Future<void> setManualFocus(double position) {
+    return _invokeOrThrow('setManualFocus', <String, dynamic>{
+      'position': position,
+    });
+  }
+
+  Future<void> setAutoFocus() => _invokeOrThrow('setAutoFocus');
+
+  /// Turns Apple Log on/off and returns the state the device really applied.
+  Future<bool> setAppleLog(bool enabled) async {
+    try {
+      final applied = await _videoChannel.invokeMethod<bool>(
+        'setAppleLog',
+        <String, dynamic>{'enabled': enabled},
+      );
+      return applied ?? false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// Throws [PlatformException] (with the native message) so the UI can tell the
+  /// operator when the device refused a setting.
+  Future<void> _invokeOrThrow(
+    String method, [
+    Map<String, dynamic>? arguments,
+  ]) async {
+    try {
+      await _videoChannel.invokeMethod<Object?>(method, arguments);
+    } on MissingPluginException {
+      throw PlatformException(
+        code: 'unsupported',
+        message: 'Kontrol manual hanya tersedia di aplikasi iOS.',
+      );
+    }
+  }
+
   // ------------------------------------------------------------ app gallery
 
   /// Copies a capture into the app private library and indexes it.
@@ -352,7 +438,8 @@ class CinemaCameraRepository {
     final createdAt = DateTime.now();
     final id = 'video_${createdAt.millisecondsSinceEpoch}';
     final extension = sourcePath.toLowerCase().endsWith('.mov') ? 'mov' : 'mp4';
-    final target = File('${directory.path}${Platform.pathSeparator}$id.$extension');
+    final target =
+        File('${directory.path}${Platform.pathSeparator}$id.$extension');
 
     final source = File(sourcePath);
     if (await source.exists()) {

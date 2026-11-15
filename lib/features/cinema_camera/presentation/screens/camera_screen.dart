@@ -46,8 +46,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   double _scaleStartZoom = 1.0;
   bool _isSwitchingQuality = false;
 
-  CinemaCameraNotifier get _notifier =>
-      ref.read(cinemaCameraProvider.notifier);
+  CinemaCameraNotifier get _notifier => ref.read(cinemaCameraProvider.notifier);
 
   @override
   void didChangeDependencies() {
@@ -94,9 +93,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
 
   // ---------------------------------------------------------------- layout
 
-  Widget _buildCameraStack(CinemaCameraState state, CameraOptionsState options) {
+  Widget _buildCameraStack(
+      CinemaCameraState state, CameraOptionsState options) {
     final controller = _notifier.controller;
-    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -130,7 +131,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                     width: 64,
                     height: 64,
                     decoration: BoxDecoration(
-                      border: Border.all(color: AppTheme.cinemaAmber, width: 1.6),
+                      border:
+                          Border.all(color: AppTheme.cinemaAmber, width: 1.6),
                       borderRadius: BorderRadius.circular(10),
                     ),
                   ),
@@ -243,8 +245,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     );
     final visibleFrameHeight = frameHeight * scale;
     final letterboxHeight = (frameWidth / 2.39) * scale;
-    final barHeight =
-        ((visibleFrameHeight - letterboxHeight) / 2).clamp(0.0, viewport.height);
+    final barHeight = ((visibleFrameHeight - letterboxHeight) / 2)
+        .clamp(0.0, viewport.height);
     final topInset = (viewport.height - visibleFrameHeight) / 2;
     final visibleBarHeight = (topInset + barHeight).clamp(0.0, viewport.height);
 
@@ -255,7 +257,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     );
 
     return [
-      Positioned(top: 0, left: 0, right: 0, height: visibleBarHeight, child: bar),
+      Positioned(
+          top: 0, left: 0, right: 0, height: visibleBarHeight, child: bar),
       Positioned(
         bottom: 0,
         left: 0,
@@ -546,7 +549,56 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           const SizedBox(height: 4),
           _buildStabilizationChip(state),
         ],
+        if (state.isManualCaptureActive) ...[
+          const SizedBox(height: 4),
+          _buildProChip(state),
+        ],
       ],
+    );
+  }
+
+  /// Compact readout of every subsystem the operator locked by hand, so it is
+  /// obvious on set that exposure/white balance/focus are no longer automatic.
+  Widget _buildProChip(CinemaCameraState state) {
+    final parts = <String>[
+      if (state.appleLogEnabled) 'LOG',
+      if (state.manualExposureEnabled) state.exposureHudLabel,
+      if (state.manualWhiteBalanceEnabled) state.whiteBalanceLabel,
+      if (state.manualFocusEnabled) 'MF',
+    ];
+
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
+      decoration: BoxDecoration(
+        color: AppTheme.cinemaAmber.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppTheme.cinemaAmber.withValues(alpha: 0.65)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.tune_rounded,
+            size: 9,
+            color: AppTheme.cinemaAmber,
+          ),
+          const SizedBox(width: 3),
+          Flexible(
+            child: Text(
+              parts.join(' · '),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppTheme.cinemaAmber,
+                fontSize: 8,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -769,7 +821,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.fiber_manual_record, color: Colors.white, size: 12),
+              const Icon(Icons.fiber_manual_record,
+                  color: Colors.white, size: 12),
               const SizedBox(width: 6),
               Text(
                 'REC ${_formatDuration(state.recordingDuration)}',
@@ -1055,7 +1108,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Hapus', style: TextStyle(color: Colors.redAccent)),
+            child:
+                const Text('Hapus', style: TextStyle(color: Colors.redAccent)),
           ),
         ],
       ),
@@ -1083,7 +1137,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           message,
           style: const TextStyle(fontWeight: FontWeight.w600),
         ),
-        backgroundColor: isError ? const Color(0xFFB3261E) : AppTheme.surfaceDark,
+        backgroundColor:
+            isError ? const Color(0xFFB3261E) : AppTheme.surfaceDark,
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 2),
       ),

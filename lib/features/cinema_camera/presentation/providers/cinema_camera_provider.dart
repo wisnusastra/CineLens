@@ -1,12 +1,13 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'package:camera/camera.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../data/repositories/cinema_camera_repository_impl.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
+import '../../domain/entities/pro_capture_capabilities.dart';
 import '../../domain/services/color_matrix_builder.dart';
 import 'cinema_camera_state.dart';
 
@@ -56,6 +57,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   bool _stabilizationActive = false;
   int _stabilizationMode = 0;
 
+  /// Manual sliders emit dozens of values per second; the native call is
+  /// coalesced so the device is not locked for configuration on every tick.
+  Timer? _manualSyncTimer;
+  Future<void> Function()? _pendingManualSync;
+
   CameraController? get controller => _controller;
 
   @override
@@ -66,6 +72,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       WidgetsBinding.instance.removeObserver(this);
       _focusIndicatorTimer?.cancel();
       _recordingTimer?.cancel();
+      _manualSyncTimer?.cancel();
       _controller?.dispose();
       _controller = null;
     });
@@ -109,6 +116,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       mode: CinemaCaptureMode.photo,
     );
 
+    // The plugin does not expose the device, so the manual limits (ISO range,
+    // shutter range, Apple Log/ProRes support) are read from the running
+    // session. This is retried because the session starts asynchronously.
+    final capabilities = await _probeProCapabilities();
+
     return CinemaCameraState(
       tones: tones,
       selectedTone: selectedTone,
@@ -123,6 +135,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       maxZoom: bounds.maxZoom,
       videoStabilizationActive: _stabilizationActive,
       videoStabilizationMode: _stabilizationMode,
+      proCapabilities: capabilities,
+      iso: 400.0.clamp(capabilities.minIso, capabilities.maxIso).toDouble(),
+      shutterSeconds: (1 / 48)
+          .clamp(
+            capabilities.minShutterSeconds,
+            capabilities.maxShutterSeconds,
+          )
+          .toDouble(),
     );
   }
 
@@ -144,6 +164,301 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         videoStabilizationMode: mode,
       ),
     );
+  }
+
+  // ------------------------------------------------------- manual controls
+
+  Future<ProCaptureCapabilities> _probeProCapabilities() async {
+    final repository = ref.read(cinemaCameraRepositoryProvider);
+    var capabilities = ProCaptureCapabilities.unavailable;
+    for (var attempt = 0; attempt < 6; attempt++) {
+      capabilities = await repository.loadProCapabilities();
+      if (capabilities.available) return capabilities;
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
+    return capabilities;
+  }
+
+  /// Re-reads the limits after the session was rebuilt with another format.
+  Future<void> _refreshProCapabilities() async {
+    final capabilities = await _probeProCapabilities();
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+
+    state = AsyncData(
+      current.copyWith(
+        proCapabilities: capabilities,
+        iso: current.iso
+            .clamp(capabilities.minIso, capabilities.maxIso)
+            .toDouble(),
+        shutterSeconds: current.shutterSeconds
+            .clamp(
+              capabilities.minShutterSeconds,
+              capabilities.maxShutterSeconds,
+            )
+            .toDouble(),
+      ),
+    );
+    await _reapplyManualControls();
+  }
+
+  /// Replays the locked settings after the plugin rebuilt its capture session.
+  Future<void> _reapplyManualControls() async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final repository = ref.read(cinemaCameraRepositoryProvider);
+
+    try {
+      if (current.appleLogEnabled) {
+        await repository.setAppleLog(true);
+      }
+      if (current.manualExposureEnabled) {
+        await repository.setManualExposure(
+          shutterSeconds: current.shutterSeconds,
+          iso: current.iso,
+        );
+      }
+      if (current.manualWhiteBalanceEnabled) {
+        await repository.setManualWhiteBalance(
+          kelvin: current.whiteBalanceKelvin,
+          tint: current.whiteBalanceTint,
+        );
+      }
+      if (current.manualFocusEnabled) {
+        await repository.setManualFocus(current.focusPosition);
+      }
+    } catch (_) {
+      // The new session may still be starting; the native side replays the
+      // stored values on its own `didStartRunning` notification too.
+    }
+  }
+
+  Future<void> setManualExposureEnabled(bool enabled) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (enabled && !current.proCapabilities.available) {
+      _setProError(
+          'Kontrol manual belum siap. Coba lagi setelah pratinjau hidup.');
+      return;
+    }
+
+    state = AsyncData(current.copyWith(manualExposureEnabled: enabled));
+    if (!enabled) {
+      await _runProAction(
+        () => ref.read(cinemaCameraRepositoryProvider).setAutoExposure(),
+      );
+      return;
+    }
+
+    await _runProAction(
+      () => ref.read(cinemaCameraRepositoryProvider).setManualExposure(
+            shutterSeconds: current.shutterSeconds,
+            iso: current.iso,
+          ),
+    );
+  }
+
+  /// Updates the shutter/ISO readout while the slider is dragged.
+  ///
+  /// The device is only reconfigured by [commitManualExposure] on release:
+  /// locking an `AVCaptureDevice` ten times per second makes the preview stutter,
+  /// and exposure changes are not something the operator can judge mid-drag.
+  void previewManualExposure({double? shutterSeconds, double? iso}) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final capabilities = current.proCapabilities;
+
+    final nextShutter = (shutterSeconds ?? current.shutterSeconds)
+        .clamp(capabilities.minShutterSeconds, capabilities.maxShutterSeconds)
+        .toDouble();
+    final nextIso = (iso ?? current.iso)
+        .clamp(capabilities.minIso, capabilities.maxIso)
+        .toDouble();
+    if (nextShutter == current.shutterSeconds && nextIso == current.iso) return;
+
+    state = AsyncData(
+      current.copyWith(
+        manualExposureEnabled: true,
+        shutterSeconds: nextShutter,
+        iso: nextIso,
+      ),
+    );
+  }
+
+  /// Pushes the previewed shutter/ISO pair to the sensor.
+  Future<void> commitManualExposure() async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+
+    await _runProAction(
+      () => ref.read(cinemaCameraRepositoryProvider).setManualExposure(
+            shutterSeconds: current.shutterSeconds,
+            iso: current.iso,
+          ),
+    );
+  }
+
+  Future<void> setManualWhiteBalanceEnabled(bool enabled) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (enabled && !current.proCapabilities.available) {
+      _setProError(
+          'Kontrol manual belum siap. Coba lagi setelah pratinjau hidup.');
+      return;
+    }
+
+    state = AsyncData(current.copyWith(manualWhiteBalanceEnabled: enabled));
+    if (!enabled) {
+      await _runProAction(
+        () => ref.read(cinemaCameraRepositoryProvider).setAutoWhiteBalance(),
+      );
+      return;
+    }
+
+    await _runProAction(
+      () => ref.read(cinemaCameraRepositoryProvider).setManualWhiteBalance(
+            kelvin: current.whiteBalanceKelvin,
+            tint: current.whiteBalanceTint,
+          ),
+    );
+  }
+
+  void previewManualWhiteBalance({int? kelvin, int? tint}) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+
+    final nextKelvin =
+        (kelvin ?? current.whiteBalanceKelvin).clamp(1000, 14000);
+    final nextTint = (tint ?? current.whiteBalanceTint).clamp(-150, 150);
+    if (nextKelvin == current.whiteBalanceKelvin &&
+        nextTint == current.whiteBalanceTint) {
+      return;
+    }
+
+    state = AsyncData(
+      current.copyWith(
+        manualWhiteBalanceEnabled: true,
+        whiteBalanceKelvin: nextKelvin,
+        whiteBalanceTint: nextTint,
+      ),
+    );
+  }
+
+  /// Pushes the previewed Kelvin/tint pair to the sensor.
+  Future<void> commitManualWhiteBalance() async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+
+    await _runProAction(
+      () => ref.read(cinemaCameraRepositoryProvider).setManualWhiteBalance(
+            kelvin: current.whiteBalanceKelvin,
+            tint: current.whiteBalanceTint,
+          ),
+    );
+  }
+
+  Future<void> setManualFocusEnabled(bool enabled) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (enabled && !current.proCapabilities.available) {
+      _setProError(
+          'Kontrol manual belum siap. Coba lagi setelah pratinjau hidup.');
+      return;
+    }
+
+    state = AsyncData(current.copyWith(manualFocusEnabled: enabled));
+    if (!enabled) {
+      await _runProAction(
+        () => ref.read(cinemaCameraRepositoryProvider).setAutoFocus(),
+      );
+      return;
+    }
+
+    await _runProAction(
+      () => ref
+          .read(cinemaCameraRepositoryProvider)
+          .setManualFocus(current.focusPosition),
+    );
+  }
+
+  void previewManualFocus(double position) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+
+    final next = position.clamp(0.0, 1.0);
+    if (next == current.focusPosition) return;
+
+    state = AsyncData(
+      current.copyWith(manualFocusEnabled: true, focusPosition: next),
+    );
+    _queueManualSync(
+      () => _runProAction(
+        () => ref.read(cinemaCameraRepositoryProvider).setManualFocus(next),
+      ),
+    );
+  }
+
+  Future<void> setAppleLog(bool enabled) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (enabled && !current.proCapabilities.supportsAppleLog) {
+      _setProError('Perangkat ini belum mendukung Apple Log.');
+      return;
+    }
+
+    try {
+      final applied =
+          await ref.read(cinemaCameraRepositoryProvider).setAppleLog(enabled);
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(latest.copyWith(appleLogEnabled: applied));
+
+      if (enabled && !applied) {
+        _setProError('Apple Log ditolak format aktif. Pilih 4K/30 atau 1080p.');
+      } else {
+        _clearProError();
+      }
+    } on PlatformException catch (error) {
+      _setProError(error.message ?? 'Apple Log tidak dapat diaktifkan.');
+    }
+  }
+
+  /// Coalesces slider callbacks into a single native call.
+  void _queueManualSync(Future<void> Function() action) {
+    _pendingManualSync = action;
+    if (_manualSyncTimer != null) return;
+
+    _manualSyncTimer = Timer(const Duration(milliseconds: 90), () {
+      _manualSyncTimer = null;
+      final pending = _pendingManualSync;
+      _pendingManualSync = null;
+      if (pending != null) unawaited(pending());
+    });
+  }
+
+  Future<void> _runProAction(Future<void> Function() action) async {
+    try {
+      await action();
+      _clearProError();
+    } on PlatformException catch (error) {
+      _setProError(error.message ?? 'Kamera menolak pengaturan manual ini.');
+    } catch (error) {
+      _setProError(_describeError(error));
+    }
+  }
+
+  void _setProError(String message) {
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(proControlError: message));
+  }
+
+  void _clearProError() {
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null || current.proControlError == null) return;
+    state = AsyncData(current.copyWith(clearProControlError: true));
   }
 
   // -------------------------------------------------------------- profiles
@@ -293,6 +608,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         ),
       );
       await _persistCaptureSettings(nextResolution, nextFrameRate);
+
+      // A new format changes the ISO/shutter range and can enable or lose
+      // Apple Log (it needs a specific 4K/1080p format), so the pro panel has to
+      // re-read the device before the operator touches a slider.
+      await _refreshProCapabilities();
     } catch (error) {
       final latest = state.valueOrNull ?? current;
       state = AsyncData(
@@ -355,8 +675,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     }
   }
 
-  Future<void> resetZoom() =>
-      setZoomLevel(state.valueOrNull?.minZoom ?? 1.0);
+  Future<void> resetZoom() => setZoomLevel(state.valueOrNull?.minZoom ?? 1.0);
 
   // ------------------------------------------------------------ tones etc.
 
@@ -454,14 +773,17 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   }
 
   String getToneJsonString(CinemaTone tone) {
-    return ref.read(cinemaCameraRepositoryProvider).buildPresetJsonString([tone]);
+    return ref
+        .read(cinemaCameraRepositoryProvider)
+        .buildPresetJsonString([tone]);
   }
 
-  Future<void> exportSingleTone(CinemaTone tone, {Rect? shareOriginRect}) async {
+  Future<void> exportSingleTone(CinemaTone tone,
+      {Rect? shareOriginRect}) async {
     await ref.read(cinemaCameraRepositoryProvider).exportTonesViaShareSheet(
-          [tone],
-          shareOriginRect: shareOriginRect,
-        );
+      [tone],
+      shareOriginRect: shareOriginRect,
+    );
   }
 
   Future<void> exportAllCustomTones({Rect? shareOriginRect}) async {
@@ -567,9 +889,16 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final cam = _controller;
     if (current == null || cam == null || !cam.value.isInitialized) return;
 
+    // The plugin implements tap-to-focus by switching the device back to
+    // automatic, which would silently break a manual lock. Tap-tracking only
+    // the subsystems the operator has not locked keeps the pro controls honest.
+    final wantsFocus = !current.manualFocusEnabled;
+    final wantsExposure = !current.manualExposureEnabled;
+    if (!wantsFocus && !wantsExposure) return;
+
     try {
-      await cam.setFocusPoint(normalizedPoint);
-      await cam.setExposurePoint(normalizedPoint);
+      if (wantsFocus) await cam.setFocusPoint(normalizedPoint);
+      if (wantsExposure) await cam.setExposurePoint(normalizedPoint);
     } catch (_) {}
 
     state = AsyncData(current.copyWith(focusPoint: screenTapPosition));
@@ -623,6 +952,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           clearFocusPoint: true,
         ),
       );
+      await _refreshProCapabilities();
     } finally {
       _isSwitchingProfile = false;
     }
