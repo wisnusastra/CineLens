@@ -105,6 +105,11 @@ class CinemaCameraState {
   /// True while the device streams Apple Log instead of tone-mapped sRGB.
   final bool appleLogEnabled;
 
+  /// Records Apple ProRes 422 masters through the native recorder instead of
+  /// the plugin's H.264/HEVC encoder. Only meaningful when
+  /// [ProCaptureCapabilities.supportsProRes] is true.
+  final bool proResEnabled;
+
   /// Last refusal from the native controls, shown inside the pro panel so a
   /// rejected setting is never silent.
   final String? proControlError;
@@ -144,6 +149,7 @@ class CinemaCameraState {
     this.manualFocusEnabled = false,
     this.focusPosition = 0.5,
     this.appleLogEnabled = false,
+    this.proResEnabled = false,
     this.proControlError,
   });
 
@@ -222,6 +228,7 @@ class CinemaCameraState {
     bool? manualFocusEnabled,
     double? focusPosition,
     bool? appleLogEnabled,
+    bool? proResEnabled,
     String? proControlError,
     bool clearProControlError = false,
   }) {
@@ -266,6 +273,7 @@ class CinemaCameraState {
       manualFocusEnabled: manualFocusEnabled ?? this.manualFocusEnabled,
       focusPosition: focusPosition ?? this.focusPosition,
       appleLogEnabled: appleLogEnabled ?? this.appleLogEnabled,
+      proResEnabled: proResEnabled ?? this.proResEnabled,
       proControlError: clearProControlError
           ? null
           : (proControlError ?? this.proControlError),

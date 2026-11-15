@@ -549,7 +549,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           const SizedBox(height: 4),
           _buildStabilizationChip(state),
         ],
-        if (state.isManualCaptureActive) ...[
+        if (state.isManualCaptureActive || state.proResEnabled) ...[
           const SizedBox(height: 4),
           _buildProChip(state),
         ],
@@ -561,6 +561,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   /// obvious on set that exposure/white balance/focus are no longer automatic.
   Widget _buildProChip(CinemaCameraState state) {
     final parts = <String>[
+      if (state.proResEnabled) 'PRORES',
       if (state.appleLogEnabled) 'LOG',
       if (state.manualExposureEnabled) state.exposureHudLabel,
       if (state.manualWhiteBalanceEnabled) state.whiteBalanceLabel,

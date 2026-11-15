@@ -294,9 +294,23 @@ class CinemaCameraRepository {
   /// The `camera` plugin does not expose `AVCaptureConnection`, so the status
   /// arrives through the same method channel that does the grading.
   void listenToStabilization(
-    void Function(bool active, int mode) onChanged,
-  ) {
+    void Function(bool active, int mode) onChanged, {
+    void Function(String path)? onProResFinished,
+  }) {
     _videoChannel.setMethodCallHandler((call) async {
+      // The native recorder closes the `.mov` on its own when iOS interrupts a
+      // take (call, background, thermal stop). Dart never called stopProRes in
+      // that case, so the path is pushed back here to be saved.
+      if (call.method == 'proResFinished') {
+        final arguments = call.arguments;
+        final map = arguments is Map ? arguments : const <Object?, Object?>{};
+        final path = map['path'];
+        if (path is String && path.isNotEmpty && onProResFinished != null) {
+          onProResFinished(path);
+        }
+        return null;
+      }
+
       if (call.method != 'stabilizationChanged') return null;
 
       final arguments = call.arguments;
@@ -363,6 +377,35 @@ class CinemaCameraRepository {
   }
 
   Future<void> setAutoFocus() => _invokeOrThrow('setAutoFocus');
+
+  /// Starts an Apple ProRes 422 take through the native recorder.
+  ///
+  /// The native side swaps the sensor into a 10-bit 4:2:2 format and only
+  /// answers once `AVCaptureFileOutput` actually began writing, so a thrown
+  /// [PlatformException] means no file was produced.
+  Future<void> startProResRecording({
+    required int width,
+    required int height,
+    required int fps,
+  }) {
+    return _invokeOrThrow('startProRes', <String, dynamic>{
+      'width': width,
+      'height': height,
+      'fps': fps,
+    });
+  }
+
+  /// Stops the ProRes take and returns the `.mov` master on disk.
+  Future<String?> stopProResRecording() async {
+    try {
+      return await _videoChannel.invokeMethod<String>('stopProRes');
+    } on MissingPluginException {
+      throw PlatformException(
+        code: 'unsupported',
+        message: 'Perekam ProRes hanya tersedia di aplikasi iOS.',
+      );
+    }
+  }
 
   /// Turns Apple Log on/off and returns the state the device really applied.
   Future<bool> setAppleLog(bool enabled) async {

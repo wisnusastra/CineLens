@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.1.0';
+  static const String appVersion = '1.1.1';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -144,8 +144,15 @@ class AboutScreen extends StatelessWidget {
                     title: 'Apple Log & deteksi ProRes',
                     detail:
                         'iPhone 15 Pro ke atas bisa merekam gamma Apple Log '
-                        '(10-bit) dari panel opsi; ProRes 422 dideteksi per '
-                        'perangkat. Perekam ProRes native menyusul.',
+                        '(10-bit) dari panel opsi. Apple Log butuh chip A17 Pro, '
+                        'jadi iPhone 14 Pro Max menampilkan penjelasan dan '
+                        'jalur ProRes sebagai gantinya.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Perekam Apple ProRes 422',
+                    detail: 'Tombol ProRes merekam master .mov 10-bit 4:2:2 di '
+                        'sesi kamera yang sama, tanpa LUT dibakar ke file. '
+                        'Sensor kembali ke format normal setelah tiap take.',
                   ),
                   _ChangeEntry(
                     title: 'Foto resolusi penuh',

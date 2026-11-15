@@ -29,6 +29,20 @@ import UIKit
   private var manualFocusPosition: Double?
   private var appleLogEnabled = false
 
+  /// ProRes recording rides on the plugin's own `AVCaptureSession`.
+  ///
+  /// iOS refuses a second session for the same camera, and the plugin's
+  /// `CameraPreview` is the only preview available to Dart, so a separate
+  /// recorder would mean losing the preview entirely. Instead this output is
+  /// added to the running session for the duration of the take, then removed
+  /// and the previous preset/format restored.
+  private var proResOutput: AVCaptureMovieFileOutput?
+  private var proResDelegate: ProResRecordingDelegate?
+  private var proResStartResult: FlutterResult?
+  private var proResStopResult: FlutterResult?
+  private var proResPreviousPreset: AVCaptureSession.Preset?
+  private var proResAudioInput: AVCaptureDeviceInput?
+
   /// The LUTs shipped with the app were authored for Flutter's
   /// `ColorFilter.matrix`, which runs on gamma-encoded sRGB values with the
   /// offsets expressed in 0…255. Core Image defaults to a linear working space,
@@ -178,6 +192,22 @@ import UIKit
           return
         }
         self?.applyAppleLog(enabled, result: result)
+
+      case "startProRes":
+        guard let args = call.arguments as? [String: Any] else {
+          result(
+            FlutterError(
+              code: "bad_args",
+              message: "ProRes arguments are required.",
+              details: nil
+            )
+          )
+          return
+        }
+        self?.startProResRecording(args: args, result: result)
+
+      case "stopProRes":
+        self?.stopProResRecording(result: result)
 
       default:
         result(FlutterMethodNotImplemented)
@@ -571,6 +601,418 @@ import UIKit
     }
   }
 
+  // MARK: - ProRes recording
+
+  /// Starts a ProRes 422 take on the plugin's session.
+  ///
+  /// `AVCaptureMovieFileOutput` can only write ProRes when the device runs a
+  /// 10-bit 4:2:2 format, so the active format is swapped for the take and the
+  /// previous session preset is restored afterwards. The file is a `.mov`
+  /// master: no LUT is baked in, the live preview still shows the selected tone.
+  private func startProResRecording(
+    args: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    if proResOutput?.isRecording == true {
+      result(
+        FlutterError(
+          code: "busy",
+          message: "Rekaman ProRes masih berjalan.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    guard let session = activeSession, let device = activeDevice else {
+      result(
+        FlutterError(
+          code: "no_session",
+          message: "Kamera belum siap untuk ProRes. Coba lagi sebentar.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    guard session.isRunning else {
+      result(
+        FlutterError(
+          code: "session_stopped",
+          message: "Sesi kamera sedang berhenti. Tunggu pratinjau hidup lagi.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    let width = (args["width"] as? NSNumber)?.intValue ?? 1920
+    let height = (args["height"] as? NSNumber)?.intValue ?? 1080
+    let requestedFrameRate = (args["fps"] as? NSNumber)?.doubleValue ?? 24
+
+    guard let format = proResFormat(
+      for: device,
+      width: width,
+      height: height,
+      frameRate: requestedFrameRate
+    ) else {
+      result(
+        FlutterError(
+          code: "unsupported",
+          message: "Sensor ini tidak menyediakan format 10-bit 4:2:2, syarat "
+            + "ProRes 422.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    // `proResFormat` may fall back to a format that cannot honour the requested
+    // rate. Setting a frame duration outside the format's range raises an
+    // Objective-C exception, so clamp to what the format advertises.
+    let ranges = format.videoSupportedFrameRateRanges
+    let minRate = ranges.map { $0.minFrameRate }.min() ?? requestedFrameRate
+    let maxRate = ranges.map { $0.maxFrameRate }.max() ?? requestedFrameRate
+    let frameRate = min(max(requestedFrameRate, minRate), maxRate)
+
+    let output = AVCaptureMovieFileOutput()
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "CINELENS_PRORES_\(Int(Date().timeIntervalSince1970)).mov"
+    )
+    try? FileManager.default.removeItem(at: url)
+
+    proResPreviousPreset = session.sessionPreset
+
+    session.beginConfiguration()
+    // inputPriority stops the session from overriding the 10-bit format we are
+    // about to select (`AVCaptureSession.Preset` has no ProRes preset).
+    session.sessionPreset = .inputPriority
+
+    if #available(iOS 17.0, *),
+       appleLogEnabled,
+       !format.supportedColorSpaces.contains(.appleLog) {
+      session.commitConfiguration()
+      restoreProResConfiguration(session: session)
+      result(
+        FlutterError(
+          code: "log_unsupported",
+          message: "Format ProRes ini tidak mendukung Apple Log. Matikan "
+            + "Apple Log atau ganti resolusi.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    do {
+      try device.lockForConfiguration()
+      device.activeFormat = format
+      let duration = CMTime(
+        value: 1,
+        timescale: CMTimeScale(max(1, Int(frameRate.rounded())))
+      )
+      device.activeVideoMinFrameDuration = duration
+      device.activeVideoMaxFrameDuration = duration
+      if #available(iOS 17.0, *), appleLogEnabled {
+        // Log must not be tone-mapped by the HDR pipeline.
+        if format.isVideoHDRSupported {
+          device.automaticallyAdjustsVideoHDREnabled = false
+          device.isVideoHDREnabled = false
+        }
+        device.activeColorSpace = .appleLog
+      }
+      device.unlockForConfiguration()
+    } catch {
+      session.commitConfiguration()
+      restoreProResConfiguration(session: session)
+      reapplyManualControls()
+      result(
+        FlutterError(
+          code: "format_failed",
+          message: "Format ProRes tidak dapat diaktifkan: "
+            + error.localizedDescription,
+          details: nil
+        )
+      )
+      return
+    }
+
+    guard session.canAddOutput(output) else {
+      session.commitConfiguration()
+      restoreProResConfiguration(session: session)
+      reapplyManualControls()
+      result(
+        FlutterError(
+          code: "output_failed",
+          message: "Sesi kamera menolak output ProRes tambahan.",
+          details: nil
+        )
+      )
+      return
+    }
+    session.addOutput(output)
+
+    // The plugin captures audio in its own session, so the ProRes master would
+    // be silent unless the microphone is attached here for the take. The input
+    // is removed again when the take ends, before the plugin records its own
+    // audio. If iOS refuses it, the take still proceeds as video-only.
+    if let audioDevice = AVCaptureDevice.default(for: .audio),
+       let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
+       session.canAddInput(audioInput) {
+      session.addInput(audioInput)
+      proResAudioInput = audioInput
+    }
+
+    session.commitConfiguration()
+
+    guard let connection = output.connection(with: .video) else {
+      detachProResHardware(
+        session: session,
+        output: output,
+        audioInput: proResAudioInput
+      )
+      proResAudioInput = nil
+      result(
+        FlutterError(
+          code: "no_connection",
+          message: "Koneksi video ProRes tidak tersedia.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    // The codec list only becomes accurate after the new format is committed.
+    guard output.availableVideoCodecTypes.contains(.proRes422) else {
+      detachProResHardware(
+        session: session,
+        output: output,
+        audioInput: proResAudioInput
+      )
+      proResAudioInput = nil
+      result(
+        FlutterError(
+          code: "codec_unsupported",
+          message: "Format aktif tidak bisa menulis ProRes 422 di perangkat "
+            + "ini. Coba 1080p atau turunkan frame rate.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    if #available(iOS 17.0, *) {
+      let angle = videoRotationAngle()
+      if connection.isVideoRotationAngleSupported(angle) {
+        connection.videoRotationAngle = angle
+      }
+    } else if connection.isVideoOrientationSupported {
+      connection.videoOrientation = currentVideoOrientation()
+    }
+
+    output.setOutputSettings(
+      [AVVideoCodecKey: AVVideoCodecType.proRes422.rawValue],
+      for: connection
+    )
+
+    let delegate = ProResRecordingDelegate(
+      onStart: { [weak self] in
+        guard let self = self else { return }
+        self.proResStartResult?(true)
+        self.proResStartResult = nil
+        // Reconfiguring the device drops the manual locks.
+        self.reapplyManualControls()
+      },
+      onFinish: { [weak self] fileURL, error in
+        self?.finishProResRecording(url: fileURL, error: error)
+      }
+    )
+
+    proResStartResult = result
+    proResOutput = output
+    proResDelegate = delegate
+    output.startRecording(to: url, recordingDelegate: delegate)
+  }
+
+  private func stopProResRecording(result: @escaping FlutterResult) {
+    guard let output = proResOutput, output.isRecording else {
+      result(
+        FlutterError(
+          code: "not_recording",
+          message: "Tidak ada rekaman ProRes yang aktif.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    proResStopResult = result
+    output.stopRecording()
+  }
+
+  /// Removes the temporary ProRes output/microphone input and returns the
+  /// plugin's session to its original preset (which re-selects a normal
+  /// format). Restoring through the preset is what keeps the plugin's own
+  /// photo/video paths working after a take.
+  private func detachProResHardware(
+    session: AVCaptureSession,
+    output: AVCaptureOutput?,
+    audioInput: AVCaptureDeviceInput?
+  ) {
+    session.beginConfiguration()
+    if let output = output,
+       session.outputs.contains(where: { $0 === output }) {
+      session.removeOutput(output)
+    }
+    if let audioInput = audioInput,
+       session.inputs.contains(where: { $0 === audioInput }) {
+      session.removeInput(audioInput)
+    }
+    session.commitConfiguration()
+    restoreProResConfiguration(session: session)
+    reapplyManualControls()
+  }
+
+  /// Called by the recording delegate once the `.mov` is closed on disk.
+  private func finishProResRecording(url: URL?, error: Error?) {
+    let startResult = proResStartResult
+    let stopResult = proResStopResult
+    proResStartResult = nil
+    proResStopResult = nil
+
+    if let session = activeSession {
+      detachProResHardware(
+        session: session,
+        output: proResOutput,
+        audioInput: proResAudioInput
+      )
+    }
+    proResOutput = nil
+    proResDelegate = nil
+    proResAudioInput = nil
+
+    var failure: Error? = error
+    if let error = error,
+       (error as NSError).userInfo[AVErrorRecordingSuccessfullyFinishedKey]
+         as? Bool == true {
+      // iOS reports a "failed" recording that is actually complete (usually
+      // because the disk filled after the last frame was written).
+      failure = nil
+    }
+
+    if let failure = failure {
+      let flutterError = FlutterError(
+        code: "record_failed",
+        message: failure.localizedDescription,
+        details: nil
+      )
+      startResult?(flutterError)
+      stopResult?(flutterError)
+      return
+    }
+
+    startResult?(true)
+    if let stopResult = stopResult {
+      stopResult(url?.path)
+    } else if let path = url?.path {
+      // The take ended without `stopProRes` (call, background): let Dart
+      // finalise whatever reached the disk.
+      nativeChannel?.invokeMethod("proResFinished", arguments: ["path": path])
+    }
+  }
+
+  /// Picks the 10-bit 4:2:2 format closest to the requested frame size.
+  ///
+  /// Per TN3104, ProRes 422 is only writable from an `x422` sensor format, so
+  /// the requested 1080p/4K size is a preference, not a guarantee.
+  private func proResFormat(
+    for device: AVCaptureDevice,
+    width: Int,
+    height: Int,
+    frameRate: Double
+  ) -> AVCaptureDevice.Format? {
+    let tenBit422 = kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+    let candidates = device.formats.filter {
+      CMFormatDescriptionGetMediaSubType($0.formatDescription) == tenBit422
+    }
+    guard !candidates.isEmpty else { return nil }
+
+    func dimensions(_ format: AVCaptureDevice.Format) -> (Int, Int) {
+      let size = CMVideoFormatDescriptionGetDimensions(
+        format.formatDescription
+      )
+      return (Int(size.width), Int(size.height))
+    }
+
+    let matchingFrameRate = candidates.filter { format in
+      format.videoSupportedFrameRateRanges.contains { range in
+        frameRate >= range.minFrameRate - 0.01
+          && frameRate <= range.maxFrameRate + 0.01
+      }
+    }
+    let pool = matchingFrameRate.isEmpty ? candidates : matchingFrameRate
+
+    if let exact = pool.first(where: {
+      let size = dimensions($0)
+      return size.0 == width && size.1 == height
+    }) {
+      return exact
+    }
+
+    let requestedLong = max(width, height)
+    let sorted = pool.sorted {
+      let lhs = dimensions($0)
+      let rhs = dimensions($1)
+      return lhs.0 * lhs.1 > rhs.0 * rhs.1
+    }
+    let fitting = sorted.first {
+      let size = dimensions($0)
+      return max(size.0, size.1) <= requestedLong
+    }
+    return fitting ?? sorted.last
+  }
+
+  /// Returns the plugin's session to the preset it used before the take.
+  ///
+  /// Assigning a preset also re-selects a matching device format, which is what
+  /// keeps still capture and normal H.264 recording usable afterwards.
+  private func restoreProResConfiguration(session: AVCaptureSession) {
+    guard let previousPreset = proResPreviousPreset else { return }
+
+    session.beginConfiguration()
+    session.sessionPreset = previousPreset
+    session.commitConfiguration()
+
+    proResPreviousPreset = nil
+  }
+
+  private func currentVideoOrientation() -> AVCaptureVideoOrientation {
+    let scene = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .first
+    let interface = scene?.interfaceOrientation ?? .portrait
+    // UIInterfaceOrientation and AVCaptureVideoOrientation share raw values.
+    return AVCaptureVideoOrientation(rawValue: interface.rawValue) ?? .portrait
+  }
+
+  /// `AVCaptureConnection.videoRotationAngle` replaces the deprecated
+  /// `videoOrientation` on iOS 17; 0° is landscape-right in sensor space.
+  @available(iOS 17.0, *)
+  private func videoRotationAngle() -> CGFloat {
+    switch currentVideoOrientation() {
+    case .landscapeRight:
+      return 0
+    case .portrait:
+      return 90
+    case .landscapeLeft:
+      return 180
+    case .portraitUpsideDown:
+      return 270
+    @unknown default:
+      return 90
+    }
+  }
+
   // MARK: - Still photography
 
   /// Applies the LUT at the still's native resolution and returns JPEG bytes.
@@ -903,6 +1345,48 @@ import UIKit
           }
         }
       }
+    }
+  }
+}
+
+/// Bridges `AVCaptureMovieFileOutput` callbacks back to `AppDelegate`.
+///
+/// `AVCaptureFileOutputRecordingDelegate` requires an object, and the output
+/// keeps only a weak reference, so `AppDelegate` stores it in `proResDelegate`
+/// for the duration of the take.
+final class ProResRecordingDelegate: NSObject,
+  AVCaptureFileOutputRecordingDelegate {
+  private let onStart: () -> Void
+  private let onFinish: (URL?, Error?) -> Void
+
+  init(
+    onStart: @escaping () -> Void,
+    onFinish: @escaping (URL?, Error?) -> Void
+  ) {
+    self.onStart = onStart
+    self.onFinish = onFinish
+  }
+
+  func fileOutput(
+    _ output: AVCaptureFileOutput,
+    didStartRecordingTo fileURL: URL,
+    from connections: [AVCaptureConnection]
+  ) {
+    // AVFoundation may call this off the main thread; the Flutter method
+    // result and the session reconfiguration must run on the UI thread.
+    DispatchQueue.main.async {
+      self.onStart()
+    }
+  }
+
+  func fileOutput(
+    _ output: AVCaptureFileOutput,
+    didFinishRecordingTo outputFileURL: URL,
+    from connections: [AVCaptureConnection],
+    error: Error?
+  ) {
+    DispatchQueue.main.async {
+      self.onFinish(outputFileURL, error)
     }
   }
 }

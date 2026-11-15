@@ -471,9 +471,9 @@ class CameraOptionsSheet extends ConsumerWidget {
               border: Border.all(color: Colors.white12),
             ),
             child: const Text(
-              'Menunggu kamera siap. Shutter, ISO, white balance, focus, dan '
-              'Apple Log muncul setelah pratinjau hidup — batas tiap kontrol '
-              'dibaca langsung dari sensor.',
+              'Menunggu kamera siap. Shutter, ISO, white balance, focus, '
+              'Apple Log, dan ProRes muncul setelah pratinjau hidup — batas '
+              'tiap kontrol dibaca langsung dari sensor.',
               style: TextStyle(
                 color: Colors.white54,
                 fontSize: 10,
@@ -488,7 +488,7 @@ class CameraOptionsSheet extends ConsumerWidget {
               color: const Color(0xFF1E1E22),
               borderRadius: BorderRadius.circular(10),
               border: Border.all(
-                color: caps.supportsAppleLog
+                color: caps.supportsAppleLog || caps.supportsProRes
                     ? Colors.amber.withValues(alpha: 0.45)
                     : Colors.white12,
               ),
@@ -498,7 +498,9 @@ class CameraOptionsSheet extends ConsumerWidget {
                 Icon(
                   Icons.camera_rounded,
                   size: 18,
-                  color: caps.supportsAppleLog ? Colors.amber : Colors.white38,
+                  color: caps.supportsAppleLog || caps.supportsProRes
+                      ? Colors.amber
+                      : Colors.white38,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -519,10 +521,10 @@ class CameraOptionsSheet extends ConsumerWidget {
                       const SizedBox(height: 2),
                       Text(
                         caps.supportsProRes
-                            ? 'ProRes 422 didukung perangkat ini. Perekam '
-                                'ProRes native menyusul; rekaman sekarang '
-                                'memakai encoder H.264/HEVC kamera.'
-                            : 'ProRes tidak didukung perangkat ini (butuh '
+                            ? 'ProRes 422 didukung. Master .mov 10-bit '
+                                'direkam tanpa LUT agar tetap fleksibel saat '
+                                'grading.'
+                            : 'ProRes 422 tidak didukung perangkat ini (butuh '
                                 'iPhone 13 Pro atau lebih baru).',
                         style: const TextStyle(
                           color: Colors.white38,
@@ -536,6 +538,37 @@ class CameraOptionsSheet extends ConsumerWidget {
               ],
             ),
           ),
+          if (caps.supportsProRes) ...[
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E22),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: SwitchListTile(
+                activeThumbColor: Colors.amber,
+                title: const Text(
+                  'ProRes 422',
+                  style: TextStyle(color: Colors.white, fontSize: 14),
+                ),
+                subtitle: Text(
+                  state.proResEnabled
+                      ? 'Rekaman memakai 10-bit 4:2:2 ke .mov. LUT hanya '
+                          'tampil di pratinjau, tidak dibakar ke file.'
+                      : 'Master 10-bit untuk grading serius. Sensor dipindah '
+                          'ke format 4:2:2 hanya selama merekam.',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                value: state.proResEnabled,
+                onChanged: isRecording
+                    ? null
+                    : (value) {
+                        tap();
+                        notifier.setProResEnabled(value);
+                      },
+              ),
+            ),
+          ],
           if (caps.supportsAppleLog) ...[
             const SizedBox(height: 8),
             Container(
@@ -564,6 +597,41 @@ class CameraOptionsSheet extends ConsumerWidget {
                         tap();
                         notifier.setAppleLog(value);
                       },
+              ),
+            ),
+          ] else ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1E),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.white12),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(
+                    Icons.lock_outline_rounded,
+                    size: 16,
+                    color: Colors.white38,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Apple Log tidak tersedia di ${caps.deviceName}. Gamma '
+                      'Log 10-bit butuh chip A17 Pro atau lebih baru '
+                      '(iPhone 15 Pro ke atas) — batas ini ada di hardware, '
+                      'bukan di aplikasi. Jalur kualitas terbaik di perangkat '
+                      'ini: aktifkan ProRes 422 untuk master 10-bit.',
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 10,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],

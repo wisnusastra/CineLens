@@ -57,6 +57,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   bool _stabilizationActive = false;
   int _stabilizationMode = 0;
 
+  /// True between a successful `startProRes` and the take being finalised.
+  /// Kept off the UI state because it must survive the state being replaced
+  /// while the native recorder is still writing.
+  bool _proResRecording = false;
+
   /// Manual sliders emit dozens of values per second; the native call is
   /// coalesced so the device is not locked for configuration on every tick.
   Timer? _manualSyncTimer;
@@ -84,7 +89,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     // Subscribe before the session starts: the native side reports the active
     // stabilisation mode as soon as `AVCaptureSession` starts running.
-    repository.listenToStabilization(_handleStabilizationChanged);
+    repository.listenToStabilization(
+      _handleStabilizationChanged,
+      onProResFinished: _handleProResFinished,
+    );
 
     final selectedTone = tones.firstWhere(
       (t) => t.id == savedPrefs.toneId,
@@ -164,6 +172,59 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         videoStabilizationMode: mode,
       ),
     );
+  }
+
+  /// Called when the native recorder finished a take Dart did not stop.
+  ///
+  /// iOS interrupts ProRes when the app leaves the foreground or a call comes
+  /// in; the master is already closed on disk, so it is just indexed and copied
+  /// into the gallery instead of being lost. No LUT is baked into the master.
+  Future<void> _handleProResFinished(String path) async {
+    if (!_proResRecording) return;
+    _proResRecording = false;
+    _recordingTimer?.cancel();
+    _writeRecordingStopped();
+    await _persistProResTake(path);
+  }
+
+  /// Indexes a ProRes `.mov` master and copies it to Apple Photos.
+  Future<void> _persistProResTake(String path) async {
+    final current = state.valueOrNull;
+    final repository = ref.read(cinemaCameraRepositoryProvider);
+
+    if (current != null) {
+      try {
+        await repository.storeVideo(
+          sourcePath: path,
+          toneId: current.selectedTone.id,
+          toneName: current.selectedTone.name,
+          intensity: current.intensity,
+          isAnamorphic: current.isAnamorphicRatio,
+        );
+      } catch (_) {
+        // The gallery index is best effort; the file still exists.
+      }
+    }
+
+    try {
+      await repository.saveVideoToGallery(path);
+    } catch (_) {
+      // Apple Photos permission can be denied; the app gallery still has it.
+    }
+  }
+
+  /// Frame size requested from the ProRes recorder.
+  ///
+  /// `MAX` is a photo-only preset, so its video path is the same 4K the plugin
+  /// records with (see [CaptureResolution.videoPreset]).
+  ({int width, int height}) _proResFrameSize(CaptureResolution resolution) {
+    return switch (resolution) {
+      CaptureResolution.fullHD => (width: 1920, height: 1080),
+      CaptureResolution.uhd4K || CaptureResolution.maxSensor => (
+          width: 3840,
+          height: 2160
+        ),
+    };
   }
 
   // ------------------------------------------------------- manual controls
@@ -421,6 +482,29 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     } on PlatformException catch (error) {
       _setProError(error.message ?? 'Apple Log tidak dapat diaktifkan.');
     }
+  }
+
+  /// Turns the native ProRes 422 recorder on/off for the next take.
+  ///
+  /// ProRes needs a 10-bit 4:2:2 sensor format, so the native side swaps the
+  /// format only while recording. Toggling is refused mid-take because that
+  /// would renegotiate the session under the writer.
+  void setProResEnabled(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (current.isRecordingVideo) {
+      _setProError('ProRes tidak bisa diubah saat merekam.');
+      return;
+    }
+    if (enabled && !current.proCapabilities.supportsProRes) {
+      _setProError(
+        'Perangkat ini tidak mendukung ProRes 422 (butuh iPhone 13 Pro ke atas).',
+      );
+      return;
+    }
+
+    state = AsyncData(current.copyWith(proResEnabled: enabled));
+    _clearProError();
   }
 
   /// Coalesces slider callbacks into a single native call.
@@ -1060,6 +1144,13 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       return;
     }
 
+    // ProRes writes a 10-bit 4:2:2 `.mov` master through the native recorder.
+    // The plugin's own writer is bypassed entirely for that take.
+    if (current.proResEnabled && current.proCapabilities.supportsProRes) {
+      await _startProResTake(current);
+      return;
+    }
+
     final cam = await _ensureControllerIdle();
     if (cam == null || !cam.value.isInitialized) {
       throw Exception('Kamera belum siap. Tutup lalu buka lagi aplikasinya.');
@@ -1082,7 +1173,45 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         recordingDuration: Duration.zero,
       ),
     );
+    _startRecordingClock();
+  }
 
+  /// Starts the native ProRes take and marks the UI as recording.
+  ///
+  /// Bubbles the [PlatformException] up so the shutter handler can toast the
+  /// native reason (unsupported format, session not ready) instead of silently
+  /// falling back to H.264 while the ProRes switch is on.
+  Future<void> _startProResTake(CinemaCameraState current) async {
+    final frame = _proResFrameSize(current.resolution);
+
+    try {
+      await ref.read(cinemaCameraRepositoryProvider).startProResRecording(
+            width: frame.width,
+            height: frame.height,
+            fps: current.frameRate.value,
+          );
+    } catch (error) {
+      _recordingTimer?.cancel();
+      _writeRecordingStopped();
+      _setProError(_describeError(error));
+      rethrow;
+    }
+
+    _proResRecording = true;
+    if (_disposed) return;
+
+    final latest = state.valueOrNull ?? current;
+    state = AsyncData(
+      latest.copyWith(
+        isRecordingVideo: true,
+        isProcessingVideo: false,
+        recordingDuration: Duration.zero,
+      ),
+    );
+    _startRecordingClock();
+  }
+
+  void _startRecordingClock() {
     _recordingTimer?.cancel();
     _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       final latest = state.valueOrNull;
@@ -1106,8 +1235,13 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   Future<VideoStopResult?> stopVideo24fpsRecording() async {
     final current = state.valueOrNull;
     final cam = _controller;
-    if (current == null || cam == null) return null;
-    if (!current.isRecordingVideo && !cam.value.isRecordingVideo) return null;
+    if (current == null) return null;
+
+    final isProResTake = _proResRecording;
+    final pluginRecording = cam?.value.isRecordingVideo ?? false;
+    if (!current.isRecordingVideo && !isProResTake && !pluginRecording) {
+      return null;
+    }
 
     _recordingTimer?.cancel();
     if (!_disposed) {
@@ -1120,9 +1254,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       );
     }
 
+    if (isProResTake) return _finishProResTake(current);
+
     String? rawPath;
     try {
-      if (cam.value.isInitialized) {
+      if (cam != null && cam.value.isInitialized) {
         final rawVideo = await cam.stopVideoRecording();
         rawPath = rawVideo.path;
       }
@@ -1177,6 +1313,53 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     return VideoStopResult(path: finalPath, warning: warning);
   }
 
+  /// Stops the native ProRes take and indexes the ungraded `.mov` master.
+  ///
+  /// The LUT is intentionally not baked in: a ProRes master has to survive
+  /// several grades, so only the live preview shows the selected tone.
+  Future<VideoStopResult?> _finishProResTake(CinemaCameraState current) async {
+    _proResRecording = false;
+
+    final repository = ref.read(cinemaCameraRepositoryProvider);
+    String? path;
+    try {
+      path = await repository.stopProResRecording();
+    } catch (error) {
+      _writeRecordingStopped();
+      _setProError(_describeError(error));
+      return null;
+    }
+
+    if (path == null || path.isEmpty) {
+      _writeRecordingStopped();
+      return null;
+    }
+
+    String? warning;
+    try {
+      await repository.storeVideo(
+        sourcePath: path,
+        toneId: current.selectedTone.id,
+        toneName: current.selectedTone.name,
+        intensity: current.intensity,
+        isAnamorphic: current.isAnamorphicRatio,
+      );
+    } catch (error) {
+      warning = 'ProRes tidak masuk galeri CineLens: ${_describeError(error)}';
+    }
+
+    try {
+      await repository.saveVideoToGallery(path);
+    } catch (error) {
+      warning = warning == null
+          ? 'Tidak tersimpan ke Apple Photos: ${_describeError(error)}'
+          : '$warning · tidak tersimpan ke Apple Photos';
+    }
+
+    _writeRecordingStopped();
+    return VideoStopResult(path: path, warning: warning);
+  }
+
   void _writeRecordingStopped() {
     final latest = state.valueOrNull;
     if (_disposed || latest == null) return;
@@ -1210,12 +1393,29 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   Future<void> _abandonInterruptedRecording() async {
     final current = state.valueOrNull;
-    final cam = _controller;
     if (current == null || !current.isRecordingVideo) return;
 
     _recordingTimer?.cancel();
     _writeRecordingStopped();
 
+    // A ProRes take is closed by the native recorder; stop it explicitly so
+    // the `.mov` gets finalised, then index whatever reached the disk.
+    if (_proResRecording) {
+      _proResRecording = false;
+      try {
+        final path = await ref
+            .read(cinemaCameraRepositoryProvider)
+            .stopProResRecording();
+        if (path != null && path.isNotEmpty) {
+          await _persistProResTake(path);
+        }
+      } catch (_) {
+        // The recorder already finalised (and reported) the file.
+      }
+      return;
+    }
+
+    final cam = _controller;
     if (cam == null || !cam.value.isInitialized) return;
 
     try {
