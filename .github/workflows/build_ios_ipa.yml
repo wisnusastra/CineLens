@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-ios:
     runs-on: macos-latest
@@ -26,8 +29,23 @@ jobs:
           # Paksa mode manual agar Xcode tidak mencari Development Team / akun Apple
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
           sed -i '' 's/ProvisioningStyle = Automatic;/ProvisioningStyle = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
-          
-          flutter build ios --release --no-codesign --no-pub
+
+          flutter build ios --release --no-codesign --no-pub 2>&1 | tee build-ios.log
+
+      # Xcode/Flutter failures are only visible to signed-in users, so a tail of
+      # the log is pushed to the `ci-debug` branch to keep it diagnosable.
+      - name: Capture failed build log
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          tail -n 500 build-ios.log > ci-logs/last-build.log || true
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B ci-debug
+          git add -f ci-logs/last-build.log
+          git commit -m "ci: capture last failed iOS build log" || true
+          git push -f origin ci-debug || true
 
       - name: 3. Pack to IPA
         run: |
