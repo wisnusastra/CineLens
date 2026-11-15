@@ -97,7 +97,7 @@ jobs:
             echo "workflow=$GITHUB_WORKFLOW sha=$GITHUB_SHA run=$GITHUB_RUN_ID"
             echo
             echo "===== flutter/xcodebuild errors ====="
-            grep -n -E "error:|error \[|BUILD FAILED|The following build commands failed|Undefined symbol" build-ios.log 2>/dev/null | tail -n 120 || echo "(no build-ios.log)"
+            grep -n -E "error:|Swift Compiler Error|Error \(Xcode\)|BUILD FAILED|The following build commands failed|Undefined symbol|CocoaPods" build-ios.log 2>/dev/null | tail -n 120 || echo "(no build-ios.log)"
             echo
             echo "===== build-ios.log (tail 400) ====="
             tail -n 400 build-ios.log 2>/dev/null || echo "(no build-ios.log)"

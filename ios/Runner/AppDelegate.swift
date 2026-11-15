@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreImage
 import Flutter
+import ImageIO
 import UIKit
 
 @main
@@ -278,10 +279,32 @@ import UIKit
     let context = AppDelegate.gradingContext
     let clampedQuality = min(max(quality, 0.5), 1.0)
 
-    guard let jpeg = context.jpegRepresentation(
-      of: output,
-      colorSpace: colorSpace,
-      options: [.lossyCompressionQuality: clampedQuality]
+    // `CIContext.jpegRepresentation(of:colorSpace:options:)` and its
+    // `lossyCompressionQuality` key were both renamed in recent SDKs, which
+    // broke the device build. ImageIO has carried the same JPEG API since
+    // iOS 4, so the quality control lives there instead.
+    guard let cgImage = context.createCGImage(
+      output,
+      from: output.extent,
+      format: .RGBA8,
+      colorSpace: colorSpace
+    ) else {
+      result(
+        FlutterError(
+          code: "encode_failed",
+          message: "The graded photo could not be rendered.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    let jpeg = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(
+      jpeg as CFMutableData,
+      "public.jpeg" as CFString,
+      1,
+      nil
     ) else {
       result(
         FlutterError(
@@ -293,7 +316,24 @@ import UIKit
       return
     }
 
-    result(FlutterStandardTypedData(bytes: jpeg))
+    CGImageDestinationAddImage(
+      destination,
+      cgImage,
+      [kCGImageDestinationLossyCompressionQuality: clampedQuality] as CFDictionary
+    )
+
+    guard CGImageDestinationFinalize(destination) else {
+      result(
+        FlutterError(
+          code: "encode_failed",
+          message: "The graded photo could not be encoded.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    result(FlutterStandardTypedData(bytes: jpeg as Data))
   }
 
   // MARK: - Video
