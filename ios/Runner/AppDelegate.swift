@@ -41,6 +41,7 @@ import UIKit
   private var proResStartResult: FlutterResult?
   private var proResStopResult: FlutterResult?
   private var proResPreviousPreset: AVCaptureSession.Preset?
+  private var proResPreviousFrameDurations: (min: CMTime, max: CMTime)?
   private var proResAudioInput: AVCaptureDeviceInput?
 
   /// The LUTs shipped with the app were authored for Flutter's
@@ -682,6 +683,10 @@ import UIKit
     try? FileManager.default.removeItem(at: url)
 
     proResPreviousPreset = session.sessionPreset
+    proResPreviousFrameDurations = (
+      min: device.activeVideoMinFrameDuration,
+      max: device.activeVideoMaxFrameDuration
+    )
 
     session.beginConfiguration()
     // inputPriority stops the session from overriding the 10-bit format we are
@@ -975,7 +980,9 @@ import UIKit
   /// Returns the plugin's session to the preset it used before the take.
   ///
   /// Assigning a preset also re-selects a matching device format, which is what
-  /// keeps still capture and normal H.264 recording usable afterwards.
+  /// keeps still capture and normal H.264 recording usable afterwards. A new
+  /// format resets the frame duration, so the plugin's chosen fps is restored
+  /// too — otherwise the next 24 fps take would record at the format default.
   private func restoreProResConfiguration(session: AVCaptureSession) {
     guard let previousPreset = proResPreviousPreset else { return }
 
@@ -984,6 +991,19 @@ import UIKit
     session.commitConfiguration()
 
     proResPreviousPreset = nil
+
+    if let device = activeDevice,
+       let durations = proResPreviousFrameDurations {
+      do {
+        try device.lockForConfiguration()
+        device.activeVideoMinFrameDuration = durations.min
+        device.activeVideoMaxFrameDuration = durations.max
+        device.unlockForConfiguration()
+      } catch {
+        // Left at the format default; the plugin re-applies fps on rebuild.
+      }
+    }
+    proResPreviousFrameDurations = nil
   }
 
   private func currentVideoOrientation() -> AVCaptureVideoOrientation {

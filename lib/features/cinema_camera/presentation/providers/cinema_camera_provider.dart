@@ -1184,6 +1184,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   Future<void> _startProResTake(CinemaCameraState current) async {
     final frame = _proResFrameSize(current.resolution);
 
+    // Claim the take before awaiting: iOS can finish the recording on its own
+    // (call, background) before this call returns, and that path reads the flag
+    // to decide whether the file has been persisted already.
+    _proResRecording = true;
+
     try {
       await ref.read(cinemaCameraRepositoryProvider).startProResRecording(
             width: frame.width,
@@ -1191,14 +1196,16 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
             fps: current.frameRate.value,
           );
     } catch (error) {
+      _proResRecording = false;
       _recordingTimer?.cancel();
       _writeRecordingStopped();
       _setProError(_describeError(error));
       rethrow;
     }
 
-    _proResRecording = true;
-    if (_disposed) return;
+    // A native interruption may have already finalised the take while this call
+    // was in flight; `_handleProResFinished` cleared the flag for us.
+    if (_disposed || !_proResRecording) return;
 
     final latest = state.valueOrNull ?? current;
     state = AsyncData(
