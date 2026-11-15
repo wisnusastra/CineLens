@@ -224,9 +224,8 @@ import UIKit
   /// The `camera` plugin never exposes `AVCaptureConnection`, so the session is
   /// reached through its own start notification: by then the plugin has already
   /// configured the format, and setting `preferredVideoStabilizationMode` on a
-  /// running connection is supported. `.auto` asks iOS for the best mode the
-  /// active format can sustain (cinematic at 1080p, standard at 4K) instead of
-  /// forcing a mode the format would reject.
+  /// running connection is supported. `.standard` is used because it adds no
+  /// preview latency (see `enableStabilization`).
   private func observeVideoStabilization() {
     let center = NotificationCenter.default
 
@@ -235,7 +234,8 @@ import UIKit
       object: nil,
       queue: .main
     ) { [weak self] notification in
-      guard let session = notification.object as? AVCaptureSession else { return }
+      guard let session = notification.object as? AVCaptureSession,
+            AppDelegate.videoDevice(in: session) != nil else { return }
       self?.enableStabilization(on: session)
       self?.captureActiveDevice(from: session)
     }
@@ -244,11 +244,30 @@ import UIKit
       forName: AVCaptureSession.didStopRunningNotification,
       object: nil,
       queue: .main
-    ) { [weak self] _ in
+    ) { [weak self] notification in
+      // The plugin also runs a separate audio-only session; its start/stop
+      // must not reset the video session's stabilisation indicator.
+      guard let session = notification.object as? AVCaptureSession,
+            AppDelegate.videoDevice(in: session) != nil else { return }
       self?.reportStabilization(active: false, mode: 0)
     }
   }
 
+  /// The video device behind a session, or `nil` for an audio-only session.
+  private static func videoDevice(in session: AVCaptureSession) -> AVCaptureDevice? {
+    session.inputs
+      .compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+      .first { $0.hasMediaType(.video) }
+  }
+
+  /// Picks `.standard` stabilisation: it has no look-ahead buffer, so the live
+  /// preview does not lag behind the camera movement.
+  ///
+  /// `.auto` used to be requested here, but on 1080p it resolves to
+  /// `.cinematic`, which delays frames by several frames and warps the image
+  /// while panning (the preview looked late and wobbly). When the active format
+  /// cannot do `.standard`, stabilisation is left off rather than letting iOS
+  /// choose a higher-latency mode.
   private func enableStabilization(on session: AVCaptureSession) {
     let stabilizable = session.connections.filter { $0.isVideoStabilizationSupported }
     guard let connection = stabilizable.first else {
@@ -256,8 +275,17 @@ import UIKit
       return
     }
 
-    for candidate in stabilizable where candidate.preferredVideoStabilizationMode == .off {
-      candidate.preferredVideoStabilizationMode = .auto
+    for candidate in stabilizable {
+      let device = candidate.inputPorts
+        .compactMap { ($0.input as? AVCaptureDeviceInput)?.device }
+        .first
+      let wanted: AVCaptureVideoStabilizationMode =
+        (device?.activeFormat.isVideoStabilizationModeSupported(.standard) ?? false)
+        ? .standard
+        : .off
+      if candidate.preferredVideoStabilizationMode != wanted {
+        candidate.preferredVideoStabilizationMode = wanted
+      }
     }
 
     // The active mode settles asynchronously once the connection reconfigures.
@@ -285,13 +313,11 @@ import UIKit
   /// us a different `AVCaptureDevice`, and iOS resets the manual settings while
   /// reconfiguring, so the stored values are replayed here.
   private func captureActiveDevice(from session: AVCaptureSession) {
+    // Only the video session may become `activeSession`. The plugin's separate
+    // audio session also posts `didStartRunning`; adopting it made ProRes try to
+    // attach its movie output to a session without a camera ("no connection").
+    guard let device = AppDelegate.videoDevice(in: session) else { return }
     activeSession = session
-
-    let device = session.inputs
-      .compactMap { ($0 as? AVCaptureDeviceInput)?.device }
-      .first { $0.hasMediaType(.video) }
-
-    guard let device = device else { return }
     let changed = activeDevice !== device
     activeDevice = device
     if changed {
@@ -630,6 +656,19 @@ import UIKit
         FlutterError(
           code: "no_session",
           message: "Kamera belum siap untuk ProRes. Coba lagi sebentar.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    guard session.inputs.contains(where: {
+      ($0 as? AVCaptureDeviceInput)?.device === device
+    }) else {
+      result(
+        FlutterError(
+          code: "no_session",
+          message: "Sesi kamera sedang dibangun ulang. Coba lagi sebentar.",
           details: nil
         )
       )
