@@ -25,35 +25,59 @@ jobs:
         run: flutter pub get
 
       - name: 2. Build iOS Release Unsigned
+        shell: bash
         run: |
+          set -o pipefail
+          set -x
+
           # Paksa mode manual agar Xcode tidak mencari Development Team / akun Apple
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
           sed -i '' 's/ProvisioningStyle = Automatic;/ProvisioningStyle = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
 
+          # `set -o pipefail` matters: without it `tee` alone decides the exit
+          # code and a failed xcodebuild would look like a successful step.
           flutter build ios --release --no-codesign --no-pub 2>&1 | tee build-ios.log
 
-      # Xcode/Flutter failures are only visible to signed-in users, so a tail of
-      # the log is pushed to the `ci-debug` branch to keep it diagnosable.
-      - name: Capture failed build log
-        if: failure()
-        run: |
-          mkdir -p ci-logs
-          tail -n 500 build-ios.log > ci-logs/last-build.log || true
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B ci-debug
-          git add -f ci-logs/last-build.log
-          git commit -m "ci: capture last failed iOS build log" || true
-          git push -f origin ci-debug || true
-
       - name: 3. Pack to IPA
+        shell: bash
         run: |
-          mkdir -p build/ios/ipa/Payload
-          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
-          cd build/ios/ipa
-          zip -ry CineLens_iOS.ipa Payload
-          ls -lh CineLens_iOS.ipa
+          set -o pipefail
+
+          {
+            set -x
+            echo "--- build/ios tree ---"
+            find build/ios -maxdepth 2 -type d | head -n 40
+
+            # Flutter has shipped the device bundle under both of these names.
+            APP_PATH=""
+            for candidate in \
+              build/ios/iphoneos/Runner.app \
+              build/ios/Release-iphoneos/Runner.app \
+              build/ios/Release/Runner.app
+            do
+              if [ -d "$candidate" ]; then
+                APP_PATH="$candidate"
+                break
+              fi
+            done
+            if [ -z "$APP_PATH" ]; then
+              APP_PATH="$(find build/ios -maxdepth 4 -name Runner.app -type d | head -n 1)"
+            fi
+
+            echo "APP_PATH=$APP_PATH"
+            if [ -z "$APP_PATH" ]; then
+              echo "ERROR: Runner.app was not produced by the build."
+              exit 1
+            fi
+
+            rm -rf build/ios/ipa
+            mkdir -p build/ios/ipa/Payload
+            cp -R "$APP_PATH" build/ios/ipa/Payload/
+            cd build/ios/ipa
+            zip -qry CineLens_iOS.ipa Payload
+            ls -lh CineLens_iOS.ipa
+            unzip -l CineLens_iOS.ipa | head -n 5
+          } 2>&1 | tee pack-ipa.log
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -61,3 +85,33 @@ jobs:
           name: CineLens-iOS-IPA
           path: build/ios/ipa/CineLens_iOS.ipa
           if-no-files-found: error
+
+      # Action logs are only readable while signed in, so the tail of every log
+      # is pushed to the `ci-debug` branch to keep failures diagnosable.
+      - name: Publish failure log
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p ci-logs
+          {
+            echo "workflow=$GITHUB_WORKFLOW sha=$GITHUB_SHA run=$GITHUB_RUN_ID"
+            echo
+            echo "===== flutter/xcodebuild errors ====="
+            grep -n -E "error:|error \[|BUILD FAILED|The following build commands failed|Undefined symbol" build-ios.log 2>/dev/null | tail -n 120 || echo "(no build-ios.log)"
+            echo
+            echo "===== build-ios.log (tail 400) ====="
+            tail -n 400 build-ios.log 2>/dev/null || echo "(no build-ios.log)"
+            echo
+            echo "===== pack-ipa.log (tail 120) ====="
+            tail -n 120 pack-ipa.log 2>/dev/null || echo "(no pack-ipa.log)"
+            echo
+            echo "===== build/ios tree ====="
+            find build/ios -maxdepth 3 2>/dev/null | head -n 80 || true
+          } > ci-logs/last-run.log
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -f -B ci-debug
+          git add -f ci-logs/last-run.log
+          git commit -m "ci: capture last failed iOS run" || true
+          git push -f origin ci-debug || true
