@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.1.1';
+  static const String appVersion = '1.1.2';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -132,6 +132,14 @@ class AboutScreen extends StatelessWidget {
                     ),
                   ),
                   SizedBox(height: 12),
+                  _ChangeEntry(
+                    title: 'Profil datar "CineLens Flat"',
+                    detail:
+                        'Tone baru bergaya Log untuk perangkat tanpa Apple Log: '
+                        'gamma datar dengan highlight lembut dan shadow '
+                        'terangkat, supaya hasilnya tetap fleksibel di-grading '
+                        '— termasuk saat dipakai bersama master ProRes 10-bit.',
+                  ),
                   _ChangeEntry(
                     title: 'Kontrol pro manual: shutter, ISO, WB, focus',
                     detail:
