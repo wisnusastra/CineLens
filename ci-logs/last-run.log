@@ -1,0 +1,107 @@
+workflow=Build CineLens iOS IPA sha=6e06d2bb186547c88dcc3d7c505468f647c7e786 run=43668443583
+
+===== flutter/xcodebuild errors =====
+(no build-ios.log)
+
+===== build-ios.log (tail 400) =====
+Warning: Building for device with codesigning disabled. You will have to manually codesign before deploying to device.
+Xcode is fetching Swift Package Manager dependencies. This may take several minutes...
+  Fetching from https://github.com/zhangao0086/DKImagePickerController...     
+  Fetching from https://github.com/zhangao0086/DKCamera...      
+  Fetching from https://github.com/zhangao0086/DKPhotoGallery...     
+  Fetching from https://github.com/SDWebImage/SDWebImage...     
+  Fetching from https://github.com/kirualex/SwiftyGif.git...     
+  Fetching from https://github.com/TimOliver/TOCropViewController...     
+Building com.cinelens.cinelensIos for device (ios-release)...
+Running Xcode build...                                          
+Xcode build done.                                           99.5s
+Failed to build iOS app
+Swift Compiler Error (Xcode): Type 'CIImageRepresentationOption' has no member 'lossyCompressionQuality'
+/Users/runner/work/CineLens/CineLens/ios/Runner/AppDelegate.swift:283:17
+
+Encountered error while building for device.
+
+===== pack-ipa.log (tail 120) =====
+(no pack-ipa.log)
+
+===== build/ios tree =====
+build/ios
+build/ios/SourcePackages
+build/ios/SourcePackages/artifacts
+build/ios/SourcePackages/workspace-state.json
+build/ios/SourcePackages/checkouts
+build/ios/SourcePackages/checkouts/DKCamera
+build/ios/SourcePackages/checkouts/SwiftyGif
+build/ios/SourcePackages/checkouts/DKPhotoGallery
+build/ios/SourcePackages/checkouts/TOCropViewController
+build/ios/SourcePackages/checkouts/DKImagePickerController
+build/ios/SourcePackages/checkouts/SDWebImage
+build/ios/SourcePackages/repositories
+build/ios/SourcePackages/repositories/DKPhotoGallery-aabc5a65
+build/ios/SourcePackages/repositories/DKImagePickerController-fc207755
+build/ios/SourcePackages/repositories/SDWebImage-a1d552be
+build/ios/SourcePackages/repositories/DKCamera-7445bb6e
+build/ios/SourcePackages/repositories/TOCropViewController-fb474312
+build/ios/SourcePackages/repositories/SwiftyGif-7e0f294b
+build/ios/Release-iphoneos
+build/ios/Release-iphoneos/DKImagePickerController.o
+build/ios/Release-iphoneos/camera_avfoundation_camera_avfoundation.bundle
+build/ios/Release-iphoneos/camera_avfoundation_camera_avfoundation.bundle/PrivacyInfo.xcprivacy
+build/ios/Release-iphoneos/camera_avfoundation_camera_avfoundation.bundle/Info.plist
+build/ios/Release-iphoneos/DKPhotoGallery_DKPhotoGallery.bundle
+build/ios/Release-iphoneos/DKPhotoGallery_DKPhotoGallery.bundle/zh-Hans.lproj
+build/ios/Release-iphoneos/DKPhotoGallery_DKPhotoGallery.bundle/en.lproj
+build/ios/Release-iphoneos/DKPhotoGallery_DKPhotoGallery.bundle/Base.lproj
+build/ios/Release-iphoneos/DKPhotoGallery_DKPhotoGallery.bundle/Assets.car
+build/ios/Release-iphoneos/DKPhotoGallery_DKPhotoGallery.bundle/Info.plist
+build/ios/Release-iphoneos/camera_avfoundation_camera_avfoundation_objc.bundle
+build/ios/Release-iphoneos/camera_avfoundation_camera_avfoundation_objc.bundle/PrivacyInfo.xcprivacy
+build/ios/Release-iphoneos/camera_avfoundation_camera_avfoundation_objc.bundle/Info.plist
+build/ios/Release-iphoneos/.last_build_id
+build/ios/Release-iphoneos/FlutterGeneratedPluginSwiftPackage.o
+build/ios/Release-iphoneos/shared_preferences_foundation.o
+build/ios/Release-iphoneos/video_player_avfoundation.o
+build/ios/Release-iphoneos/FlutterFramework.swiftmodule
+build/ios/Release-iphoneos/FlutterFramework.swiftmodule/arm64-apple-ios.swiftdoc
+build/ios/Release-iphoneos/FlutterFramework.swiftmodule/Project
+build/ios/Release-iphoneos/FlutterFramework.swiftmodule/arm64-apple-ios.swiftmodule
+build/ios/Release-iphoneos/FlutterFramework.swiftmodule/arm64-apple-ios.abi.json
+build/ios/Release-iphoneos/DKPhotoGallery.swiftmodule
+build/ios/Release-iphoneos/DKPhotoGallery.swiftmodule/arm64-apple-ios.swiftdoc
+build/ios/Release-iphoneos/DKPhotoGallery.swiftmodule/Project
+build/ios/Release-iphoneos/DKPhotoGallery.swiftmodule/arm64-apple-ios.swiftmodule
+build/ios/Release-iphoneos/DKPhotoGallery.swiftmodule/arm64-apple-ios.abi.json
+build/ios/Release-iphoneos/camera_avfoundation_objc.o
+build/ios/Release-iphoneos/video_player_avfoundation_video_player_avfoundation.bundle
+build/ios/Release-iphoneos/video_player_avfoundation_video_player_avfoundation.bundle/PrivacyInfo.xcprivacy
+build/ios/Release-iphoneos/video_player_avfoundation_video_player_avfoundation.bundle/Info.plist
+build/ios/Release-iphoneos/video_player_avfoundation.swiftmodule
+build/ios/Release-iphoneos/video_player_avfoundation.swiftmodule/arm64-apple-ios.swiftdoc
+build/ios/Release-iphoneos/video_player_avfoundation.swiftmodule/Project
+build/ios/Release-iphoneos/video_player_avfoundation.swiftmodule/arm64-apple-ios.swiftmodule
+build/ios/Release-iphoneos/video_player_avfoundation.swiftmodule/arm64-apple-ios.abi.json
+build/ios/Release-iphoneos/share_plus_share_plus.bundle
+build/ios/Release-iphoneos/share_plus_share_plus.bundle/PrivacyInfo.xcprivacy
+build/ios/Release-iphoneos/share_plus_share_plus.bundle/Info.plist
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/de.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/ar.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/zh-Hans.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/ja.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/fa.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/en.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/uk.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/es.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/it.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/sk.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/ms.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/cs.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/ko.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/Base.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/zh-Hant.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/fa-IR.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/hu.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/da-DK.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/tr.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/pl.lproj
+build/ios/Release-iphoneos/TOCropViewController_TOCropViewController.bundle/pt-BR.lproj
