@@ -9,6 +9,7 @@ import '../../../about/presentation/screens/about_screen.dart';
 import '../../../cinema_camera/domain/entities/pro_capture_capabilities.dart';
 import '../../../cinema_camera/presentation/providers/cinema_camera_provider.dart';
 import '../../../cinema_camera/presentation/providers/cinema_camera_state.dart';
+import '../../../cinema_camera/presentation/widgets/film_look_section.dart';
 import '../../domain/entities/camera_options_state.dart';
 import '../providers/camera_options_provider.dart';
 
@@ -253,6 +254,12 @@ class CameraOptionsSheet extends ConsumerWidget {
                 ),
                 const SizedBox(height: 20),
                 _buildProSection(
+                  state: cameraState,
+                  notifier: cameraNotifier,
+                  haptics: options.hapticFeedback,
+                ),
+                const SizedBox(height: 20),
+                FilmLookSection(
                   state: cameraState,
                   notifier: cameraNotifier,
                   haptics: options.hapticFeedback,

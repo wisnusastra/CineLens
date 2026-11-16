@@ -7,6 +7,7 @@ import '../../../../core/constants/app_constants.dart';
 import '../../data/repositories/cinema_camera_repository_impl.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
+import '../../domain/entities/film_look.dart';
 import '../../domain/entities/pro_capture_capabilities.dart';
 import '../../domain/services/color_matrix_builder.dart';
 import 'cinema_camera_state.dart';
@@ -86,6 +87,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final tones = await repository.getAllTones();
     final savedPrefs = await repository.loadSavedPreferences();
     final captureSettings = await repository.loadCaptureSettings();
+    final filmLook = await repository.loadFilmLook();
+    final bakeLook = await repository.loadBakeLookIntoProRes();
 
     // Subscribe before the session starts: the native side reports the active
     // stabilisation mode as soon as `AVCaptureSession` starts running.
@@ -144,6 +147,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       videoStabilizationActive: _stabilizationActive,
       videoStabilizationMode: _stabilizationMode,
       proCapabilities: capabilities,
+      filmLook: filmLook,
+      bakeLookIntoProRes: bakeLook,
       iso: 400.0.clamp(capabilities.minIso, capabilities.maxIso).toDouble(),
       shutterSeconds: (1 / 48)
           .clamp(
@@ -505,6 +510,61 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     state = AsyncData(current.copyWith(proResEnabled: enabled));
     _clearProError();
+  }
+
+  // ------------------------------------------------------------- film look
+
+  /// Updates the film emulation strengths (grain, halation, bloom, vignette).
+  ///
+  /// Nothing is sent to the native side here: the parameters ride along with
+  /// the next capture, so dragging a slider never reconfigures the camera.
+  void setFilmLook(FilmLook look) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(filmLook: look));
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveFilmLook(look),
+    );
+  }
+
+  void setBakeLookIntoProRes(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (current.isRecordingVideo) {
+      _setProError('Opsi LUT ProRes tidak bisa diubah saat merekam.');
+      return;
+    }
+    state = AsyncData(current.copyWith(bakeLookIntoProRes: enabled));
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveBakeLookIntoProRes(enabled),
+    );
+  }
+
+  /// Imports `.cube` files and selects the first one.
+  ///
+  /// Returns how many LUTs were added. The imported tone's matrix is only the
+  /// preview approximation; the exact cube is used for photo, video and ProRes.
+  Future<int> importCubeLuts() async {
+    final current = state.valueOrNull;
+    if (current == null) return 0;
+
+    final repository = ref.read(cinemaCameraRepositoryProvider);
+    final imported = await repository.importCubeLutsFromFilePicker();
+    if (imported.isEmpty) return 0;
+
+    final updatedTones = await repository.getAllTones();
+    final selected = imported.first;
+
+    state = AsyncData(
+      current.copyWith(
+        tones: updatedTones,
+        selectedTone: selected,
+        intensity: 1.0,
+        clearLiveDraft: true,
+      ),
+    );
+    await repository.savePreferences(toneId: selected.id, intensity: 1.0);
+    return imported.length;
   }
 
   /// Coalesces slider callbacks into a single native call.
@@ -1062,8 +1122,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       final repository = ref.read(cinemaCameraRepositoryProvider);
       final Uint8List gradedBytes = await repository.renderGradedImage(
         rawBytes: rawBytes,
-        colorMatrix: current.activeColorMatrix,
+        colorMatrix: current.captureColorMatrix,
         applyAnamorphicBars: current.isAnamorphicRatio,
+        look: current.nativeLook,
       );
 
       String? warning;
@@ -1285,9 +1346,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     try {
       finalPath = await repository.renderGradedVideo(
         rawVideoPath: rawPath,
-        colorMatrix: current.activeColorMatrix,
+        colorMatrix: current.captureColorMatrix,
         applyAnamorphicBars: current.isAnamorphicRatio,
         fps: current.frameRate.value,
+        look: current.nativeLook,
       );
     } catch (error) {
       finalPath = rawPath;
@@ -1322,8 +1384,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   /// Stops the native ProRes take and indexes the ungraded `.mov` master.
   ///
-  /// The LUT is intentionally not baked in: a ProRes master has to survive
-  /// several grades, so only the live preview shows the selected tone.
+  /// The master stays ungraded unless the user explicitly turns on
+  /// "Sertakan look di ProRes": a flat master survives several grades, so the
+  /// default only shows the tone in the live preview.
   Future<VideoStopResult?> _finishProResTake(CinemaCameraState current) async {
     _proResRecording = false;
 
@@ -1342,10 +1405,22 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       return null;
     }
 
+    String finalPath = path;
     String? warning;
+    if (current.bakeLookIntoProRes && current.hasRenderableLook) {
+      try {
+        finalPath = await repository.bakeLookIntoProRes(
+          path: finalPath,
+          colorMatrix: current.captureColorMatrix,
+          look: current.nativeLook,
+        );
+      } catch (error) {
+        warning = 'Look gagal dibakar ke ProRes: ${_describeError(error)}';
+      }
+    }
     try {
       await repository.storeVideo(
-        sourcePath: path,
+        sourcePath: finalPath,
         toneId: current.selectedTone.id,
         toneName: current.selectedTone.name,
         intensity: current.intensity,
@@ -1356,7 +1431,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     }
 
     try {
-      await repository.saveVideoToGallery(path);
+      await repository.saveVideoToGallery(finalPath);
     } catch (error) {
       warning = warning == null
           ? 'Tidak tersimpan ke Apple Photos: ${_describeError(error)}'
@@ -1364,7 +1439,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     }
 
     _writeRecordingStopped();
-    return VideoStopResult(path: path, warning: warning);
+    return VideoStopResult(path: finalPath, warning: warning);
   }
 
   void _writeRecordingStopped() {

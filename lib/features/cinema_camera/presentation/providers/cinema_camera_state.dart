@@ -1,6 +1,7 @@
 import 'dart:ui';
 import 'package:camera/camera.dart';
 import '../../domain/entities/cinema_tone.dart';
+import '../../domain/entities/film_look.dart';
 import '../../domain/entities/pro_capture_capabilities.dart';
 import '../../domain/services/color_matrix_builder.dart';
 
@@ -110,6 +111,14 @@ class CinemaCameraState {
   /// [ProCaptureCapabilities.supportsProRes] is true.
   final bool proResEnabled;
 
+  /// Film emulation (grain, halation, bloom, vignette) applied to stills and
+  /// clips. Imported `.cube` LUTs use [FilmLook.lutMix] from here too.
+  final FilmLook filmLook;
+
+  /// When on, a ProRes take is re-encoded with the tone + effects burned in.
+  /// Off by default: a ProRes master is normally kept flat for grading.
+  final bool bakeLookIntoProRes;
+
   /// Last refusal from the native controls, shown inside the pro panel so a
   /// rejected setting is never silent.
   final String? proControlError;
@@ -150,15 +159,50 @@ class CinemaCameraState {
     this.focusPosition = 0.5,
     this.appleLogEnabled = false,
     this.proResEnabled = false,
+    this.filmLook = const FilmLook(),
+    this.bakeLookIntoProRes = false,
     this.proControlError,
   });
 
+  /// Matrix the live preview uses.
+  ///
+  /// For an imported `.cube` tone this is the least-squares approximation, so
+  /// the viewfinder keeps moving in real time while exports use the exact LUT.
   List<double> get activeColorMatrix {
     if (liveDraftParameters != null) {
       return ColorMatrixBuilder.build(liveDraftParameters!);
     }
     return selectedTone.blendedMatrix(intensity);
   }
+
+  /// Matrix handed to the native renderer.
+  ///
+  /// An imported LUT must not be approximated on export: the cube is applied
+  /// there, so the matrix is neutral.
+  List<double> get captureColorMatrix {
+    if (selectedTone.isLutTone) return CinemaTone.identityMatrix;
+    if (liveDraftParameters != null) {
+      return ColorMatrixBuilder.build(liveDraftParameters!);
+    }
+    return selectedTone.blendedMatrix(intensity);
+  }
+
+  /// Payload for `AppDelegate.filmLook(from:)`.
+  ///
+  /// The parsed LUT path and its mix ride along with the effects so one call
+  /// reproduces the whole look.
+  Map<String, dynamic> get nativeLook {
+    final tone = selectedTone;
+    return filmLook.toNative(
+      lutPath: tone.isLutTone ? tone.lutPath : null,
+      lutSize: tone.isLutTone ? tone.lutSize : null,
+      mix: tone.isLutTone ? intensity.clamp(0.0, 1.0) : 0,
+    );
+  }
+
+  /// True when the current look is worth baking into a ProRes master.
+  bool get hasRenderableLook =>
+      selectedTone.isLutTone || !filmLook.isNeutral || intensity > 0.01;
 
   /// Label used by the viewfinder chips, e.g. `4K · 24FPS`.
   String get qualityLabel => '${resolution.label} · ${frameRate.value}FPS';
@@ -229,6 +273,8 @@ class CinemaCameraState {
     double? focusPosition,
     bool? appleLogEnabled,
     bool? proResEnabled,
+    FilmLook? filmLook,
+    bool? bakeLookIntoProRes,
     String? proControlError,
     bool clearProControlError = false,
   }) {
@@ -274,6 +320,8 @@ class CinemaCameraState {
       focusPosition: focusPosition ?? this.focusPosition,
       appleLogEnabled: appleLogEnabled ?? this.appleLogEnabled,
       proResEnabled: proResEnabled ?? this.proResEnabled,
+      filmLook: filmLook ?? this.filmLook,
+      bakeLookIntoProRes: bakeLookIntoProRes ?? this.bakeLookIntoProRes,
       proControlError: clearProControlError
           ? null
           : (proControlError ?? this.proControlError),

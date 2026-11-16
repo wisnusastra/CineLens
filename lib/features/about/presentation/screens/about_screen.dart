@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.1.2';
+  static const String appVersion = '1.1.3';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -133,6 +133,39 @@ class AboutScreen extends StatelessWidget {
                   ),
                   SizedBox(height: 12),
                   _ChangeEntry(
+                    title: 'Tone & LUT benar-benar terlihat di hasil',
+                    detail:
+                        'Foto dan video kini memakai matriks tone yang sama '
+                        'dengan viewfinder, jadi perubahan tone langsung '
+                        'terasa di file — bukan hanya grain-nya. LUT 3D juga '
+                        'dipakai apa adanya oleh renderer native.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Grain film lebih halus',
+                    detail:
+                        'Grain lama yang kasar diganti grain luminansi 1 px '
+                        'dengan skala 1.0–2.2 px, sehingga teksturnya terbaca '
+                        'seperti film 16mm, bukan noise digital blok.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Impor LUT .cube',
+                    detail: 'Buka opsi kamera, pilih IMPOR .CUBE, dan LUT 3D '
+                        'milik Anda langsung aktif. Look disimpan lokal dan '
+                        'dipakai untuk foto, video, maupun ProRes.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Film emulation: grain, halation, bloom, vignette',
+                    detail: 'Intensitas tiap efek bisa diatur di panel FILM '
+                        'EMULATION. Pratinjau menampilkan tone, grain, dan '
+                        'vignette; halation & bloom dirender saat disimpan.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Opsi sertakan look di ProRes',
+                    detail: 'Sakelar "Sertakan look di ProRes" merekam ulang '
+                        'master ProRes 422 dengan tone + efek dibakar. '
+                        'Nonaktif = master tetap flat untuk grading manual.',
+                  ),
+                  _ChangeEntry(
                     title: 'Profil datar "CineLens Flat"',
                     detail:
                         'Tone baru bergaya Log untuk perangkat tanpa Apple Log: '
@@ -159,7 +192,8 @@ class AboutScreen extends StatelessWidget {
                   _ChangeEntry(
                     title: 'Perekam Apple ProRes 422',
                     detail: 'Tombol ProRes merekam master .mov 10-bit 4:2:2 di '
-                        'sesi kamera yang sama, tanpa LUT dibakar ke file. '
+                        'sesi kamera yang sama. Look bisa dibakar lewat opsi '
+                        'di panel film emulation. '
                         'Sensor kembali ke format normal setelah tiap take.',
                   ),
                   _ChangeEntry(

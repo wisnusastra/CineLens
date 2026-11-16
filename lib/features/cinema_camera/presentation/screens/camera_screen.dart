@@ -14,6 +14,7 @@ import '../../../../core/constants/app_constants.dart';
 import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../domain/entities/cinema_tone.dart';
+import '../../domain/entities/film_look.dart';
 import '../../../options/domain/entities/camera_options_state.dart';
 import '../../../options/presentation/providers/camera_options_provider.dart';
 import '../../../options/presentation/widgets/camera_options_sheet.dart';
@@ -211,6 +212,10 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
               ),
             ),
           ),
+          if (!state.filmLook.isNeutral)
+            IgnorePointer(
+              child: _FilmPreviewOverlay(look: state.filmLook),
+            ),
           if (state.isAnamorphicRatio)
             ..._buildAnamorphicGuide(
               previewSize: previewSize,
@@ -1233,4 +1238,86 @@ class _CinemaErrorView extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Lightweight approximation of the film look for the live viewfinder.
+///
+/// Flutter can draw but not run Core Image, so only the two effects that read
+/// well as an overlay are shown here: fine luminance grain and the vignette.
+/// Halation and bloom need a real blur pass over the highlights, so the native
+/// pipeline bakes them into the saved photo/video instead.
+class _FilmPreviewOverlay extends StatelessWidget {
+  final FilmLook look;
+
+  const _FilmPreviewOverlay({required this.look});
+
+  @override
+  Widget build(BuildContext context) {
+    final grain = look.grain.clamp(0.0, 1.0);
+    final vignette = look.vignette.clamp(0.0, 1.0);
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (grain > 0.01)
+          RepaintBoundary(
+            child: CustomPaint(
+              painter: _GrainPainter(
+                strength: grain,
+                size: look.grainSize,
+              ),
+            ),
+          ),
+        if (vignette > 0.01)
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: RadialGradient(
+                radius: 0.95,
+                stops: const [0.55, 1.0],
+                colors: [
+                  Colors.transparent,
+                  Colors.black.withValues(alpha: vignette * 0.55),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Draws a static field of 1–2 px specks, which is what gives the preview its
+/// film texture without repainting every frame.
+class _GrainPainter extends CustomPainter {
+  final double strength;
+  final double size;
+
+  const _GrainPainter({required this.strength, required this.size});
+
+  @override
+  void paint(Canvas canvas, Size canvasSize) {
+    if (canvasSize.isEmpty) return;
+
+    final dot = 1.0 + size.clamp(0.0, 1.0) * 1.2;
+    final count = ((canvasSize.width * canvasSize.height) / 260)
+        .clamp(400.0, 2800.0)
+        .round();
+    final random = math.Random(20240517);
+    final paint = Paint()..style = PaintingStyle.fill;
+
+    for (var i = 0; i < count; i++) {
+      final x = random.nextDouble() * canvasSize.width;
+      final y = random.nextDouble() * canvasSize.height;
+      // Alternating light and dark specks keep the average exposure neutral.
+      final light = random.nextBool();
+      final alpha = light ? 0.02 + strength * 0.10 : 0.02 + strength * 0.07;
+      paint.color = (light ? Colors.white : Colors.black)
+          .withValues(alpha: alpha.clamp(0.0, 0.35));
+      canvas.drawRect(Rect.fromLTWH(x, y, dot, dot), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _GrainPainter oldDelegate) =>
+      oldDelegate.strength != strength || oldDelegate.size != size;
 }

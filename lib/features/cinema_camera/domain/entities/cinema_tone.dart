@@ -9,6 +9,16 @@ class CinemaTone {
   final List<double> matrix;
   final bool isCustom;
 
+  /// Absolute path of the imported `.cube` payload, when this tone came from a
+  /// LUT file instead of a matrix.
+  ///
+  /// The matrix next to it is a best-fit approximation used by the live
+  /// preview; the native renderer reads this file so exports use the real look.
+  final String? lutPath;
+
+  /// Edge length of the imported cube (17, 33, 65…).
+  final int? lutSize;
+
   const CinemaTone({
     required this.id,
     required this.name,
@@ -17,6 +27,8 @@ class CinemaTone {
     required this.accentColorHex,
     required this.matrix,
     this.isCustom = false,
+    this.lutPath,
+    this.lutSize,
   });
 
   static const List<double> identityMatrix = <double>[
@@ -27,6 +39,9 @@ class CinemaTone {
   ];
 
   bool get isValidMatrix => matrix.length == 20;
+
+  /// True when this tone renders from an imported `.cube` file.
+  bool get isLutTone => lutPath != null && lutPath!.isNotEmpty;
 
   Color get accentColor => Color(accentColorHex);
 
@@ -49,6 +64,8 @@ class CinemaTone {
     int? accentColorHex,
     List<double>? matrix,
     bool? isCustom,
+    String? lutPath,
+    int? lutSize,
   }) {
     return CinemaTone(
       id: id ?? this.id,
@@ -58,6 +75,8 @@ class CinemaTone {
       accentColorHex: accentColorHex ?? this.accentColorHex,
       matrix: matrix ?? this.matrix,
       isCustom: isCustom ?? this.isCustom,
+      lutPath: lutPath ?? this.lutPath,
+      lutSize: lutSize ?? this.lutSize,
     );
   }
 
@@ -69,6 +88,8 @@ class CinemaTone {
         'accentColorHex': accentColorHex,
         'matrix': matrix,
         'isCustom': isCustom,
+        if (lutPath != null) 'lutPath': lutPath,
+        if (lutSize != null) 'lutSize': lutSize,
       };
 
   factory CinemaTone.fromJson(Map<String, dynamic> json) {
@@ -77,13 +98,16 @@ class CinemaTone {
         .toList();
 
     return CinemaTone(
-      id: json['id'] as String? ?? 'imported_${DateTime.now().millisecondsSinceEpoch}',
+      id: json['id'] as String? ??
+          'imported_${DateTime.now().millisecondsSinceEpoch}',
       name: json['name'] as String? ?? 'UNTITLED LUT',
       filmReference: json['filmReference'] as String? ?? 'Imported LUT',
       description: json['description'] as String? ?? '',
       accentColorHex: json['accentColorHex'] as int? ?? 0xFFE5A93B,
       matrix: rawMatrix.length == 20 ? rawMatrix : identityMatrix,
       isCustom: json['isCustom'] as bool? ?? false,
+      lutPath: json['lutPath'] as String?,
+      lutSize: (json['lutSize'] as num?)?.toInt(),
     );
   }
 }

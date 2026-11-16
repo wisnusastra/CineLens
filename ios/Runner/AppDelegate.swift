@@ -42,7 +42,6 @@ import UIKit
   private var proResStopResult: FlutterResult?
   private var proResPreviousPreset: AVCaptureSession.Preset?
   private var proResPreviousFrameDurations: (min: CMTime, max: CMTime)?
-  private var proResAudioInput: AVCaptureDeviceInput?
 
   /// The LUTs shipped with the app were authored for Flutter's
   /// `ColorFilter.matrix`, which runs on gamma-encoded sRGB values with the
@@ -103,6 +102,21 @@ import UIKit
           matrix: matrix,
           anamorphic: anamorphic,
           fps: fps,
+          look: AppDelegate.filmLook(from: args),
+          result: result
+        )
+
+      case "bakeLookIntoProRes":
+        guard let args = call.arguments as? [String: Any],
+              let inputPath = args["inputPath"] as? String,
+              let matrix = args["matrix"] as? [Double] else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        self?.bakeLookIntoProRes(
+          inputPath: inputPath,
+          matrix: matrix,
+          look: AppDelegate.filmLook(from: args),
           result: result
         )
 
@@ -121,6 +135,7 @@ import UIKit
           matrix: matrix,
           anamorphic: anamorphic,
           quality: quality,
+          look: AppDelegate.filmLook(from: args),
           result: result
         )
 
@@ -236,6 +251,11 @@ import UIKit
       queue: .main
     ) { [weak self] notification in
       guard let session = notification.object as? AVCaptureSession else { return }
+      // The plugin runs a second, audio-only session; it must not be treated as
+      // the camera session or it would reset the stabilisation readout.
+      guard session.connections.contains(where: {
+        $0.output is AVCaptureVideoDataOutput
+      }) else { return }
       self?.enableStabilization(on: session)
       self?.captureActiveDevice(from: session)
     }
@@ -244,20 +264,31 @@ import UIKit
       forName: AVCaptureSession.didStopRunningNotification,
       object: nil,
       queue: .main
-    ) { [weak self] _ in
-      self?.reportStabilization(active: false, mode: 0)
+    ) { [weak self] notification in
+      guard let self = self,
+            let session = notification.object as? AVCaptureSession,
+            session === self.activeSession else { return }
+      self.reportStabilization(active: false, mode: 0)
     }
   }
 
+  /// Turns on low-latency stabilisation for the plugin's capture pipeline.
+  ///
+  /// The `camera` plugin previews through an `AVCaptureVideoDataOutput` that is
+  /// blitted into a Flutter texture, not an `AVCaptureVideoPreviewLayer`.
+  /// Cinematic mode buffers several frames before stabilising, which through
+  /// that path shows up as heavy panning lag and erratic, pulsating motion, so
+  /// only `.standard` is requested: it steadies the frame from the gyro without
+  /// the extra buffering.
   private func enableStabilization(on session: AVCaptureSession) {
-    let stabilizable = session.connections.filter { $0.isVideoStabilizationSupported }
-    guard let connection = stabilizable.first else {
+    let connections = stabilizableConnections(in: session)
+    guard let connection = connections.first else {
       reportStabilization(active: false, mode: 0)
       return
     }
 
-    for candidate in stabilizable where candidate.preferredVideoStabilizationMode == .off {
-      candidate.preferredVideoStabilizationMode = .auto
+    for candidate in connections {
+      candidate.preferredVideoStabilizationMode = .standard
     }
 
     // The active mode settles asynchronously once the connection reconfigures.
@@ -265,6 +296,31 @@ import UIKit
       guard let connection = connection else { return }
       let mode = connection.activeVideoStabilizationMode
       self?.reportStabilization(active: mode != .off, mode: Int(mode.rawValue))
+    }
+  }
+
+  /// The connections stabilisation may touch: the plugin's preview/record data
+  /// output only. The ProRes movie output gets its own connection, which must
+  /// stay untouched or the 10-bit format negotiations start fighting.
+  private func stabilizableConnections(
+    in session: AVCaptureSession
+  ) -> [AVCaptureConnection] {
+    session.connections.filter {
+      $0.isVideoStabilizationSupported && $0.output is AVCaptureVideoDataOutput
+    }
+  }
+
+  /// Enables/disables stabilisation around a ProRes take.
+  ///
+  /// A stabilisation mode the 10-bit 4:2:2 format cannot sustain makes iOS
+  /// reject the format switch, which is what broke ProRes recording, so it is
+  /// parked while the recorder owns the session and restored afterwards.
+  private func setStabilizationEnabled(
+    _ enabled: Bool,
+    on session: AVCaptureSession
+  ) {
+    for connection in stabilizableConnections(in: session) {
+      connection.preferredVideoStabilizationMode = enabled ? .standard : .off
     }
   }
 
@@ -310,14 +366,17 @@ import UIKit
       supportsAppleLog = format.supportedColorSpaces.contains(.appleLog)
     }
 
-    // Per TN3104 the prerequisite for ProRes 422 is a 10-bit 4:2:2 sensor
-    // format (`x422`). `AVCaptureMovieFileOutput.availableVideoCodecTypes`
-    // cannot answer this here: it only reports codecs once the output is
-    // attached to the running session, which belongs to the camera plugin.
-    let supportsProRes = device.formats.contains { candidate in
-      CMFormatDescriptionGetMediaSubType(candidate.formatDescription)
-        == kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
-    }
+    // ProRes 422 needs a 10-bit sensor format to encode from.
+    // `AVCaptureMovieFileOutput.availableVideoCodecTypes` cannot answer this
+    // here: it only reports codecs once the output is attached to the running
+    // session, which belongs to the camera plugin. `proResFormat` is the single
+    // source of truth so the switch and the recorder never disagree.
+    let supportsProRes = proResFormat(
+      for: device,
+      width: 1920,
+      height: 1080,
+      frameRate: 24
+    ) != nil
 
     return [
       "available": true,
@@ -688,6 +747,10 @@ import UIKit
       max: device.activeVideoMaxFrameDuration
     )
 
+    // A stabilisation mode the 10-bit 4:2:2 format cannot sustain makes iOS
+    // refuse the format switch, which is the known "ProRes gagal merekam" case.
+    setStabilizationEnabled(false, on: session)
+
     session.beginConfiguration()
     // inputPriority stops the session from overriding the 10-bit format we are
     // about to select (`AVCaptureSession.Preset` has no ProRes preset).
@@ -757,26 +820,10 @@ import UIKit
     }
     session.addOutput(output)
 
-    // The plugin captures audio in its own session, so the ProRes master would
-    // be silent unless the microphone is attached here for the take. The input
-    // is removed again when the take ends, before the plugin records its own
-    // audio. If iOS refuses it, the take still proceeds as video-only.
-    if let audioDevice = AVCaptureDevice.default(for: .audio),
-       let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
-       session.canAddInput(audioInput) {
-      session.addInput(audioInput)
-      proResAudioInput = audioInput
-    }
-
     session.commitConfiguration()
 
     guard let connection = output.connection(with: .video) else {
-      detachProResHardware(
-        session: session,
-        output: output,
-        audioInput: proResAudioInput
-      )
-      proResAudioInput = nil
+      detachProResHardware(session: session, output: output)
       result(
         FlutterError(
           code: "no_connection",
@@ -788,18 +835,15 @@ import UIKit
     }
 
     // The codec list only becomes accurate after the new format is committed.
-    guard output.availableVideoCodecTypes.contains(.proRes422) else {
-      detachProResHardware(
-        session: session,
-        output: output,
-        audioInput: proResAudioInput
-      )
-      proResAudioInput = nil
+    guard let codec = preferredProResCodec(
+      from: output.availableVideoCodecTypes
+    ) else {
+      detachProResHardware(session: session, output: output)
       result(
         FlutterError(
           code: "codec_unsupported",
-          message: "Format aktif tidak bisa menulis ProRes 422 di perangkat "
-            + "ini. Coba 1080p atau turunkan frame rate.",
+          message: "Format aktif tidak bisa menulis ProRes di perangkat ini. "
+            + "Coba 1080p atau turunkan frame rate.",
           details: nil
         )
       )
@@ -816,7 +860,7 @@ import UIKit
     }
 
     output.setOutputSettings(
-      [AVVideoCodecKey: AVVideoCodecType.proRes422.rawValue],
+      [AVVideoCodecKey: codec.rawValue],
       for: connection
     )
 
@@ -861,21 +905,18 @@ import UIKit
   /// photo/video paths working after a take.
   private func detachProResHardware(
     session: AVCaptureSession,
-    output: AVCaptureOutput?,
-    audioInput: AVCaptureDeviceInput?
+    output: AVCaptureOutput?
   ) {
     session.beginConfiguration()
     if let output = output,
        session.outputs.contains(where: { $0 === output }) {
       session.removeOutput(output)
     }
-    if let audioInput = audioInput,
-       session.inputs.contains(where: { $0 === audioInput }) {
-      session.removeInput(audioInput)
-    }
     session.commitConfiguration()
     restoreProResConfiguration(session: session)
     reapplyManualControls()
+    // Stabilisation is restored only once the plugin's normal format is back.
+    setStabilizationEnabled(true, on: session)
   }
 
   /// Called by the recording delegate once the `.mov` is closed on disk.
@@ -886,15 +927,10 @@ import UIKit
     proResStopResult = nil
 
     if let session = activeSession {
-      detachProResHardware(
-        session: session,
-        output: proResOutput,
-        audioInput: proResAudioInput
-      )
+      detachProResHardware(session: session, output: proResOutput)
     }
     proResOutput = nil
     proResDelegate = nil
-    proResAudioInput = nil
 
     var failure: Error? = error
     if let error = error,
@@ -926,21 +962,38 @@ import UIKit
     }
   }
 
-  /// Picks the 10-bit 4:2:2 format closest to the requested frame size.
+  /// Picks the 10-bit format to record ProRes from, preferring full-range
+  /// 4:2:2 and falling back to the (identical-bit-depth) video-range variant.
   ///
-  /// Per TN3104, ProRes 422 is only writable from an `x422` sensor format, so
-  /// the requested 1080p/4K size is a preference, not a guarantee.
+  /// ProRes 422 is only writable from a 10-bit sensor format, so the requested
+  /// 1080p/4K size is a preference, not a guarantee. Full-range is preferred
+  /// because it keeps the most headroom for grading.
   private func proResFormat(
     for device: AVCaptureDevice,
     width: Int,
     height: Int,
     frameRate: Double
   ) -> AVCaptureDevice.Format? {
-    let tenBit422 = kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
-    let candidates = device.formats.filter {
-      CMFormatDescriptionGetMediaSubType($0.formatDescription) == tenBit422
+    let fullRange422 = kCVPixelFormatType_422YpCbCr10BiPlanarFullRange
+    let videoRange422 = kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+    let fullRange420 = kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+    let videoRange420 = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+
+    /// 4:2:2 first: it is the format ProRes 422 officially records from. The
+    /// 4:2:0 variant is a last-resort fallback for hardware/HDR modes that only
+    /// advertise 10-bit 4:2:0.
+    func rank(_ format: AVCaptureDevice.Format) -> Int {
+      let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+      if subtype == fullRange422 || subtype == videoRange422 { return 2 }
+      if subtype == fullRange420 || subtype == videoRange420 { return 1 }
+      return 0
     }
-    guard !candidates.isEmpty else { return nil }
+
+    let candidates = device.formats.filter { rank($0) > 0 }
+    guard let bestRank = candidates.map(rank).max() else { return nil }
+
+    // Drop the lower-quality variants as soon as a 4:2:2 format exists.
+    let preferred = candidates.filter { rank($0) == bestRank }
 
     func dimensions(_ format: AVCaptureDevice.Format) -> (Int, Int) {
       let size = CMVideoFormatDescriptionGetDimensions(
@@ -949,13 +1002,13 @@ import UIKit
       return (Int(size.width), Int(size.height))
     }
 
-    let matchingFrameRate = candidates.filter { format in
+    let matchingFrameRate = preferred.filter { format in
       format.videoSupportedFrameRateRanges.contains { range in
         frameRate >= range.minFrameRate - 0.01
           && frameRate <= range.maxFrameRate + 0.01
       }
     }
-    let pool = matchingFrameRate.isEmpty ? candidates : matchingFrameRate
+    let pool = matchingFrameRate.isEmpty ? preferred : matchingFrameRate
 
     if let exact = pool.first(where: {
       let size = dimensions($0)
@@ -1006,6 +1059,479 @@ import UIKit
     proResPreviousFrameDurations = nil
   }
 
+  // MARK: - Film look
+
+  /// Film emulation parameters shared by the photo, video and ProRes graders.
+  ///
+  /// Flutter sends this as a dictionary with every render so the exported
+  /// stills and clips keep matching the viewfinder. All strengths are 0…1.
+  struct FilmLook {
+    let lutURL: URL?
+    let lutDimension: Int
+    let lutMix: Double
+    let grain: Double
+    let grainSize: Double
+    let halation: Double
+    let bloom: Double
+    let vignette: Double
+
+    static let none = FilmLook(
+      lutURL: nil,
+      lutDimension: 0,
+      lutMix: 0,
+      grain: 0,
+      grainSize: 0,
+      halation: 0,
+      bloom: 0,
+      vignette: 0
+    )
+
+    var isNeutral: Bool {
+      lutURL == nil
+        && grain <= 0.001
+        && halation <= 0.001
+        && bloom <= 0.001
+        && vignette <= 0.001
+    }
+  }
+
+  /// Decodes the `look` dictionary sent by Dart.
+  ///
+  /// A `.cube` LUT is imported by Dart, converted to a raw RGBA float cube and
+  /// handed over as a file path, so only a cheap file read happens here.
+  static func filmLook(from args: [String: Any]) -> FilmLook {
+    let raw = (args["look"] as? [String: Any]) ?? [:]
+
+    func unit(_ key: String) -> Double {
+      let value = (raw[key] as? NSNumber)?.doubleValue ?? 0
+      return min(max(value, 0), 1)
+    }
+
+    let dimension = (raw["lutSize"] as? NSNumber)?.intValue ?? 0
+    var lutURL: URL?
+    if let path = raw["lutPath"] as? String,
+       !path.isEmpty,
+       dimension > 1,
+       FileManager.default.fileExists(atPath: path) {
+      lutURL = URL(fileURLWithPath: path)
+    }
+
+    return FilmLook(
+      lutURL: lutURL,
+      lutDimension: dimension,
+      lutMix: unit("lutMix"),
+      grain: unit("grain"),
+      grainSize: unit("grainSize"),
+      halation: unit("halation"),
+      bloom: unit("bloom"),
+      vignette: unit("vignette")
+    )
+  }
+
+  /// Parsed `.cube` payloads, keyed by path + dimension.
+  ///
+  /// A 33³ cube is ~575 KB, so reading it for every video frame would stall the
+  /// render loop. The cache keeps the current look in memory instead.
+  private static var cubeCache: [String: Data] = [:]
+
+  private static func cubeData(for url: URL, dimension: Int) -> Data? {
+    let key = "\(url.path)|\(dimension)"
+    if let cached = cubeCache[key] { return cached }
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    let expected = dimension * dimension * dimension * 16
+    guard data.count >= expected else { return nil }
+    if cubeCache.count >= 4 { cubeCache.removeAll() }
+    cubeCache[key] = data
+    return data
+  }
+
+  /// Applies the imported LUT plus the film effects (grain, halation, bloom,
+  /// vignette) to one frame.
+  ///
+  /// Everything here is Core Image, so photos (one frame) and videos (one call
+  /// per frame) share the exact same look instead of drifting apart.
+  private func applyFilmLook(
+    to image: CIImage,
+    look: FilmLook,
+    extent: CGRect
+  ) -> CIImage {
+    guard !look.isNeutral, extent.width > 1, extent.height > 1 else {
+      return image
+    }
+
+    var output = image
+
+    if let lutURL = look.lutURL,
+       let data = AppDelegate.cubeData(for: lutURL, dimension: look.lutDimension),
+       let cube = CIFilter(name: "CIColorCubeWithColorSpace") {
+      cube.setValue(look.lutDimension, forKey: "inputCubeDimension")
+      cube.setValue(data, forKey: "inputCubeData")
+      cube.setValue(image, forKey: kCIInputImageKey)
+      if let space = CGColorSpace(name: CGColorSpace.sRGB) {
+        cube.setValue(space, forKey: "inputColorSpace")
+      }
+      if let graded = cube.outputImage?.cropped(to: extent) {
+        output = AppDelegate.dissolve(
+          from: output,
+          to: graded,
+          amount: look.lutMix
+        )
+      }
+    }
+
+    let shortSide = min(extent.width, extent.height)
+    let longSide = max(extent.width, extent.height)
+
+    // Halation: warm glow that bleeds out of the brightest areas, the way light
+    // scatters through the film base. Bloom is the neutral, wider version.
+    if look.halation > 0.001,
+       let glow = highlightGlow(
+         of: output,
+         extent: extent,
+         threshold: 0.62,
+         radius: max(2, longSide * 0.010),
+         tint: CIVector(x: 1.0, y: 0.45, z: 0.30, w: 1),
+         intensity: look.halation * 0.85
+       ) {
+      output = glow
+    }
+
+    if look.bloom > 0.001,
+       let glow = highlightGlow(
+         of: output,
+         extent: extent,
+         threshold: 0.70,
+         radius: max(3, longSide * 0.024),
+         tint: CIVector(x: 1.0, y: 1.0, z: 1.0, w: 1),
+         intensity: look.bloom * 0.5
+       ) {
+      output = glow
+    }
+
+    if look.vignette > 0.001 {
+      output = output.applyingFilter("CIVignette", parameters: [
+        kCIInputIntensityKey: look.vignette * 2.0,
+        kCIInputRadiusKey: shortSide * 0.62,
+      ]).cropped(to: extent)
+    }
+
+    if look.grain > 0.001,
+       let noise = CIFilter(name: "CIRandomGenerator")?.outputImage {
+      // Film grain has to read as texture, not as blocky digital noise: the
+      // generator runs at 1 px, and `grainSize` only nudges it up to 2.2 px.
+      let scale = 1.0 + look.grainSize * 1.2
+      let mono = noise
+        .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        .cropped(to: extent)
+        .applyingFilter("CIColorMatrix", parameters: [
+          "inputRVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
+          "inputGVector": CIVector(x: 0.59, y: 0.59, z: 0.59, w: 0),
+          "inputBVector": CIVector(x: 0.11, y: 0.11, z: 0.11, w: 0),
+          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+        ])
+      let blended = mono.applyingFilter(
+        "CISoftLightBlendMode",
+        parameters: [kCIInputBackgroundImageKey: output]
+      ).cropped(to: extent)
+      // Soft light already lands gently, so the dissolve amount is the grain
+      // dial itself: "1.0" is heavy texture, never a snowstorm.
+      output = AppDelegate.dissolve(
+        from: output,
+        to: blended,
+        amount: look.grain
+      )
+    }
+
+    return output.cropped(to: extent)
+  }
+
+  /// Blurs the highlights of [image] and adds the glow back on top.
+  private func highlightGlow(
+    of image: CIImage,
+    extent: CGRect,
+    threshold: CGFloat,
+    radius: CGFloat,
+    tint: CIVector,
+    intensity: Double
+  ) -> CIImage? {
+    guard intensity > 0.001 else { return nil }
+
+    let isolated = image.applyingFilter("CIColorMatrix", parameters: [
+      "inputRVector": CIVector(x: 1, y: 0, z: 0, w: 0),
+      "inputGVector": CIVector(x: 0, y: 1, z: 0, w: 0),
+      "inputBVector": CIVector(x: 0, y: 0, z: 1, w: 0),
+      "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+      "inputBiasVector": CIVector(
+        x: -threshold,
+        y: -threshold,
+        z: -threshold,
+        w: 0
+      ),
+    ]).cropped(to: extent)
+
+    let blurred = isolated
+      .clampedToExtent()
+      .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+      .cropped(to: extent)
+
+    let gain = CGFloat(intensity)
+    let tinted = blurred.applyingFilter("CIColorMatrix", parameters: [
+      "inputRVector": CIVector(x: tint.x * gain, y: 0, z: 0, w: 0),
+      "inputGVector": CIVector(x: 0, y: tint.y * gain, z: 0, w: 0),
+      "inputBVector": CIVector(x: 0, y: 0, z: tint.z * gain, w: 0),
+      "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+    ]).cropped(to: extent)
+
+    return tinted
+      .applyingFilter(
+        "CIAdditionCompositing",
+        parameters: [kCIInputBackgroundImageKey: image]
+      )
+      .cropped(to: extent)
+  }
+
+  /// Linear-style mix between two graded versions of the same frame.
+  private static func dissolve(
+    from base: CIImage,
+    to target: CIImage,
+    amount: Double
+  ) -> CIImage {
+    let clamped = min(max(amount, 0), 1)
+    if clamped <= 0.001 { return base }
+    if clamped >= 0.999 { return target }
+    guard let filter = CIFilter(name: "CIDissolveTransition") else {
+      return target
+    }
+    filter.setValue(base, forKey: kCIInputImageKey)
+    filter.setValue(target, forKey: "inputTargetImage")
+    filter.setValue(clamped, forKey: "inputTime")
+    return filter.outputImage?.cropped(to: base.extent) ?? target
+  }
+
+  /// Re-encodes a ProRes master with the tone + film look baked in.
+  ///
+  /// The output stays ProRes 422 10-bit so the file is still an edit-friendly
+  /// master: only the look is burned in, never the codec. Any failure returns
+  /// the untouched path, because losing the take is worse than a flat master.
+  private func bakeLookIntoProRes(
+    inputPath: String,
+    matrix: [Double],
+    look: FilmLook,
+    result: @escaping FlutterResult
+  ) {
+    let identity: [Double] = [
+      1, 0, 0, 0, 0,
+      0, 1, 0, 0, 0,
+      0, 0, 1, 0, 0,
+      0, 0, 0, 1, 0,
+    ]
+    let isIdentityMatrix = matrix.count != 20
+      || zip(matrix, identity).allSatisfy { pair in
+        abs(pair.0 - pair.1) < 0.0001
+      }
+    if look.isNeutral && isIdentityMatrix {
+      result(inputPath)
+      return
+    }
+
+    let outputURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent(
+        "CINELENS_BAKED_\(Int(Date().timeIntervalSince1970)).mov"
+      )
+
+    let asset = AVURLAsset(url: URL(fileURLWithPath: inputPath))
+
+    Task {
+      guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+            let naturalSize = try? await track.load(.naturalSize),
+            let transform = try? await track.load(.preferredTransform),
+            naturalSize.width > 0,
+            naturalSize.height > 0 else {
+        DispatchQueue.main.async { result(inputPath) }
+        return
+      }
+
+      let oriented = CGRect(origin: .zero, size: naturalSize)
+        .applying(transform)
+      let width = Int(abs(oriented.width).rounded())
+      let height = Int(abs(oriented.height).rounded())
+      guard width > 0, height > 0 else {
+        DispatchQueue.main.async { result(inputPath) }
+        return
+      }
+
+      guard let reader = try? AVAssetReader(asset: asset) else {
+        DispatchQueue.main.async { result(inputPath) }
+        return
+      }
+      let readerOutput = AVAssetReaderTrackOutput(
+        track: track,
+        outputSettings: [
+          kCVPixelBufferPixelFormatTypeKey as String:
+            kCVPixelFormatType_32BGRA
+        ]
+      )
+      readerOutput.alwaysCopiesSampleData = false
+      guard reader.canAdd(readerOutput) else {
+        DispatchQueue.main.async { result(inputPath) }
+        return
+      }
+      reader.add(readerOutput)
+
+      guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mov) else {
+        DispatchQueue.main.async { result(inputPath) }
+        return
+      }
+      let writerInput = AVAssetWriterInput(
+        mediaType: .video,
+        outputSettings: [
+          AVVideoCodecKey: AVVideoCodecType.proRes422,
+          AVVideoWidthKey: width,
+          AVVideoHeightKey: height,
+        ]
+      )
+      writerInput.expectsMediaDataInRealTime = false
+      let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+        assetWriterInput: writerInput,
+        sourcePixelBufferAttributes: [
+          kCVPixelBufferPixelFormatTypeKey as String:
+            kCVPixelFormatType_32BGRA,
+          kCVPixelBufferWidthKey as String: width,
+          kCVPixelBufferHeightKey as String: height,
+        ]
+      )
+      guard writer.canAdd(writerInput) else {
+        DispatchQueue.main.async { result(inputPath) }
+        return
+      }
+      writer.add(writerInput)
+
+      guard writer.startWriting() else {
+        DispatchQueue.main.async { result(inputPath) }
+        return
+      }
+      writer.startSession(atSourceTime: .zero)
+      reader.startReading()
+
+      let context = AppDelegate.gradingContext
+      let renderQueue = DispatchQueue(label: "com.cinelens.proresBake")
+
+      writerInput.requestMediaDataWhenReady(on: renderQueue) {
+        while writerInput.isReadyForMoreMediaData {
+          guard let sample = readerOutput.copyNextSampleBuffer() else {
+            writerInput.markAsFinished()
+            reader.cancelReading()
+            writer.finishWriting {
+              let ok = writer.status == .completed
+              DispatchQueue.main.async {
+                result(ok ? outputURL.path : inputPath)
+              }
+            }
+            return
+          }
+
+          guard let buffer = CMSampleBufferGetImageBuffer(sample),
+                let pool = adaptor.pixelBufferPool else {
+            continue
+          }
+
+          var source = CIImage(cvPixelBuffer: buffer)
+          if matrix.count == 20 {
+            source = self.applyColorMatrix(matrix, to: source)
+          }
+          var graded = self.applyFilmLook(
+            to: source,
+            look: look,
+            extent: source.extent
+          )
+          if !transform.isIdentity {
+            graded = graded.transformed(by: transform)
+          }
+          let extent = graded.extent
+          if extent.origin != .zero {
+            graded = graded.transformed(
+              by: CGAffineTransform(
+                translationX: -extent.origin.x,
+                y: -extent.origin.y
+              )
+            )
+          }
+
+          var outputBuffer: CVPixelBuffer?
+          guard CVPixelBufferPoolCreatePixelBuffer(
+            nil,
+            pool,
+            &outputBuffer
+          ) == kCVReturnSuccess, let outputBuffer = outputBuffer else {
+            continue
+          }
+          context.render(
+            graded,
+            to: outputBuffer,
+            bounds: CGRect(x: 0, y: 0, width: width, height: height),
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+          )
+
+          let time = CMSampleBufferGetPresentationTimeStamp(sample)
+          if !adaptor.append(outputBuffer, withPresentationTime: time) {
+            break
+          }
+        }
+      }
+    }
+  }
+
+  /// Shared `CIColorMatrix` application used by the photo/video/ProRes paths.
+  private func applyColorMatrix(_ matrix: [Double], to image: CIImage) -> CIImage {
+    guard matrix.count == 20,
+          let filter = CIFilter(name: "CIColorMatrix") else { return image }
+
+    filter.setValue(image, forKey: kCIInputImageKey)
+    filter.setValue(
+      CIVector(x: matrix[0], y: matrix[1], z: matrix[2], w: matrix[3]),
+      forKey: "inputRVector"
+    )
+    filter.setValue(
+      CIVector(x: matrix[5], y: matrix[6], z: matrix[7], w: matrix[8]),
+      forKey: "inputGVector"
+    )
+    filter.setValue(
+      CIVector(x: matrix[10], y: matrix[11], z: matrix[12], w: matrix[13]),
+      forKey: "inputBVector"
+    )
+    filter.setValue(
+      CIVector(x: matrix[15], y: matrix[16], z: matrix[17], w: matrix[18]),
+      forKey: "inputAVector"
+    )
+    filter.setValue(
+      CIVector(
+        x: matrix[4] / 255.0,
+        y: matrix[9] / 255.0,
+        z: matrix[14] / 255.0,
+        w: matrix[19] / 255.0
+      ),
+      forKey: "inputBiasVector"
+    )
+    return filter.outputImage?.cropped(to: image.extent) ?? image
+  }
+
+  /// Picks the best ProRes codec the current output accepts.
+  ///
+  /// `.proRes422` is the baseline every ProRes-capable iPhone writes; the LT/HQ
+  /// variants are preferred when offered so the master keeps more bitrate.
+  private func preferredProResCodec(
+    from available: [AVVideoCodecType]
+  ) -> AVVideoCodecType? {
+    let order: [AVVideoCodecType] = [
+      .proRes4444,
+      .proRes422HQ,
+      .proRes422,
+      .proRes422LT,
+      .proRes422Proxy,
+    ]
+    return order.first { available.contains($0) }
+  }
+
   private func currentVideoOrientation() -> AVCaptureVideoOrientation {
     let scene = UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }
@@ -1044,6 +1570,7 @@ import UIKit
     matrix: [Double],
     anamorphic: Bool,
     quality: Double,
+    look: FilmLook,
     result: @escaping FlutterResult
   ) {
     guard matrix.count == 20 else {
@@ -1111,6 +1638,10 @@ import UIKit
 
     var output = colorFilter.outputImage?.cropped(to: source.extent)
       ?? source
+
+    // Film emulation runs on the graded frame, but before the letterbox is
+    // added so the bars stay perfectly black.
+    output = applyFilmLook(to: output, look: look, extent: source.extent)
 
     if anamorphic {
       let frame = output.extent
@@ -1218,6 +1749,7 @@ import UIKit
     matrix: [Double],
     anamorphic: Bool,
     fps: Int32,
+    look: FilmLook,
     result: @escaping FlutterResult
   ) {
     guard matrix.count == 20 else {
@@ -1293,6 +1825,14 @@ import UIKit
 
         var output = colorFilter.outputImage?.cropped(to: sourceExtent)
           ?? request.sourceImage
+
+        // Film emulation is part of the look, so it is applied before the
+        // frame is rotated/letterboxed (grain must not cover the black bars).
+        output = self.applyFilmLook(
+          to: output,
+          look: look,
+          extent: sourceExtent
+        )
 
         // Some iOS versions hand the compositor an already oriented image.
         // Only rotate when the frame is still in the sensor's native space.

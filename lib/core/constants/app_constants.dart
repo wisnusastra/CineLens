@@ -11,6 +11,8 @@ class AppConstants {
   static const String prefCaptureResolution = 'capture_resolution_preset';
   static const String prefCaptureFrameRate = 'capture_frame_rate';
   static const String prefMediaLibraryJson = 'captured_media_library_json';
+  static const String prefFilmLookJson = 'film_look_json';
+  static const String prefBakeLookIntoProRes = 'bake_look_into_prores';
   static const String videoGraderChannel = 'com.cinelens.ios/video_grader';
 
   static const int presetJsonSchemaVersion = 1;
@@ -20,6 +22,9 @@ class AppConstants {
   /// Folder inside the app documents directory that keeps a local copy of
   /// every capture so the in-app gallery works without Photos permission.
   static const String mediaFolderName = 'cinelens_media';
+
+  /// Folder that keeps imported `.cube` LUTs as raw RGBA float cubes.
+  static const String lutFolderName = 'cinelens_luts';
 
   /// How many captures the gallery index keeps. Older entries are pruned from
   /// the index (and their files deleted) so preferences cannot grow forever.

@@ -12,7 +12,9 @@ import '../../../../core/constants/app_constants.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/cinema_tone_preset_package.dart';
+import '../../domain/entities/film_look.dart';
 import '../../domain/entities/pro_capture_capabilities.dart';
+import '../../domain/services/cube_lut.dart';
 import '../datasources/cinema_tones_preset_source.dart';
 
 class CinemaCameraRepository {
@@ -51,9 +53,14 @@ class CinemaCameraRepository {
   Future<void> deleteCustomTone(String toneId) async {
     final prefs = await SharedPreferences.getInstance();
     final existing = await loadCustomTones();
+    final removed = existing.where((t) => t.id == toneId).toList();
     final updated = existing.where((t) => t.id != toneId).toList();
     final encoded = jsonEncode(updated.map((t) => t.toJson()).toList());
     await prefs.setString(AppConstants.prefCustomTonesJson, encoded);
+
+    for (final tone in removed) {
+      await deleteLutPayload(tone.lutPath);
+    }
   }
 
   String buildPresetJsonString(List<CinemaTone> tones) {
@@ -117,6 +124,140 @@ class CinemaCameraRepository {
     return importTonesFromJsonString(rawJson);
   }
 
+  // ------------------------------------------------------------- .cube LUTs
+
+  /// Picks one or more `.cube` files and registers them as custom tones.
+  ///
+  /// The cube is converted to a raw RGBA float payload that Core Image can read
+  /// directly, so the exported photo/video uses the exact LUT. `matrix` on the
+  /// resulting tone is a least-squares approximation for the live preview,
+  /// because Flutter can only filter with a colour matrix.
+  Future<List<CinemaTone>> importCubeLutsFromFilePicker() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['cube'],
+      allowMultiple: true,
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return [];
+
+    final directory = await _lutDirectory();
+    final imported = <CinemaTone>[];
+    final prefs = await SharedPreferences.getInstance();
+    final existing = await loadCustomTones();
+    final existingNames = existing.map((t) => t.name.toUpperCase()).toSet();
+
+    for (final file in result.files) {
+      try {
+        final String text;
+        if (file.bytes != null) {
+          text = utf8.decode(file.bytes!, allowMalformed: true);
+        } else if (file.path != null) {
+          text = await File(file.path!).readAsString();
+        } else {
+          continue;
+        }
+
+        final cube = parseCubeLut(text);
+        final stamp = DateTime.now().microsecondsSinceEpoch;
+        final id = 'cube_${stamp}_${imported.length}';
+        final payload = File('${directory.path}/$id.rgba');
+        await payload.writeAsBytes(cube.toRgbaCube().buffer.asUint8List(),
+            flush: true);
+
+        var name = (cube.title ?? _baseName(file.name)).toUpperCase();
+        if (existingNames.contains(name)) name = '$name (IMP)';
+        existingNames.add(name);
+
+        imported.add(
+          CinemaTone(
+            id: id,
+            name: name,
+            filmReference: 'LUT 3D ${cube.size}³',
+            description: 'LUT impor dari ${file.name}',
+            accentColorHex: 0xFFE5A93B,
+            matrix: fitCubeToMatrix(cube),
+            isCustom: true,
+            lutPath: payload.path,
+            lutSize: cube.size,
+          ),
+        );
+      } catch (_) {
+        // A broken file must not abort the whole import; the caller reports how
+        // many actually landed.
+        continue;
+      }
+    }
+
+    if (imported.isEmpty) return [];
+
+    final merged = [...existing, ...imported];
+    await prefs.setString(
+      AppConstants.prefCustomTonesJson,
+      jsonEncode(merged.map((t) => t.toJson()).toList()),
+    );
+    return imported;
+  }
+
+  Future<Directory> _lutDirectory() async {
+    final documents = await getApplicationDocumentsDirectory();
+    final directory =
+        Directory('${documents.path}/${AppConstants.lutFolderName}');
+    if (!await directory.exists()) {
+      await directory.create(recursive: true);
+    }
+    return directory;
+  }
+
+  String _baseName(String fileName) {
+    final dot = fileName.lastIndexOf('.');
+    return dot > 0 ? fileName.substring(0, dot) : fileName;
+  }
+
+  /// Removes the backing file of an imported LUT once its tone is deleted.
+  Future<void> deleteLutPayload(String? path) async {
+    if (path == null || path.isEmpty) return;
+    final file = File(path);
+    if (await file.exists()) {
+      try {
+        await file.delete();
+      } catch (_) {
+        // Best effort: a stale file only wastes a few hundred kilobytes.
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- film look
+
+  Future<FilmLook> loadFilmLook() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(AppConstants.prefFilmLookJson);
+    if (raw == null || raw.isEmpty) return const FilmLook();
+    try {
+      return FilmLook.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return const FilmLook();
+    }
+  }
+
+  Future<void> saveFilmLook(FilmLook look) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      AppConstants.prefFilmLookJson,
+      jsonEncode(look.toJson()),
+    );
+  }
+
+  Future<bool> loadBakeLookIntoProRes() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(AppConstants.prefBakeLookIntoProRes) ?? false;
+  }
+
+  Future<void> saveBakeLookIntoProRes(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefBakeLookIntoProRes, enabled);
+  }
+
   Future<List<CinemaTone>> importTonesFromJsonString(String rawJson) async {
     final importedTones =
         CinemaTonePresetPackage.parseAndValidateTones(rawJson);
@@ -169,6 +310,7 @@ class CinemaCameraRepository {
     required Uint8List rawBytes,
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
+    Map<String, dynamic>? look,
   }) async {
     try {
       final graded = await _videoChannel.invokeMethod<Uint8List>(
@@ -178,6 +320,7 @@ class CinemaCameraRepository {
           'matrix': colorMatrix,
           'anamorphic': applyAnamorphicBars,
           'quality': 0.98,
+          if (look != null) 'look': look,
         },
       );
       if (graded != null && graded.isNotEmpty) return graded;
@@ -261,6 +404,7 @@ class CinemaCameraRepository {
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
     required int fps,
+    Map<String, dynamic>? look,
   }) async {
     try {
       final gradedPath = await _videoChannel.invokeMethod<String>(
@@ -270,6 +414,7 @@ class CinemaCameraRepository {
           'matrix': colorMatrix,
           'anamorphic': applyAnamorphicBars,
           'fps': fps,
+          if (look != null) 'look': look,
         },
       );
       if (gradedPath != null && gradedPath.isNotEmpty) {
@@ -281,6 +426,34 @@ class CinemaCameraRepository {
       // Native export failed; the raw footage is still usable.
     }
     return rawVideoPath;
+  }
+
+  /// Burns the tone + film look into a ProRes master.
+  ///
+  /// The native side re-encodes to ProRes 422, so the result is still a 10-bit
+  /// master and only the look changes. Returns [path] unchanged when the export
+  /// is unavailable, because the flat master is better than no file.
+  Future<String> bakeLookIntoProRes({
+    required String path,
+    required List<double> colorMatrix,
+    required Map<String, dynamic> look,
+  }) async {
+    try {
+      final baked = await _videoChannel.invokeMethod<String>(
+        'bakeLookIntoProRes',
+        <String, dynamic>{
+          'inputPath': path,
+          'matrix': colorMatrix,
+          'look': look,
+        },
+      );
+      if (baked != null && baked.isNotEmpty) return baked;
+    } on MissingPluginException {
+      // Not on this platform.
+    } on PlatformException {
+      // Fall back to the ungraded master.
+    }
+    return path;
   }
 
   Future<void> saveVideoToGallery(String videoPath) async {
