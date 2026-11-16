@@ -1064,6 +1064,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         rawBytes: rawBytes,
         colorMatrix: current.activeColorMatrix,
         applyAnamorphicBars: current.isAnamorphicRatio,
+        toneId: current.selectedTone.isCustom ? null : current.selectedTone.id,
+        intensity: current.intensity,
       );
 
       String? warning;
@@ -1288,6 +1290,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         colorMatrix: current.activeColorMatrix,
         applyAnamorphicBars: current.isAnamorphicRatio,
         fps: current.frameRate.value,
+        toneId: current.selectedTone.isCustom ? null : current.selectedTone.id,
+        intensity: current.intensity,
       );
     } catch (error) {
       finalPath = rawPath;

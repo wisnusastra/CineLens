@@ -9,6 +9,16 @@ bingkai anamorphic 2.39:1, pembuat tone kustom, serta export/import preset `.jso
   Golden Hour, Vintage 16mm.
 - **Grading real-time** di viewfinder lewat `ColorFilter.matrix` (matriks 5×4).
 - **Slider intensitas LUT** 0–100 %, diinterpolasi linear dari matriks identitas.
+- **Film emulation** — Foto dan video hasil export memakai mesin film native
+  (Core Image, `FilmEngine` di `ios/Runner/AppDelegate.swift`): kurva tone S per
+  kanal, crosstalk warna, desaturasi highlight, tint shadow/highlight, black &
+  white point, halation merah-oranye di sekitar highlight, bloom, grain
+  monokrom yang bergerak per frame, softness, dan vignette. Slider intensitas
+  menskalakan seluruh efek. Parameternya disetel manual agar menyerupai
+  karakter tiap stock; bukan data sensitometri terukur. Viewfinder memakai
+  pendekatan matriks linear dari model yang sama, jadi grain/halation baru
+  terlihat pada hasil foto dan video. Tone kustom dan preset impor tetap
+  memakai matriks warna biasa.
 - **Foto sinematik** — frame kamera di-render ulang (`dart:ui`) dengan LUT + bar
   anamorphic, lalu disimpan ke Apple Photos.
 - **Video 24 fps** — export lewat native bridge `com.cinelens.ios/video_grader`
