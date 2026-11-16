@@ -2289,9 +2289,23 @@ struct FilmLook {
       ]
     )
 
-    let blurred = extracted.cropped(to: extent)
-      .clampedToExtent()
-      .applyingGaussianBlur(sigma: sigma)
+    // Big soft glows do not need full resolution. Blurring a quarter-size copy
+    // is the same picture for a fraction of the cost, which keeps video export
+    // fast. Lanczos keeps tiny highlights from flickering between frames.
+    let reduction = 4.0
+    let small = extracted.cropped(to: extent).applyingFilter(
+      "CILanczosScaleTransform",
+      parameters: [
+        kCIInputScaleKey: 1.0 / reduction,
+        kCIInputAspectRatioKey: 1.0
+      ]
+    )
+    let smallExtent = small.extent
+    let blurredSmall = small.clampedToExtent()
+      .applyingGaussianBlur(sigma: max(sigma / reduction, 0.5))
+      .cropped(to: smallExtent)
+    let blurred = blurredSmall
+      .transformed(by: CGAffineTransform(scaleX: CGFloat(reduction), y: CGFloat(reduction)))
       .cropped(to: extent)
 
     return blurred
@@ -2316,9 +2330,13 @@ struct FilmLook {
     // A different offset per frame makes the grain move like real film.
     let offsetX = CGFloat((frameIndex &* 7919) % 2048)
     let offsetY = CGFloat((frameIndex &* 104729) % 2048)
+    // CIRandomGenerator also randomises alpha. Colour filters un-premultiply
+    // before working, so a tiny random alpha blew the noise up into harsh
+    // black and white speckles. Forcing alpha to 1 keeps the raw 0...1 values.
     let shifted = noise
       .transformed(by: CGAffineTransform(translationX: offsetX, y: offsetY))
       .cropped(to: extent)
+      .settingAlphaOne(in: extent)
 
     // Average the three noise channels into one monochrome value.
     let third = CGFloat(1.0 / 3.0)
@@ -2354,7 +2372,17 @@ struct FilmLook {
       ]
     )
 
-    return centred
+    // Safety net: whatever the noise statistics turn out to be, the grain can
+    // never push a pixel more than a soft-light step away from the picture.
+    let limited = centred.applyingFilter(
+      "CIColorClamp",
+      parameters: [
+        "inputMinComponents": CIVector(x: 0.3, y: 0.3, z: 0.3, w: 0),
+        "inputMaxComponents": CIVector(x: 0.7, y: 0.7, z: 0.7, w: 1)
+      ]
+    )
+
+    return limited
       .applyingFilter(
         "CISoftLightBlendMode",
         parameters: [kCIInputBackgroundImageKey: base]
