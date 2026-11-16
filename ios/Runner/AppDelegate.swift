@@ -2166,12 +2166,23 @@ struct FilmLook {
 
     // 1. Colour: tone curve, crosstalk, tints, black/white point.
     var output = image
+    var cubeApplied = false
     if let cube = CIFilter(name: "CIColorCubeWithColorSpace"),
        let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
       cube.setValue(image, forKey: kCIInputImageKey)
       cube.setValue(FilmLook.cubeDimension, forKey: "inputCubeDimension")
       cube.setValue(cubeData, forKey: "inputCubeData")
       cube.setValue(srgb, forKey: "inputColorSpace")
+      if let graded = cube.outputImage {
+        output = graded.cropped(to: extent)
+        cubeApplied = true
+      }
+    }
+    if !cubeApplied, let cube = CIFilter(name: "CIColorCube") {
+      // The working space is sRGB, so the plain cube is equivalent.
+      cube.setValue(image, forKey: kCIInputImageKey)
+      cube.setValue(FilmLook.cubeDimension, forKey: "inputCubeDimension")
+      cube.setValue(cubeData, forKey: "inputCubeData")
       if let graded = cube.outputImage {
         output = graded.cropped(to: extent)
       }
@@ -2359,7 +2370,7 @@ struct FilmLook {
       .cropped(to: extent)
 
     let rawDeviation = 0.1667 / max(1.0, 2.0 * sigma * Double.pi.squareRoot())
-    let gain = CGFloat((amount * 0.19) / rawDeviation)
+    let gain = CGFloat((amount * 0.30) / rawDeviation)
     let bias = 0.5 - 0.5 * gain
     let centred = softened.applyingFilter(
       "CIColorMatrix",
@@ -2377,8 +2388,8 @@ struct FilmLook {
     let limited = centred.applyingFilter(
       "CIColorClamp",
       parameters: [
-        "inputMinComponents": CIVector(x: 0.3, y: 0.3, z: 0.3, w: 0),
-        "inputMaxComponents": CIVector(x: 0.7, y: 0.7, z: 0.7, w: 1)
+        "inputMinComponents": CIVector(x: 0.2, y: 0.2, z: 0.2, w: 0),
+        "inputMaxComponents": CIVector(x: 0.8, y: 0.8, z: 0.8, w: 1)
       ]
     )
 
@@ -2564,81 +2575,81 @@ enum FilmEngine {
 
   private static let stocks: [String: FilmStockParams] = [
       "kodak_2383": FilmStockParams(
-        mix: [1.04, -0.02, -0.02, -0.01, 1.03, -0.02, -0.03, 0.0, 1.03],
-        ev: 0.0,
-        k: [5.0, 4.8, 4.6], pivot: [0.5, 0.5, 0.5],
-        sat: 1.04, hlDesat: 0.3, shDesat: 0.1,
-        shadowTint: [-0.004, 0.006, 0.012], hlTint: [0.016, 0.006, -0.014],
-        black: 0.018, white: 0.965, mono: nil,
-        grain: 0.16, grainSize: 1.0,
-        halation: 0.3, bloom: 0.1,
-        vignette: 0.12, soften: 0.1
+        mix: [1.06, -0.03, -0.03, -0.02, 1.04, -0.02, -0.04, -0.01, 1.05],
+        ev: -0.04,
+        k: [6.2, 5.9, 5.6], pivot: [0.53, 0.53, 0.54],
+        sat: 1.06, hlDesat: 0.3, shDesat: 0.1,
+        shadowTint: [-0.016, 0.018, 0.046], hlTint: [0.052, 0.022, -0.046],
+        black: 0.02, white: 0.96, mono: nil,
+        grain: 0.3, grainSize: 1.0,
+        halation: 0.45, bloom: 0.16,
+        vignette: 0.2, soften: 0.12
       ),
       "teal_orange": FilmStockParams(
-        mix: [1.1, -0.05, -0.05, -0.04, 1.04, 0.0, -0.08, 0.05, 1.03],
-        ev: 0.0,
-        k: [4.9, 4.7, 4.7], pivot: [0.5, 0.49, 0.49],
-        sat: 1.1, hlDesat: 0.2, shDesat: 0.05,
-        shadowTint: [-0.022, 0.01, 0.034], hlTint: [0.034, 0.012, -0.03],
-        black: 0.01, white: 0.97, mono: nil,
-        grain: 0.12, grainSize: 1.0,
-        halation: 0.25, bloom: 0.08,
-        vignette: 0.14, soften: 0.06
+        mix: [1.12, -0.06, -0.06, -0.04, 1.04, 0.0, -0.12, 0.06, 1.06],
+        ev: -0.02,
+        k: [6.0, 5.6, 5.6], pivot: [0.52, 0.54, 0.55],
+        sat: 1.1, hlDesat: 0.18, shDesat: 0.05,
+        shadowTint: [-0.065, 0.032, 0.1], hlTint: [0.095, 0.034, -0.085],
+        black: 0.012, white: 0.97, mono: nil,
+        grain: 0.24, grainSize: 1.0,
+        halation: 0.4, bloom: 0.14,
+        vignette: 0.22, soften: 0.08
       ),
       "fuji_velvia": FilmStockParams(
-        mix: [1.08, -0.05, -0.03, -0.04, 1.09, -0.05, -0.03, -0.06, 1.09],
-        ev: -0.04,
-        k: [6.0, 6.2, 6.0], pivot: [0.52, 0.52, 0.52],
-        sat: 1.16, hlDesat: 0.1, shDesat: 0.0,
-        shadowTint: [-0.004, 0.0, 0.01], hlTint: [0.004, 0.002, -0.006],
-        black: 0.0, white: 0.98, mono: nil,
-        grain: 0.06, grainSize: 0.8,
-        halation: 0.1, bloom: 0.04,
-        vignette: 0.1, soften: 0.0
+        mix: [1.1, -0.06, -0.04, -0.05, 1.12, -0.07, -0.04, -0.08, 1.12],
+        ev: -0.05,
+        k: [7.0, 7.2, 7.0], pivot: [0.54, 0.54, 0.54],
+        sat: 1.18, hlDesat: 0.08, shDesat: 0.0,
+        shadowTint: [-0.012, 0.0, 0.03], hlTint: [0.012, 0.006, -0.016],
+        black: 0.0, white: 0.985, mono: nil,
+        grain: 0.12, grainSize: 0.8,
+        halation: 0.18, bloom: 0.06,
+        vignette: 0.16, soften: 0.0
       ),
       "noir_bw": FilmStockParams(
         mix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-        ev: 0.0,
-        k: [5.8, 5.8, 5.8], pivot: [0.5, 0.5, 0.5],
+        ev: -0.04,
+        k: [7.2, 7.2, 7.2], pivot: [0.54, 0.54, 0.54],
         sat: 1.0, hlDesat: 0.0, shDesat: 0.0,
         shadowTint: [0.0, 0.0, 0.0], hlTint: [0.0, 0.0, 0.0],
-        black: 0.012, white: 0.975, mono: [0.34, 0.52, 0.14],
-        grain: 0.24, grainSize: 1.2,
-        halation: 0.22, bloom: 0.08,
-        vignette: 0.26, soften: 0.08
+        black: 0.014, white: 0.975, mono: [0.34, 0.52, 0.14],
+        grain: 0.42, grainSize: 1.2,
+        halation: 0.3, bloom: 0.12,
+        vignette: 0.36, soften: 0.1
       ),
       "cinelens_flat": FilmStockParams(
         mix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         ev: 0.0,
-        k: [2.4, 2.4, 2.4], pivot: [0.5, 0.5, 0.5],
-        sat: 0.88, hlDesat: 0.1, shDesat: 0.1,
+        k: [2.2, 2.2, 2.2], pivot: [0.5, 0.5, 0.5],
+        sat: 0.8, hlDesat: 0.12, shDesat: 0.12,
         shadowTint: [0.0, 0.0, 0.0], hlTint: [0.0, 0.0, 0.0],
-        black: 0.08, white: 0.92, mono: nil,
+        black: 0.1, white: 0.9, mono: nil,
         grain: 0.0, grainSize: 1.0,
         halation: 0.0, bloom: 0.0,
         vignette: 0.0, soften: 0.0
       ),
       "golden_hour": FilmStockParams(
-        mix: [1.05, -0.03, -0.02, 0.0, 1.02, -0.02, -0.07, 0.0, 1.07],
+        mix: [1.08, -0.04, -0.04, 0.0, 1.02, -0.02, -0.1, 0.0, 1.1],
         ev: 0.04,
-        k: [4.4, 4.3, 4.1], pivot: [0.49, 0.5, 0.52],
-        sat: 1.08, hlDesat: 0.2, shDesat: 0.05,
-        shadowTint: [0.012, 0.004, -0.01], hlTint: [0.036, 0.014, -0.03],
-        black: 0.012, white: 0.965, mono: nil,
-        grain: 0.12, grainSize: 1.0,
-        halation: 0.36, bloom: 0.16,
-        vignette: 0.14, soften: 0.1
+        k: [5.4, 5.2, 4.8], pivot: [0.5, 0.51, 0.54],
+        sat: 1.1, hlDesat: 0.18, shDesat: 0.05,
+        shadowTint: [0.034, 0.012, -0.03], hlTint: [0.09, 0.038, -0.078],
+        black: 0.016, white: 0.965, mono: nil,
+        grain: 0.22, grainSize: 1.0,
+        halation: 0.55, bloom: 0.24,
+        vignette: 0.22, soften: 0.12
       ),
       "vintage_16mm": FilmStockParams(
-        mix: [1.0, 0.04, -0.04, 0.02, 1.0, -0.02, -0.02, 0.05, 0.97],
-        ev: 0.02,
-        k: [3.8, 3.7, 3.5], pivot: [0.5, 0.5, 0.5],
-        sat: 0.86, hlDesat: 0.25, shDesat: 0.2,
-        shadowTint: [0.01, 0.014, -0.006], hlTint: [0.02, 0.01, -0.02],
-        black: 0.06, white: 0.94, mono: nil,
-        grain: 0.34, grainSize: 1.5,
-        halation: 0.3, bloom: 0.14,
-        vignette: 0.34, soften: 0.3
+        mix: [1.02, 0.07, -0.07, 0.04, 1.02, -0.04, -0.05, 0.09, 0.94],
+        ev: 0.03,
+        k: [4.6, 4.4, 4.0], pivot: [0.52, 0.52, 0.54],
+        sat: 0.82, hlDesat: 0.28, shDesat: 0.22,
+        shadowTint: [0.03, 0.04, -0.018], hlTint: [0.05, 0.03, -0.05],
+        black: 0.075, white: 0.925, mono: nil,
+        grain: 0.55, grainSize: 1.5,
+        halation: 0.4, bloom: 0.2,
+        vignette: 0.42, soften: 0.3
       )
   ]
 }
