@@ -113,9 +113,13 @@ import UIKit
 
         let anamorphic = (args["anamorphic"] as? Bool) ?? false
         let fps = (args["fps"] as? NSNumber)?.int32Value ?? 24
+        let toneId = args["toneId"] as? String
+        let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
         self?.exportGradedVideo(
           inputPath: inputPath,
           matrix: matrix,
+          toneId: toneId,
+          intensity: intensity,
           anamorphic: anamorphic,
           fps: fps,
           result: result
@@ -131,9 +135,13 @@ import UIKit
 
         let anamorphic = (args["anamorphic"] as? Bool) ?? false
         let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.98
+        let toneId = args["toneId"] as? String
+        let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
         self?.exportGradedPhoto(
           inputBytes: inputBytes,
           matrix: matrix,
+          toneId: toneId,
+          intensity: intensity,
           anamorphic: anamorphic,
           quality: quality,
           result: result
@@ -1382,6 +1390,8 @@ import UIKit
   private func exportGradedPhoto(
     inputBytes: Data,
     matrix: [Double],
+    toneId: String?,
+    intensity: Double,
     anamorphic: Bool,
     quality: Double,
     result: @escaping FlutterResult
@@ -1411,46 +1421,52 @@ import UIKit
       return
     }
 
-    guard let colorFilter = CIFilter(name: "CIColorMatrix") else {
-      result(
-        FlutterError(
-          code: "filter_unavailable",
-          message: "CIColorMatrix is not available on this device.",
-          details: nil
+    var output: CIImage
+    if let look = FilmEngine.look(toneId: toneId, intensity: intensity) {
+      // Authentic film emulation: colour cube, halation, bloom, grain.
+      output = look.apply(to: source, frameIndex: Int.random(in: 0..<4096))
+    } else {
+      guard let colorFilter = CIFilter(name: "CIColorMatrix") else {
+        result(
+          FlutterError(
+            code: "filter_unavailable",
+            message: "CIColorMatrix is not available on this device.",
+            details: nil
+          )
         )
+        return
+      }
+
+      colorFilter.setValue(source, forKey: kCIInputImageKey)
+      colorFilter.setValue(
+        CIVector(x: matrix[0], y: matrix[1], z: matrix[2], w: matrix[3]),
+        forKey: "inputRVector"
       )
-      return
+      colorFilter.setValue(
+        CIVector(x: matrix[5], y: matrix[6], z: matrix[7], w: matrix[8]),
+        forKey: "inputGVector"
+      )
+      colorFilter.setValue(
+        CIVector(x: matrix[10], y: matrix[11], z: matrix[12], w: matrix[13]),
+        forKey: "inputBVector"
+      )
+      colorFilter.setValue(
+        CIVector(x: matrix[15], y: matrix[16], z: matrix[17], w: matrix[18]),
+        forKey: "inputAVector"
+      )
+      colorFilter.setValue(
+        CIVector(
+          x: matrix[4] / 255.0,
+          y: matrix[9] / 255.0,
+          z: matrix[14] / 255.0,
+          w: matrix[19] / 255.0
+        ),
+        forKey: "inputBiasVector"
+      )
+
+      output = colorFilter.outputImage?.cropped(to: source.extent)
+        ?? source
     }
-
-    colorFilter.setValue(source, forKey: kCIInputImageKey)
-    colorFilter.setValue(
-      CIVector(x: matrix[0], y: matrix[1], z: matrix[2], w: matrix[3]),
-      forKey: "inputRVector"
-    )
-    colorFilter.setValue(
-      CIVector(x: matrix[5], y: matrix[6], z: matrix[7], w: matrix[8]),
-      forKey: "inputGVector"
-    )
-    colorFilter.setValue(
-      CIVector(x: matrix[10], y: matrix[11], z: matrix[12], w: matrix[13]),
-      forKey: "inputBVector"
-    )
-    colorFilter.setValue(
-      CIVector(x: matrix[15], y: matrix[16], z: matrix[17], w: matrix[18]),
-      forKey: "inputAVector"
-    )
-    colorFilter.setValue(
-      CIVector(
-        x: matrix[4] / 255.0,
-        y: matrix[9] / 255.0,
-        z: matrix[14] / 255.0,
-        w: matrix[19] / 255.0
-      ),
-      forKey: "inputBiasVector"
-    )
-
-    var output = colorFilter.outputImage?.cropped(to: source.extent)
-      ?? source
 
     if anamorphic {
       let frame = output.extent
@@ -1556,6 +1572,8 @@ import UIKit
   private func exportGradedVideo(
     inputPath: String,
     matrix: [Double],
+    toneId: String?,
+    intensity: Double,
     anamorphic: Bool,
     fps: Int32,
     result: @escaping FlutterResult
@@ -1566,6 +1584,7 @@ import UIKit
     }
 
     let frameRate = fps > 0 ? fps : 24
+    let filmLook = FilmEngine.look(toneId: toneId, intensity: intensity)
     let asset = AVURLAsset(url: URL(fileURLWithPath: inputPath))
     let outputURL = FileManager.default.temporaryDirectory
       .appendingPathComponent("CINELENS_24FPS_\(Int(Date().timeIntervalSince1970)).mov")
@@ -1597,42 +1616,53 @@ import UIKit
 
       let composition = AVMutableVideoComposition(asset: asset) { request in
         let sourceExtent = request.sourceImage.extent
-        let source = request.sourceImage.clampedToExtent()
+        var output: CIImage
 
-        guard let colorFilter = CIFilter(name: "CIColorMatrix") else {
-          request.finish(with: request.sourceImage, context: nil)
-          return
+        if let look = filmLook {
+          // The compositor time gives every frame its own grain pattern.
+          let frameIndex = Int(
+            (request.compositionTime.seconds * Double(frameRate)).rounded()
+          )
+          output = look.apply(to: request.sourceImage, frameIndex: frameIndex)
+            .cropped(to: sourceExtent)
+        } else {
+          let source = request.sourceImage.clampedToExtent()
+
+          guard let colorFilter = CIFilter(name: "CIColorMatrix") else {
+            request.finish(with: request.sourceImage, context: nil)
+            return
+          }
+
+          colorFilter.setValue(source, forKey: kCIInputImageKey)
+          colorFilter.setValue(
+            CIVector(x: matrix[0], y: matrix[1], z: matrix[2], w: matrix[3]),
+            forKey: "inputRVector"
+          )
+          colorFilter.setValue(
+            CIVector(x: matrix[5], y: matrix[6], z: matrix[7], w: matrix[8]),
+            forKey: "inputGVector"
+          )
+          colorFilter.setValue(
+            CIVector(x: matrix[10], y: matrix[11], z: matrix[12], w: matrix[13]),
+            forKey: "inputBVector"
+          )
+          colorFilter.setValue(
+            CIVector(x: matrix[15], y: matrix[16], z: matrix[17], w: matrix[18]),
+            forKey: "inputAVector"
+          )
+          colorFilter.setValue(
+            CIVector(
+              x: matrix[4] / 255.0,
+              y: matrix[9] / 255.0,
+              z: matrix[14] / 255.0,
+              w: matrix[19] / 255.0
+            ),
+            forKey: "inputBiasVector"
+          )
+
+          output = colorFilter.outputImage?.cropped(to: sourceExtent)
+            ?? request.sourceImage
         }
-
-        colorFilter.setValue(source, forKey: kCIInputImageKey)
-        colorFilter.setValue(
-          CIVector(x: matrix[0], y: matrix[1], z: matrix[2], w: matrix[3]),
-          forKey: "inputRVector"
-        )
-        colorFilter.setValue(
-          CIVector(x: matrix[5], y: matrix[6], z: matrix[7], w: matrix[8]),
-          forKey: "inputGVector"
-        )
-        colorFilter.setValue(
-          CIVector(x: matrix[10], y: matrix[11], z: matrix[12], w: matrix[13]),
-          forKey: "inputBVector"
-        )
-        colorFilter.setValue(
-          CIVector(x: matrix[15], y: matrix[16], z: matrix[17], w: matrix[18]),
-          forKey: "inputAVector"
-        )
-        colorFilter.setValue(
-          CIVector(
-            x: matrix[4] / 255.0,
-            y: matrix[9] / 255.0,
-            z: matrix[14] / 255.0,
-            w: matrix[19] / 255.0
-          ),
-          forKey: "inputBiasVector"
-        )
-
-        var output = colorFilter.outputImage?.cropped(to: sourceExtent)
-          ?? request.sourceImage
 
         // Some iOS versions hand the compositor an already oriented image.
         // Only rotate when the frame is still in the sensor's native space.
@@ -2076,4 +2106,511 @@ final class ProResWriterTake: NSObject,
       }
     }
   }
+}
+
+
+// MARK: - Film emulation
+
+/// Parameters of one film look. These are tuned by eye to capture the
+/// character of each stock (contrast curve, colour crosstalk, highlight
+/// desaturation, tinted shadows/highlights, grain, halation); they are not
+/// measured from sensitometric data.
+struct FilmStockParams {
+  /// 3x3 row-major channel mix applied in linear light (dye crosstalk).
+  let mix: [Double]
+  /// Exposure shift in stops, applied before the curve.
+  let ev: Double
+  /// Per-channel S-curve steepness and pivot (differences give colour
+  /// separation in shadows and highlights, like the layers of a real film).
+  let k: [Double]
+  let pivot: [Double]
+  let sat: Double
+  /// Saturation lost in the highlights / shadows (film desaturates both).
+  let hlDesat: Double
+  let shDesat: Double
+  let shadowTint: [Double]
+  let hlTint: [Double]
+  /// Output black and white points (a print never reaches pure 0 or 1).
+  let black: Double
+  let white: Double
+  /// Panchromatic channel weights for black and white stocks.
+  let mono: [Double]?
+  let grain: Double
+  let grainSize: Double
+  let halation: Double
+  let bloom: Double
+  let vignette: Double
+  let soften: Double
+}
+
+/// A film look prepared for one render: the 3D LUT is built once (and cached)
+/// and the value is immutable, so video export can use it from every frame
+/// thread of the composition.
+struct FilmLook {
+  let params: FilmStockParams
+  let intensity: Double
+  let cubeData: Data
+
+  private static let cubeDimension = 33
+
+  /// Renders the full look: colour cube, softness, halation, bloom, grain and
+  /// vignette. `frameIndex` moves the grain so video grain is alive.
+  func apply(to image: CIImage, frameIndex: Int) -> CIImage {
+    let extent = image.extent
+    guard extent.width > 1, extent.height > 1,
+          extent.width.isFinite, extent.height.isFinite else {
+      return image
+    }
+    let scale = Double(max(extent.width, extent.height)) / 1920.0
+    let p = params
+
+    // 1. Colour: tone curve, crosstalk, tints, black/white point.
+    var output = image
+    if let cube = CIFilter(name: "CIColorCubeWithColorSpace"),
+       let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+      cube.setValue(image, forKey: kCIInputImageKey)
+      cube.setValue(FilmLook.cubeDimension, forKey: "inputCubeDimension")
+      cube.setValue(cubeData, forKey: "inputCubeData")
+      cube.setValue(srgb, forKey: "inputColorSpace")
+      if let graded = cube.outputImage {
+        output = graded.cropped(to: extent)
+      }
+    }
+
+    // 2. Softness: film is never as crisp as a digital sensor.
+    let soften = p.soften * intensity
+    if soften > 0.001 {
+      let blurred = output.clampedToExtent()
+        .applyingGaussianBlur(sigma: 0.9 * scale)
+        .cropped(to: extent)
+      output = FilmLook.scaled(blurred, by: soften).composited(over: output)
+    }
+
+    // 3. Halation: red-orange glow around highlights (light bouncing off the
+    //    film base), then a wide white bloom like a diffusion filter.
+    let halation = p.halation * intensity
+    if halation > 0.001 {
+      output = FilmLook.glow(
+        over: output,
+        extent: extent,
+        threshold: 0.80,
+        tint: [1.0, 0.32, 0.10],
+        amount: halation * 1.6,
+        sigma: 11.0 * scale
+      )
+    }
+    let bloom = p.bloom * intensity
+    if bloom > 0.001 {
+      output = FilmLook.glow(
+        over: output,
+        extent: extent,
+        threshold: 0.62,
+        tint: [1.0, 1.0, 1.0],
+        amount: bloom * 1.4,
+        sigma: 30.0 * scale
+      )
+    }
+
+    // 4. Grain: monochrome noise, soft-light blended so it lives in the
+    //    mid-tones, re-seeded every frame.
+    let grain = p.grain * intensity
+    if grain > 0.001 {
+      output = FilmLook.addGrain(
+        to: output,
+        extent: extent,
+        amount: grain,
+        size: p.grainSize * scale,
+        frameIndex: frameIndex
+      )
+    }
+
+    // 5. Vignette.
+    let vignette = p.vignette * intensity
+    if vignette > 0.001 {
+      output = FilmLook.addVignette(to: output, extent: extent, amount: vignette)
+    }
+
+    return output.cropped(to: extent)
+  }
+
+  /// Premultiplied scale of an opaque image, used for partial mixes.
+  private static func scaled(_ image: CIImage, by factor: Double) -> CIImage {
+    let f = CGFloat(factor)
+    return image.applyingFilter(
+      "CIColorMatrix",
+      parameters: [
+        "inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
+        "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
+        "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0),
+        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: f)
+      ]
+    )
+  }
+
+  private static func glow(
+    over base: CIImage,
+    extent: CGRect,
+    threshold: Double,
+    tint: [Double],
+    amount: Double,
+    sigma: Double
+  ) -> CIImage {
+    let k = 1.0 / (1.0 - threshold)
+
+    func row(_ t: Double) -> CIVector {
+      CIVector(
+        x: CGFloat(t * amount * k * 0.2126),
+        y: CGFloat(t * amount * k * 0.7152),
+        z: CGFloat(t * amount * k * 0.0722),
+        w: 0
+      )
+    }
+
+    // luma above the threshold, tinted and scaled, clamped to 0...1
+    let extracted = base.applyingFilter(
+      "CIColorMatrix",
+      parameters: [
+        "inputRVector": row(tint[0]),
+        "inputGVector": row(tint[1]),
+        "inputBVector": row(tint[2]),
+        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+        "inputBiasVector": CIVector(
+          x: CGFloat(-tint[0] * amount * k * threshold),
+          y: CGFloat(-tint[1] * amount * k * threshold),
+          z: CGFloat(-tint[2] * amount * k * threshold),
+          w: 1
+        )
+      ]
+    ).applyingFilter(
+      "CIColorClamp",
+      parameters: [
+        "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+        "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
+      ]
+    )
+
+    let blurred = extracted.cropped(to: extent)
+      .clampedToExtent()
+      .applyingGaussianBlur(sigma: sigma)
+      .cropped(to: extent)
+
+    return blurred
+      .applyingFilter(
+        "CIScreenBlendMode",
+        parameters: [kCIInputBackgroundImageKey: base]
+      )
+      .cropped(to: extent)
+  }
+
+  private static func addGrain(
+    to base: CIImage,
+    extent: CGRect,
+    amount: Double,
+    size: Double,
+    frameIndex: Int
+  ) -> CIImage {
+    guard let noise = CIFilter(name: "CIRandomGenerator")?.outputImage else {
+      return base
+    }
+
+    // A different offset per frame makes the grain move like real film.
+    let offsetX = CGFloat((frameIndex &* 7919) % 2048)
+    let offsetY = CGFloat((frameIndex &* 104729) % 2048)
+    let shifted = noise
+      .transformed(by: CGAffineTransform(translationX: offsetX, y: offsetY))
+      .cropped(to: extent)
+
+    // Average the three noise channels into one monochrome value.
+    let third = CGFloat(1.0 / 3.0)
+    let mono = shifted.applyingFilter(
+      "CIColorMatrix",
+      parameters: [
+        "inputRVector": CIVector(x: third, y: third, z: third, w: 0),
+        "inputGVector": CIVector(x: third, y: third, z: third, w: 0),
+        "inputBVector": CIVector(x: third, y: third, z: third, w: 0),
+        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+        "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+      ]
+    )
+
+    // Blur sets the grain size; the gain restores the contrast the blur
+    // removes so the strength stays comparable across sizes.
+    let sigma = max(0.55 * size + 0.35, 0.35)
+    let softened = mono.clampedToExtent()
+      .applyingGaussianBlur(sigma: sigma)
+      .cropped(to: extent)
+
+    let rawDeviation = 0.1667 / max(1.0, 2.0 * sigma * Double.pi.squareRoot())
+    let gain = CGFloat((amount * 0.19) / rawDeviation)
+    let bias = 0.5 - 0.5 * gain
+    let centred = softened.applyingFilter(
+      "CIColorMatrix",
+      parameters: [
+        "inputRVector": CIVector(x: gain, y: 0, z: 0, w: 0),
+        "inputGVector": CIVector(x: 0, y: gain, z: 0, w: 0),
+        "inputBVector": CIVector(x: 0, y: 0, z: gain, w: 0),
+        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+        "inputBiasVector": CIVector(x: bias, y: bias, z: bias, w: 1)
+      ]
+    )
+
+    return centred
+      .applyingFilter(
+        "CISoftLightBlendMode",
+        parameters: [kCIInputBackgroundImageKey: base]
+      )
+      .cropped(to: extent)
+  }
+
+  private static func addVignette(
+    to base: CIImage,
+    extent: CGRect,
+    amount: Double
+  ) -> CIImage {
+    let corner = Double(hypot(extent.width, extent.height)) / 2.0
+    let edge = CGFloat(max(0.0, 1.0 - amount))
+    let srgb = CGColorSpace(name: CGColorSpace.sRGB)
+
+    func color(_ value: CGFloat) -> CIColor {
+      if let srgb = srgb,
+         let c = CIColor(
+           red: value, green: value, blue: value, alpha: 1, colorSpace: srgb
+         ) {
+        return c
+      }
+      return CIColor(red: value, green: value, blue: value, alpha: 1)
+    }
+
+    guard let gradient = CIFilter(
+      name: "CIRadialGradient",
+      parameters: [
+        "inputCenter": CIVector(x: extent.midX, y: extent.midY),
+        "inputRadius0": CGFloat(0.30 * corner),
+        "inputRadius1": CGFloat(0.95 * corner),
+        "inputColor0": color(1.0),
+        "inputColor1": color(edge)
+      ]
+    )?.outputImage else {
+      return base
+    }
+
+    return gradient.cropped(to: extent)
+      .applyingFilter(
+        "CIMultiplyBlendMode",
+        parameters: [kCIInputBackgroundImageKey: base]
+      )
+      .cropped(to: extent)
+  }
+}
+
+enum FilmEngine {
+  private static let cacheLock = NSLock()
+  private static var cubeCache: [String: Data] = [:]
+
+  /// Returns the film look for a built-in tone id, or `nil` for the neutral
+  /// "standard" tone, custom tones and imported presets (those keep the
+  /// plain colour-matrix grade).
+  static func look(toneId: String?, intensity: Double) -> FilmLook? {
+    guard let toneId = toneId, let params = stocks[toneId] else { return nil }
+    let clamped = min(max(intensity, 0.0), 1.0)
+    let key = "\(toneId)-\(Int((clamped * 100.0).rounded()))"
+
+    cacheLock.lock()
+    let cached = cubeCache[key]
+    cacheLock.unlock()
+
+    let cube = cached ?? makeCube(params: params, intensity: clamped)
+    if cached == nil {
+      cacheLock.lock()
+      cubeCache[key] = cube
+      cacheLock.unlock()
+    }
+    return FilmLook(params: params, intensity: clamped, cubeData: cube)
+  }
+
+  // MARK: Colour model
+
+  private static func srgbToLinear(_ c: Double) -> Double {
+    let v = max(c, 0.0)
+    return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+  }
+
+  private static func linearToSrgb(_ l: Double) -> Double {
+    let v = max(l, 0.0)
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055
+  }
+
+  private static func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
+    let t = min(max((x - a) / (b - a), 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+  }
+
+  /// Normalised logistic S-curve: 0 -> 0 and 1 -> 1, steeper in the middle.
+  private static func sCurve(_ v: Double, k: Double, pivot: Double) -> Double {
+    func logistic(_ x: Double) -> Double { 1.0 / (1.0 + exp(-k * (x - pivot))) }
+    return (logistic(v) - logistic(0.0)) / (logistic(1.0) - logistic(0.0))
+  }
+
+  /// Film response for one sRGB-encoded colour.
+  static func filmColor(
+    r: Double,
+    g: Double,
+    b: Double,
+    params p: FilmStockParams
+  ) -> (Double, Double, Double) {
+    var lr = srgbToLinear(r)
+    var lg = srgbToLinear(g)
+    var lb = srgbToLinear(b)
+
+    if let m = p.mono {
+      let y = m[0] * lr + m[1] * lg + m[2] * lb
+      lr = y
+      lg = y
+      lb = y
+    } else {
+      let m = p.mix
+      let nr = m[0] * lr + m[1] * lg + m[2] * lb
+      let ng = m[3] * lr + m[4] * lg + m[5] * lb
+      let nb = m[6] * lr + m[7] * lg + m[8] * lb
+      lr = nr
+      lg = ng
+      lb = nb
+    }
+
+    let gain = pow(2.0, p.ev)
+    let er = linearToSrgb(min(max(lr * gain, 0.0), 4.0))
+    let eg = linearToSrgb(min(max(lg * gain, 0.0), 4.0))
+    let eb = linearToSrgb(min(max(lb * gain, 0.0), 4.0))
+
+    var outR = sCurve(er, k: p.k[0], pivot: p.pivot[0])
+    var outG = sCurve(eg, k: p.k[1], pivot: p.pivot[1])
+    var outB = sCurve(eb, k: p.k[2], pivot: p.pivot[2])
+
+    let luma = 0.2126 * outR + 0.7152 * outG + 0.0722 * outB
+    let saturation = p.sat
+      * (1.0 - p.hlDesat * smoothstep(0.55, 1.0, luma))
+      * (1.0 - p.shDesat * (1.0 - smoothstep(0.0, 0.25, luma)))
+    outR = luma + (outR - luma) * saturation
+    outG = luma + (outG - luma) * saturation
+    outB = luma + (outB - luma) * saturation
+
+    let shadowWeight = (1.0 - luma) * (1.0 - luma)
+    let highlightWeight = luma * luma
+    outR += p.shadowTint[0] * shadowWeight + p.hlTint[0] * highlightWeight
+    outG += p.shadowTint[1] * shadowWeight + p.hlTint[1] * highlightWeight
+    outB += p.shadowTint[2] * shadowWeight + p.hlTint[2] * highlightWeight
+
+    let span = p.white - p.black
+    func finish(_ v: Double) -> Double {
+      min(max(p.black + v * span, 0.0), 1.0)
+    }
+    return (finish(outR), finish(outG), finish(outB))
+  }
+
+  /// 33^3 RGBA float cube, red varying fastest (the layout Core Image expects),
+  /// blended towards the identity cube by `intensity`.
+  private static func makeCube(params: FilmStockParams, intensity: Double) -> Data {
+    let n = 33
+    let last = Double(n - 1)
+    var values = [Float]()
+    values.reserveCapacity(n * n * n * 4)
+
+    for bi in 0..<n {
+      for gi in 0..<n {
+        for ri in 0..<n {
+          let r = Double(ri) / last
+          let g = Double(gi) / last
+          let b = Double(bi) / last
+          let film = filmColor(r: r, g: g, b: b, params: params)
+          values.append(Float(r + (film.0 - r) * intensity))
+          values.append(Float(g + (film.1 - g) * intensity))
+          values.append(Float(b + (film.2 - b) * intensity))
+          values.append(1.0)
+        }
+      }
+    }
+    return values.withUnsafeBufferPointer { Data(buffer: $0) }
+  }
+
+  // MARK: Stocks
+
+  private static let stocks: [String: FilmStockParams] = [
+      "kodak_2383": FilmStockParams(
+        mix: [1.04, -0.02, -0.02, -0.01, 1.03, -0.02, -0.03, 0.0, 1.03],
+        ev: 0.0,
+        k: [5.0, 4.8, 4.6], pivot: [0.5, 0.5, 0.5],
+        sat: 1.04, hlDesat: 0.3, shDesat: 0.1,
+        shadowTint: [-0.004, 0.006, 0.012], hlTint: [0.016, 0.006, -0.014],
+        black: 0.018, white: 0.965, mono: nil,
+        grain: 0.16, grainSize: 1.0,
+        halation: 0.3, bloom: 0.1,
+        vignette: 0.12, soften: 0.1
+      ),
+      "teal_orange": FilmStockParams(
+        mix: [1.1, -0.05, -0.05, -0.04, 1.04, 0.0, -0.08, 0.05, 1.03],
+        ev: 0.0,
+        k: [4.9, 4.7, 4.7], pivot: [0.5, 0.49, 0.49],
+        sat: 1.1, hlDesat: 0.2, shDesat: 0.05,
+        shadowTint: [-0.022, 0.01, 0.034], hlTint: [0.034, 0.012, -0.03],
+        black: 0.01, white: 0.97, mono: nil,
+        grain: 0.12, grainSize: 1.0,
+        halation: 0.25, bloom: 0.08,
+        vignette: 0.14, soften: 0.06
+      ),
+      "fuji_velvia": FilmStockParams(
+        mix: [1.08, -0.05, -0.03, -0.04, 1.09, -0.05, -0.03, -0.06, 1.09],
+        ev: -0.04,
+        k: [6.0, 6.2, 6.0], pivot: [0.52, 0.52, 0.52],
+        sat: 1.16, hlDesat: 0.1, shDesat: 0.0,
+        shadowTint: [-0.004, 0.0, 0.01], hlTint: [0.004, 0.002, -0.006],
+        black: 0.0, white: 0.98, mono: nil,
+        grain: 0.06, grainSize: 0.8,
+        halation: 0.1, bloom: 0.04,
+        vignette: 0.1, soften: 0.0
+      ),
+      "noir_bw": FilmStockParams(
+        mix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        ev: 0.0,
+        k: [5.8, 5.8, 5.8], pivot: [0.5, 0.5, 0.5],
+        sat: 1.0, hlDesat: 0.0, shDesat: 0.0,
+        shadowTint: [0.0, 0.0, 0.0], hlTint: [0.0, 0.0, 0.0],
+        black: 0.012, white: 0.975, mono: [0.34, 0.52, 0.14],
+        grain: 0.24, grainSize: 1.2,
+        halation: 0.22, bloom: 0.08,
+        vignette: 0.26, soften: 0.08
+      ),
+      "cinelens_flat": FilmStockParams(
+        mix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        ev: 0.0,
+        k: [2.4, 2.4, 2.4], pivot: [0.5, 0.5, 0.5],
+        sat: 0.88, hlDesat: 0.1, shDesat: 0.1,
+        shadowTint: [0.0, 0.0, 0.0], hlTint: [0.0, 0.0, 0.0],
+        black: 0.08, white: 0.92, mono: nil,
+        grain: 0.0, grainSize: 1.0,
+        halation: 0.0, bloom: 0.0,
+        vignette: 0.0, soften: 0.0
+      ),
+      "golden_hour": FilmStockParams(
+        mix: [1.05, -0.03, -0.02, 0.0, 1.02, -0.02, -0.07, 0.0, 1.07],
+        ev: 0.04,
+        k: [4.4, 4.3, 4.1], pivot: [0.49, 0.5, 0.52],
+        sat: 1.08, hlDesat: 0.2, shDesat: 0.05,
+        shadowTint: [0.012, 0.004, -0.01], hlTint: [0.036, 0.014, -0.03],
+        black: 0.012, white: 0.965, mono: nil,
+        grain: 0.12, grainSize: 1.0,
+        halation: 0.36, bloom: 0.16,
+        vignette: 0.14, soften: 0.1
+      ),
+      "vintage_16mm": FilmStockParams(
+        mix: [1.0, 0.04, -0.04, 0.02, 1.0, -0.02, -0.02, 0.05, 0.97],
+        ev: 0.02,
+        k: [3.8, 3.7, 3.5], pivot: [0.5, 0.5, 0.5],
+        sat: 0.86, hlDesat: 0.25, shDesat: 0.2,
+        shadowTint: [0.01, 0.014, -0.006], hlTint: [0.02, 0.01, -0.02],
+        black: 0.06, white: 0.94, mono: nil,
+        grain: 0.34, grainSize: 1.5,
+        halation: 0.3, bloom: 0.14,
+        vignette: 0.34, soften: 0.3
+      )
+  ]
 }
