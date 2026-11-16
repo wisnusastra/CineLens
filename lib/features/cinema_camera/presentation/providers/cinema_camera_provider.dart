@@ -1125,6 +1125,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         colorMatrix: current.captureColorMatrix,
         applyAnamorphicBars: current.isAnamorphicRatio,
         look: current.nativeLook,
+        toneId: current.selectedTone.isCustom ? null : current.selectedTone.id,
+        intensity: current.intensity,
       );
 
       String? warning;
@@ -1350,6 +1352,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         applyAnamorphicBars: current.isAnamorphicRatio,
         fps: current.frameRate.value,
         look: current.nativeLook,
+        toneId: current.selectedTone.isCustom ? null : current.selectedTone.id,
+        intensity: current.intensity,
       );
     } catch (error) {
       finalPath = rawPath;
@@ -1413,6 +1417,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           path: finalPath,
           colorMatrix: current.captureColorMatrix,
           look: current.nativeLook,
+          toneId:
+              current.selectedTone.isCustom ? null : current.selectedTone.id,
+          intensity: current.intensity,
         );
       } catch (error) {
         warning = 'Look gagal dibakar ke ProRes: ${_describeError(error)}';

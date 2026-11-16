@@ -306,10 +306,16 @@ class CinemaCameraRepository {
   /// JPEG without ever materialising a PNG, which is what made large stills
   /// slow and blurry. If the channel is unavailable the Dart renderer below
   /// is used instead.
+  ///
+  /// [toneId] and [intensity] select the native film emulation (colour cube,
+  /// halation, bloom and grain) for the built-in tones. Without a [toneId]
+  /// (custom tones, imported presets) the plain [colorMatrix] grade is used.
   Future<Uint8List> renderGradedImage({
     required Uint8List rawBytes,
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
+    String? toneId,
+    double intensity = 1.0,
     Map<String, dynamic>? look,
   }) async {
     try {
@@ -318,6 +324,8 @@ class CinemaCameraRepository {
         <String, dynamic>{
           'inputBytes': rawBytes,
           'matrix': colorMatrix,
+          'toneId': toneId,
+          'intensity': intensity,
           'anamorphic': applyAnamorphicBars,
           'quality': 0.98,
           if (look != null) 'look': look,
@@ -404,6 +412,8 @@ class CinemaCameraRepository {
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
     required int fps,
+    String? toneId,
+    double intensity = 1.0,
     Map<String, dynamic>? look,
   }) async {
     try {
@@ -412,6 +422,8 @@ class CinemaCameraRepository {
         <String, dynamic>{
           'inputPath': rawVideoPath,
           'matrix': colorMatrix,
+          'toneId': toneId,
+          'intensity': intensity,
           'anamorphic': applyAnamorphicBars,
           'fps': fps,
           if (look != null) 'look': look,
@@ -437,6 +449,8 @@ class CinemaCameraRepository {
     required String path,
     required List<double> colorMatrix,
     required Map<String, dynamic> look,
+    String? toneId,
+    double intensity = 1.0,
   }) async {
     try {
       final baked = await _videoChannel.invokeMethod<String>(
@@ -444,6 +458,8 @@ class CinemaCameraRepository {
         <String, dynamic>{
           'inputPath': path,
           'matrix': colorMatrix,
+          'toneId': toneId,
+          'intensity': intensity,
           'look': look,
         },
       );
