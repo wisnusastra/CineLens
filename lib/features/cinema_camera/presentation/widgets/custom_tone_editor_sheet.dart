@@ -40,6 +40,13 @@ class _CustomToneEditorSheetState extends ConsumerState<CustomToneEditorSheet> {
   void dispose() {
     _nameController.dispose();
     _refController.dispose();
+    // Dragging the sheet away or tapping outside bypasses the cancel button, so
+    // the live draft has to be cleared here as well. Otherwise the viewfinder
+    // stays on the draft matrix and tone/intensity changes look like they do
+    // nothing. The notifier is captured first because `ref` is gone by the
+    // time the microtask runs.
+    final notifier = ref.read(cinemaCameraProvider.notifier);
+    Future.microtask(() => notifier.updateLiveCustomDraft(null));
     super.dispose();
   }
 
@@ -115,13 +122,13 @@ class _CustomToneEditorSheetState extends ConsumerState<CustomToneEditorSheet> {
                   },
                   child: const Text(
                     'Batal',
-                    style: TextStyle(color: AppTheme.textSecondary, fontSize: 14),
+                    style:
+                        TextStyle(color: AppTheme.textSecondary, fontSize: 14),
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 8),
-
             Row(
               children: [
                 Expanded(
@@ -167,9 +174,7 @@ class _CustomToneEditorSheetState extends ConsumerState<CustomToneEditorSheet> {
                 ),
               ],
             ),
-
             const SizedBox(height: 12),
-
             Row(
               children: [
                 const Text(
@@ -197,9 +202,7 @@ class _CustomToneEditorSheetState extends ConsumerState<CustomToneEditorSheet> {
                 }),
               ],
             ),
-
             const SizedBox(height: 12),
-
             _buildGradeSlider(
               label: 'Temperature (Cool / Warm)',
               value: _params.temperature,
@@ -241,9 +244,7 @@ class _CustomToneEditorSheetState extends ConsumerState<CustomToneEditorSheet> {
                   '${_params.exposure >= 0 ? '+' : ''}${_params.exposure.toStringAsFixed(2)}',
               onChanged: (v) => _updateParam(_params.copyWith(exposure: v)),
             ),
-
             const SizedBox(height: 10),
-
             Row(
               children: [
                 Expanded(
@@ -264,7 +265,8 @@ class _CustomToneEditorSheetState extends ConsumerState<CustomToneEditorSheet> {
                     onPressed: _savePreset,
                     child: const Text(
                       'Simpan Preset Tone',
-                      style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                      style:
+                          TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
                     ),
                   ),
                 ),

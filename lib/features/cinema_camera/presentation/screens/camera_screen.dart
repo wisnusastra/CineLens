@@ -153,7 +153,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                 child: Center(child: _buildZoomIndicator(state)),
               ),
 
-            if (state.isProcessingVideo) _buildProcessingOverlay(),
+            if (state.isProcessingVideo) _buildProcessingOverlay(state),
 
             Align(
               alignment: Alignment.bottomCenter,
@@ -846,20 +846,40 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     );
   }
 
-  Widget _buildProcessingOverlay() {
+  Widget _buildProcessingOverlay(CinemaCameraState state) {
+    final progress = state.videoProcessingProgress;
+    final label = state.videoProcessingLabel ?? 'Memproses video 24fps...';
+
     return Positioned.fill(
       child: ColoredBox(
         color: Colors.black.withValues(alpha: 0.6),
-        child: const Center(
+        child: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CircularProgressIndicator(color: AppTheme.cinemaAmber),
-              SizedBox(height: 14),
-              Text(
-                'Memproses video 24fps...',
-                style: TextStyle(color: Colors.white70, fontSize: 13),
+              SizedBox(
+                width: 52,
+                height: 52,
+                child: CircularProgressIndicator(
+                  color: AppTheme.cinemaAmber,
+                  value: progress,
+                  strokeWidth: 3,
+                ),
               ),
+              const SizedBox(height: 14),
+              Text(
+                progress == null
+                    ? label
+                    : '$label ${(progress * 100).round()}%',
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+              if (progress == null) ...[
+                const SizedBox(height: 6),
+                const Text(
+                  'Jangan tutup aplikasi.',
+                  style: TextStyle(color: Colors.white38, fontSize: 11),
+                ),
+              ],
             ],
           ),
         ),

@@ -95,6 +95,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     repository.listenToStabilization(
       _handleStabilizationChanged,
       onProResFinished: _handleProResFinished,
+      onExportProgress: _handleExportProgress,
     );
 
     final selectedTone = tones.firstWhere(
@@ -156,6 +157,20 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
             capabilities.maxShutterSeconds,
           )
           .toDouble(),
+    );
+  }
+
+  /// Native export progress (0…1) from `AppDelegate.finishExport`.
+  void _handleExportProgress(double progress) {
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null || !current.isProcessingVideo) return;
+    if (current.videoProcessingProgress != null &&
+        (current.videoProcessingProgress! - progress).abs() < 0.005) {
+      return;
+    }
+    state = AsyncData(
+      current.copyWith(videoProcessingProgress: progress),
     );
   }
 
@@ -841,7 +856,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (current == null) return;
 
     final clamped = value.clamp(0.0, 1.0);
-    state = AsyncData(current.copyWith(intensity: clamped));
+    // A leftover custom-tone draft would otherwise keep the viewfinder on the
+    // draft matrix, making the intensity slider look dead.
+    state = AsyncData(
+      current.copyWith(intensity: clamped, clearLiveDraft: true),
+    );
     ref.read(cinemaCameraRepositoryProvider).savePreferences(
           toneId: current.selectedTone.id,
           intensity: clamped,
@@ -1315,11 +1334,18 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     _recordingTimer?.cancel();
     if (!_disposed) {
+      final bakingProRes = isProResTake && current.bakeLookIntoProRes;
       state = AsyncData(
         current.copyWith(
           isRecordingVideo: false,
           isProcessingVideo: true,
           recordingDuration: Duration.zero,
+          videoProcessingLabel: bakingProRes
+              ? 'Membakar look ke ProRes...'
+              : isProResTake
+                  ? 'Menyelesaikan ProRes...'
+                  : 'Memproses video 24fps...',
+          clearVideoProcessingProgress: true,
         ),
       );
     }
@@ -1457,6 +1483,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         isRecordingVideo: false,
         isProcessingVideo: false,
         recordingDuration: Duration.zero,
+        videoProcessingLabel: 'Memproses video 24fps...',
+        clearVideoProcessingProgress: true,
       ),
     );
   }

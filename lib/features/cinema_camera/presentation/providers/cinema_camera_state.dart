@@ -119,6 +119,13 @@ class CinemaCameraState {
   /// Off by default: a ProRes master is normally kept flat for grading.
   final bool bakeLookIntoProRes;
 
+  /// Text under the processing spinner, e.g. "Membakar look ke ProRes...".
+  final String? videoProcessingLabel;
+
+  /// Native export progress (0…1), or null while it is still unknown. Kept as a
+  /// real percentage so a long save never looks like an endless spinner.
+  final double? videoProcessingProgress;
+
   /// Last refusal from the native controls, shown inside the pro panel so a
   /// rejected setting is never silent.
   final String? proControlError;
@@ -126,7 +133,7 @@ class CinemaCameraState {
   const CinemaCameraState({
     required this.tones,
     required this.selectedTone,
-    this.intensity = 0.85,
+    this.intensity = 1.0,
     this.captureMode = CinemaCaptureMode.photo,
     this.isAnamorphicRatio = true,
     this.showGrid = true,
@@ -161,6 +168,8 @@ class CinemaCameraState {
     this.proResEnabled = false,
     this.filmLook = const FilmLook(),
     this.bakeLookIntoProRes = false,
+    this.videoProcessingLabel,
+    this.videoProcessingProgress,
     this.proControlError,
   });
 
@@ -275,6 +284,9 @@ class CinemaCameraState {
     bool? proResEnabled,
     FilmLook? filmLook,
     bool? bakeLookIntoProRes,
+    String? videoProcessingLabel,
+    double? videoProcessingProgress,
+    bool clearVideoProcessingProgress = false,
     String? proControlError,
     bool clearProControlError = false,
   }) {
@@ -322,6 +334,10 @@ class CinemaCameraState {
       proResEnabled: proResEnabled ?? this.proResEnabled,
       filmLook: filmLook ?? this.filmLook,
       bakeLookIntoProRes: bakeLookIntoProRes ?? this.bakeLookIntoProRes,
+      videoProcessingLabel: videoProcessingLabel ?? this.videoProcessingLabel,
+      videoProcessingProgress: clearVideoProcessingProgress
+          ? null
+          : (videoProcessingProgress ?? this.videoProcessingProgress),
       proControlError: clearProControlError
           ? null
           : (proControlError ?? this.proControlError),

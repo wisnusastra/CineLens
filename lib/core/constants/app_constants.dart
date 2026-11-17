@@ -13,6 +13,7 @@ class AppConstants {
   static const String prefMediaLibraryJson = 'captured_media_library_json';
   static const String prefFilmLookJson = 'film_look_json';
   static const String prefBakeLookIntoProRes = 'bake_look_into_prores';
+  static const String prefToneIntensityFullV2 = 'tone_intensity_full_v2';
   static const String videoGraderChannel = 'com.cinelens.ios/video_grader';
 
   static const int presetJsonSchemaVersion = 1;

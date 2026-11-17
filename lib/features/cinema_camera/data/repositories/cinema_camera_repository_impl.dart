@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -287,7 +288,14 @@ class CinemaCameraRepository {
     final prefs = await SharedPreferences.getInstance();
     final toneId =
         prefs.getString(AppConstants.prefSelectedToneId) ?? 'teal_orange';
-    final intensity = prefs.getDouble(AppConstants.prefToneIntensity) ?? 0.85;
+    var intensity = prefs.getDouble(AppConstants.prefToneIntensity) ?? 1.0;
+    // Older builds started every tone at 85%, which made the stronger presets
+    // read as washed out. Lift that legacy value once; whatever the user picks
+    // afterwards is kept.
+    if (prefs.getBool(AppConstants.prefToneIntensityFullV2) != true) {
+      if (intensity < 1.0) intensity = 1.0;
+      await prefs.setBool(AppConstants.prefToneIntensityFullV2, true);
+    }
     return (toneId: toneId, intensity: intensity);
   }
 
@@ -428,14 +436,15 @@ class CinemaCameraRepository {
           'fps': fps,
           if (look != null) 'look': look,
         },
-      );
+      ).timeout(const Duration(minutes: 20));
       if (gradedPath != null && gradedPath.isNotEmpty) {
         return gradedPath;
       }
     } on MissingPluginException {
       // No native grader on this platform.
-    } on PlatformException {
-      // Native export failed; the raw footage is still usable.
+    } on TimeoutException {
+      // The native watchdog normally answers first; this only fires if the
+      // platform channel itself wedged. The raw take is still usable.
     }
     return rawVideoPath;
   }
@@ -462,12 +471,12 @@ class CinemaCameraRepository {
           'intensity': intensity,
           'look': look,
         },
-      );
+      ).timeout(const Duration(minutes: 35));
       if (baked != null && baked.isNotEmpty) return baked;
     } on MissingPluginException {
       // Not on this platform.
-    } on PlatformException {
-      // Fall back to the ungraded master.
+    } on TimeoutException {
+      // Safety net only: the native export has its own watchdog.
     }
     return path;
   }
@@ -485,8 +494,21 @@ class CinemaCameraRepository {
   void listenToStabilization(
     void Function(bool active, int mode) onChanged, {
     void Function(String path)? onProResFinished,
+    void Function(double progress)? onExportProgress,
   }) {
     _videoChannel.setMethodCallHandler((call) async {
+      // Native exports report how far they are so the spinner can show a real
+      // percentage instead of looking stuck.
+      if (call.method == 'exportProgress') {
+        final arguments = call.arguments;
+        final map = arguments is Map ? arguments : const <Object?, Object?>{};
+        final value = map['progress'];
+        if (value is num && onExportProgress != null) {
+          onExportProgress(value.toDouble().clamp(0.0, 1.0));
+        }
+        return null;
+      }
+
       // The native recorder closes the `.mov` on its own when iOS interrupts a
       // take (call, background, thermal stop). Dart never called stopProRes in
       // that case, so the path is pushed back here to be saved.

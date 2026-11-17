@@ -25,11 +25,11 @@ class FilmLook {
   final double lutMix;
 
   const FilmLook({
-    this.grain = 0.30,
+    this.grain = 0.12,
     this.grainSize = 0.10,
-    this.halation = 0.35,
-    this.bloom = 0.20,
-    this.vignette = 0.25,
+    this.halation = 0.0,
+    this.bloom = 0.0,
+    this.vignette = 0.16,
     this.lutMix = 1.0,
   });
 
@@ -67,6 +67,7 @@ class FilmLook {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
+        'v': 2,
         'grain': grain,
         'grainSize': grainSize,
         'halation': halation,
@@ -82,12 +83,29 @@ class FilmLook {
       return fallback;
     }
 
+    final version = (json['v'] as num?)?.toInt() ?? 1;
+    final grain = read('grain', 0.12);
+    final halation = read('halation', 0.0);
+    final bloom = read('bloom', 0.0);
+    final vignette = read('vignette', 0.16);
+
+    // v1 shipped heavier defaults (0.30 / 0.35 / 0.20 / 0.25). Tones read as
+    // washed out behind that much halation and bloom, and every export had to
+    // render the extra glow. Only untouched v1 values are replaced; a look the
+    // user actually dialled in is preserved.
+    final untouchedV1Defaults = version < 2 &&
+        (grain - 0.30).abs() < 0.02 &&
+        (halation - 0.35).abs() < 0.02 &&
+        (bloom - 0.20).abs() < 0.02 &&
+        (vignette - 0.25).abs() < 0.02;
+    if (untouchedV1Defaults) return const FilmLook();
+
     return FilmLook(
-      grain: read('grain', 0.30),
+      grain: grain,
       grainSize: read('grainSize', 0.10),
-      halation: read('halation', 0.35),
-      bloom: read('bloom', 0.20),
-      vignette: read('vignette', 0.25),
+      halation: halation,
+      bloom: bloom,
+      vignette: vignette,
       lutMix: read('lutMix', 1.0),
     );
   }

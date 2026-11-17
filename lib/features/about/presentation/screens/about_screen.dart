@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.1.3';
+  static const String appVersion = '1.1.4';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -132,6 +132,38 @@ class AboutScreen extends StatelessWidget {
                     ),
                   ),
                   SizedBox(height: 12),
+                  _ChangeEntry(
+                    title: 'Simpan ProRes tidak lagi berputar selamanya',
+                    detail:
+                        'Bake look ProRes kini memakai AVAssetExportSession '
+                        'dengan pengaman waktu. Audio ikut tersimpan, dan '
+                        'kalau ekspor gagal aplikasi tetap menjawab: master '
+                        'flat dipakai plus peringatan, bukan spinner tanpa ujung.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Simpan video jauh lebih cepat',
+                    detail:
+                        'Halation & bloom digabung dalam satu pass resolusi '
+                        'seperempat dan grain dibuat di resolusi setengah. '
+                        'Beban render turun drastis, jadi ekspor 4K selesai '
+                        'jauh lebih cepat tanpa mengubah tampilan look.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Progres simpan tampil dalam persen',
+                    detail:
+                        'Overlay pemrosesan kini menunjukkan persentase dari '
+                        'mesin ekspor iOS, sehingga proses panjang tidak '
+                        'terlihat seperti macet.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Tone tampil penuh & pratinjau ikut berubah',
+                    detail: 'Intensitas tone default kini 100% (nilai lama 85% '
+                        'diangkat sekali), efek halation/bloom bawaan '
+                        'diringankan agar warna tone lebih tegas, dan draft '
+                        'custom tone tidak lagi tertinggal sehingga slider '
+                        'intensitas serta pilihan tone langsung terlihat di '
+                        'viewfinder maupun hasil.',
+                  ),
                   _ChangeEntry(
                     title: 'Tone & LUT benar-benar terlihat di hasil',
                     detail:

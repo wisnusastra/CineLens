@@ -6,6 +6,69 @@ import Flutter
 import ImageIO
 import UIKit
 
+/// Sends a Flutter method result exactly once.
+///
+/// AVFoundation can report completion, fail, or never call back at all. Every
+/// export path used to `return` without answering on some errors, which left
+/// Dart waiting forever on the "menyimpan" spinner. All replies now go through
+/// this guard, so a watchdog and the real completion cannot both fire.
+final class ReplyOnce {
+  private let lock = NSLock()
+  private var sent = false
+  private let body: (Any?) -> Void
+
+  init(_ body: @escaping (Any?) -> Void) {
+    self.body = body
+  }
+
+  func send(_ value: Any?) {
+    lock.lock()
+    if sent {
+      lock.unlock()
+      return
+    }
+    sent = true
+    lock.unlock()
+    DispatchQueue.main.async { self.body(value) }
+  }
+}
+
+/// Pushes `AVAssetExportSession.progress` to Dart so the processing overlay can
+/// show a percentage instead of an indeterminate spinner.
+final class ExportProgressReporter {
+  private var timer: Timer?
+  private var lastProgress = -1.0
+
+  init(session: AVAssetExportSession, channel: FlutterMethodChannel?) {
+    lastProgress = Double(session.progress)
+    timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) {
+      [weak self] timer in
+      guard let self = self else {
+        timer.invalidate()
+        return
+      }
+      guard session.status == .exporting || session.status == .waiting else {
+        self.stop()
+        return
+      }
+      let progress = Double(session.progress)
+      guard progress.isFinite, progress - self.lastProgress >= 0.01 else {
+        return
+      }
+      self.lastProgress = progress
+      channel?.invokeMethod("exportProgress", arguments: ["progress": progress])
+    }
+    timer?.tolerance = 0.1
+  }
+
+  func stop() {
+    DispatchQueue.main.async { [weak self] in
+      self?.timer?.invalidate()
+      self?.timer = nil
+    }
+  }
+}
+
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private static let videoChannelName = "com.cinelens.ios/video_grader"
@@ -1573,6 +1636,189 @@ import UIKit
 
   // MARK: - Video
 
+  /// Builds the Core Image composition shared by the H.264 export and the
+  /// ProRes bake, so both produce the same orientation, look and colour tags.
+  ///
+  /// Returning `nil` means the asset has no usable video track; the caller then
+  /// answers with the untouched input instead of leaving Flutter waiting.
+  private static func gradedVideoComposition(
+    asset: AVURLAsset,
+    matrix: [Double],
+    filmLook: FilmLook?,
+    effectLook: FilmLook?,
+    anamorphic: Bool,
+    frameRate: Int32
+  ) async -> AVMutableVideoComposition? {
+    // Read the track orientation first: the recorder may store portrait
+    // footage in landscape sensor space plus a rotation transform, and a
+    // video composition does not apply that transform on its own. Ignoring
+    // it is what makes the exported clip look tilted.
+    var preferredTransform = CGAffineTransform.identity
+    var naturalSize = CGSize.zero
+    var detectedRate = frameRate
+
+    if let track = try? await asset.loadTracks(withMediaType: .video).first {
+      if let transform = try? await track.load(.preferredTransform) {
+        preferredTransform = transform
+      }
+      if let size = try? await track.load(.naturalSize) {
+        naturalSize = size
+      }
+      if detectedRate <= 0 {
+        let nominal = (try? await track.load(.nominalFrameRate)) ?? 0
+        detectedRate = nominal > 1 ? Int32(nominal.rounded()) : 30
+      }
+    }
+
+    let orientedRect = CGRect(origin: .zero, size: naturalSize)
+      .applying(preferredTransform)
+    let renderSize = CGSize(
+      width: abs(orientedRect.width).rounded(),
+      height: abs(orientedRect.height).rounded()
+    )
+    let fps = max(detectedRate, 1)
+    let gradingContext = AppDelegate.gradingContext
+
+    let composition = AVMutableVideoComposition(asset: asset) { request in
+      let sourceExtent = request.sourceImage.extent
+      var output: CIImage
+
+      if let look = filmLook {
+        // The compositor time gives every frame its own grain pattern.
+        let frameIndex = Int(
+          (request.compositionTime.seconds * Double(fps)).rounded()
+        )
+        output = look.apply(to: request.sourceImage, frameIndex: frameIndex)
+          .cropped(to: sourceExtent)
+      } else if let effectLook = effectLook {
+        // Effects-only: the tone matrix still owns the colour.
+        let frameIndex = Int(
+          (request.compositionTime.seconds * Double(fps)).rounded()
+        )
+        let graded = AppDelegate.colorMatrixImage(
+          matrix,
+          to: request.sourceImage
+        )
+        output = effectLook
+          .apply(to: graded, frameIndex: frameIndex)
+          .cropped(to: sourceExtent)
+      } else {
+        output = AppDelegate.colorMatrixImage(matrix, to: request.sourceImage)
+          .cropped(to: sourceExtent)
+      }
+
+      // Some iOS versions hand the compositor an already oriented image.
+      // Only rotate when the frame is still in the sensor's native space.
+      let alreadyOriented =
+        abs(sourceExtent.width - renderSize.width) < 1.0
+        && abs(sourceExtent.height - renderSize.height) < 1.0
+
+      if !preferredTransform.isIdentity && !alreadyOriented {
+        output = output.transformed(by: preferredTransform)
+      }
+
+      // Keep the origin at (0, 0) so the composition renders inside renderSize.
+      let rotatedExtent = output.extent
+      if rotatedExtent.origin != .zero {
+        output = output.transformed(
+          by: CGAffineTransform(
+            translationX: -rotatedExtent.origin.x,
+            y: -rotatedExtent.origin.y
+          )
+        )
+      }
+
+      if anamorphic {
+        let frameExtent = output.extent
+        let targetHeight = frameExtent.width / 2.39
+        if frameExtent.height > targetHeight + 0.5 {
+          let barHeight = (frameExtent.height - targetHeight) / 2.0
+          let activeRect = CGRect(
+            x: frameExtent.origin.x,
+            y: frameExtent.origin.y + barHeight,
+            width: frameExtent.width,
+            height: targetHeight
+          )
+          let blackBackground = CIImage(color: .black).cropped(to: frameExtent)
+          output = output.cropped(to: activeRect)
+            .composited(over: blackBackground)
+        }
+      }
+
+      request.finish(with: output, context: gradingContext)
+    }
+
+    if renderSize.width > 0, renderSize.height > 0 {
+      composition.renderSize = renderSize
+    }
+    composition.frameDuration = CMTime(value: 1, timescale: fps)
+    // Tag the result as Rec.709 so players and the Photos app interpret the
+    // graded frames exactly like the live preview does.
+    composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+    composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+    composition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+
+    return composition
+  }
+
+  /// Runs an export session and guarantees exactly one Flutter reply.
+  ///
+  /// The watchdog covers the case where AVFoundation never calls the completion
+  /// handler (the old reader/writer pair could stall forever when an append
+  /// failed), so the spinner can never hang again.
+  private static func finishExport(
+    _ session: AVAssetExportSession,
+    outputURL: URL,
+    inputPath: String,
+    timeout: TimeInterval,
+    channel: FlutterMethodChannel?,
+    done: ReplyOnce
+  ) {
+    DispatchQueue.main.async {
+      let reporter = ExportProgressReporter(
+        session: session,
+        channel: channel
+      )
+
+      session.exportAsynchronously {
+        reporter.stop()
+        switch session.status {
+        case .completed:
+          done.send(outputURL.path)
+        case .failed, .cancelled:
+          try? FileManager.default.removeItem(at: outputURL)
+          done.send(
+            FlutterError(
+              code: "export_failed",
+              message: session.error?.localizedDescription
+                ?? "Video export failed.",
+              details: nil
+            )
+          )
+        default:
+          done.send(inputPath)
+        }
+      }
+
+      DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+        switch session.status {
+        case .completed:
+          reporter.stop()
+          done.send(outputURL.path)
+        case .exporting, .waiting:
+          // Stuck: cancel and hand back the raw take rather than hang.
+          session.cancelExport()
+          reporter.stop()
+          try? FileManager.default.removeItem(at: outputURL)
+          done.send(inputPath)
+        default:
+          reporter.stop()
+          done.send(inputPath)
+        }
+      }
+    }
+  }
+
   private func exportGradedVideo(
     inputPath: String,
     matrix: [Double],
@@ -1584,8 +1830,9 @@ import UIKit
     fps: Int32,
     result: @escaping FlutterResult
   ) {
+    let done = ReplyOnce(result)
     guard matrix.count == 20 else {
-      result(inputPath)
+      done.send(inputPath)
       return
     }
 
@@ -1605,116 +1852,34 @@ import UIKit
     }()
     let asset = AVURLAsset(url: URL(fileURLWithPath: inputPath))
     let outputURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("CINELENS_24FPS_\(Int(Date().timeIntervalSince1970)).mov")
+      .appendingPathComponent(
+        "CINELENS_24FPS_\(Int(Date().timeIntervalSince1970)).mov"
+      )
 
     Task {
-      // Read the track orientation first: the recorder may store portrait
-      // footage in landscape sensor space plus a rotation transform, and a
-      // video composition does not apply that transform on its own. Ignoring
-      // it is what makes the exported clip look tilted.
-      var preferredTransform = CGAffineTransform.identity
-      var naturalSize = CGSize.zero
-
-      if let track = try? await asset.loadTracks(withMediaType: .video).first {
-        if let transform = try? await track.load(.preferredTransform) {
-          preferredTransform = transform
-        }
-        if let size = try? await track.load(.naturalSize) {
-          naturalSize = size
-        }
+      guard let composition = await AppDelegate.gradedVideoComposition(
+        asset: asset,
+        matrix: matrix,
+        filmLook: filmLook,
+        effectLook: effectLook,
+        anamorphic: anamorphic,
+        frameRate: frameRate
+      ) else {
+        done.send(inputPath)
+        return
       }
-
-      let orientedRect = CGRect(origin: .zero, size: naturalSize)
-        .applying(preferredTransform)
-      let renderSize = CGSize(
-        width: abs(orientedRect.width).rounded(),
-        height: abs(orientedRect.height).rounded()
-      )
-      let gradingContext = AppDelegate.gradingContext
-
-      let composition = AVMutableVideoComposition(asset: asset) { request in
-        let sourceExtent = request.sourceImage.extent
-        var output: CIImage
-
-        if let look = filmLook {
-          // The compositor time gives every frame its own grain pattern.
-          let frameIndex = Int(
-            (request.compositionTime.seconds * Double(frameRate)).rounded()
-          )
-          output = look.apply(to: request.sourceImage, frameIndex: frameIndex)
-            .cropped(to: sourceExtent)
-        } else if let effectLook = effectLook {
-          // Effects-only: the tone matrix still owns the colour.
-          let frameIndex = Int(
-            (request.compositionTime.seconds * Double(frameRate)).rounded()
-          )
-          let graded = AppDelegate.colorMatrixImage(
-            matrix,
-            to: request.sourceImage
-          )
-          output = effectLook
-            .apply(to: graded, frameIndex: frameIndex)
-            .cropped(to: sourceExtent)
-        } else {
-          output = AppDelegate.colorMatrixImage(matrix, to: request.sourceImage)
-            .cropped(to: sourceExtent)
-        }
-
-        // Some iOS versions hand the compositor an already oriented image.
-        // Only rotate when the frame is still in the sensor's native space.
-        let alreadyOriented =
-          abs(sourceExtent.width - renderSize.width) < 1.0
-          && abs(sourceExtent.height - renderSize.height) < 1.0
-
-        if !preferredTransform.isIdentity && !alreadyOriented {
-          output = output.transformed(by: preferredTransform)
-        }
-
-        // Keep the origin at (0, 0) so the composition renders inside renderSize.
-        let rotatedExtent = output.extent
-        if rotatedExtent.origin != .zero {
-          output = output.transformed(
-            by: CGAffineTransform(
-              translationX: -rotatedExtent.origin.x,
-              y: -rotatedExtent.origin.y
-            )
-          )
-        }
-
-        if anamorphic {
-          let frameExtent = output.extent
-          let targetHeight = frameExtent.width / 2.39
-          if frameExtent.height > targetHeight + 0.5 {
-            let barHeight = (frameExtent.height - targetHeight) / 2.0
-            let activeRect = CGRect(
-              x: frameExtent.origin.x,
-              y: frameExtent.origin.y + barHeight,
-              width: frameExtent.width,
-              height: targetHeight
-            )
-            let blackBackground = CIImage(color: .black).cropped(to: frameExtent)
-            output = output.cropped(to: activeRect).composited(over: blackBackground)
-          }
-        }
-
-        request.finish(with: output, context: gradingContext)
-      }
-
-      if renderSize.width > 0, renderSize.height > 0 {
-        composition.renderSize = renderSize
-      }
-      composition.frameDuration = CMTime(value: 1, timescale: frameRate)
-      // Tag the result as Rec.709 so players and the Photos app interpret the
-      // graded frames exactly like the live preview does.
-      composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
-      composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
-      composition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
 
       guard let exportSession = AVAssetExportSession(
         asset: asset,
         presetName: AVAssetExportPresetHighestQuality
       ) else {
-        DispatchQueue.main.async { result(inputPath) }
+        done.send(
+          FlutterError(
+            code: "export_unavailable",
+            message: "Perangkat ini tidak bisa mengekspor video bergrade.",
+            details: nil
+          )
+        )
         return
       }
 
@@ -1722,15 +1887,19 @@ import UIKit
       exportSession.outputFileType = .mov
       exportSession.videoComposition = composition
       exportSession.shouldOptimizeForNetworkUse = true
-      exportSession.exportAsynchronously {
-        DispatchQueue.main.async {
-          if exportSession.status == .completed {
-            result(outputURL.path)
-          } else {
-            result(inputPath)
-          }
-        }
-      }
+
+      let duration = (try? await asset.load(.duration))?.seconds ?? 0
+      // Generous enough for long 4K takes, short enough that a wedged export
+      // still answers while the user is looking at the screen.
+      let timeout = min(max(240.0, duration * 12.0), 900.0)
+      AppDelegate.finishExport(
+        exportSession,
+        outputURL: outputURL,
+        inputPath: inputPath,
+        timeout: timeout,
+        channel: self.nativeChannel,
+        done: done
+      )
     }
   }
 
@@ -1751,6 +1920,7 @@ import UIKit
     importedLut: ImportedLut?,
     result: @escaping FlutterResult
   ) {
+    let done = ReplyOnce(result)
     let identity: [Double] = [
       1, 0, 0, 0, 0,
       0, 1, 0, 0, 0,
@@ -1777,7 +1947,7 @@ import UIKit
     }()
 
     if look == nil && effectLook == nil && isIdentityMatrix {
-      result(inputPath)
+      done.send(inputPath)
       return
     }
 
@@ -1789,152 +1959,50 @@ import UIKit
     let asset = AVURLAsset(url: URL(fileURLWithPath: inputPath))
 
     Task {
-      guard let track = try? await asset.loadTracks(withMediaType: .video).first,
-            let naturalSize = try? await track.load(.naturalSize),
-            let transform = try? await track.load(.preferredTransform),
-            naturalSize.width > 0,
-            naturalSize.height > 0 else {
-        DispatchQueue.main.async { result(inputPath) }
-        return
-      }
-
-      let oriented = CGRect(origin: .zero, size: naturalSize)
-        .applying(transform)
-      let width = Int(abs(oriented.width).rounded())
-      let height = Int(abs(oriented.height).rounded())
-      guard width > 0, height > 0 else {
-        DispatchQueue.main.async { result(inputPath) }
-        return
-      }
-
-      guard let reader = try? AVAssetReader(asset: asset) else {
-        DispatchQueue.main.async { result(inputPath) }
-        return
-      }
-      let readerOutput = AVAssetReaderTrackOutput(
-        track: track,
-        outputSettings: [
-          kCVPixelBufferPixelFormatTypeKey as String:
-            kCVPixelFormatType_32BGRA
-        ]
-      )
-      readerOutput.alwaysCopiesSampleData = false
-      guard reader.canAdd(readerOutput) else {
-        DispatchQueue.main.async { result(inputPath) }
-        return
-      }
-      reader.add(readerOutput)
-
-      guard let writer = try? AVAssetWriter(
-        outputURL: outputURL,
-        fileType: .mov
+      guard let composition = await AppDelegate.gradedVideoComposition(
+        asset: asset,
+        matrix: matrix,
+        filmLook: look,
+        effectLook: effectLook,
+        anamorphic: false,
+        frameRate: 0
       ) else {
-        DispatchQueue.main.async { result(inputPath) }
+        done.send(inputPath)
         return
       }
-      let writerInput = AVAssetWriterInput(
-        mediaType: .video,
-        outputSettings: [
-          AVVideoCodecKey: AVVideoCodecType.proRes422,
-          AVVideoWidthKey: width,
-          AVVideoHeightKey: height,
-        ]
-      )
-      writerInput.expectsMediaDataInRealTime = false
-      let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-        assetWriterInput: writerInput,
-        sourcePixelBufferAttributes: [
-          kCVPixelBufferPixelFormatTypeKey as String:
-            kCVPixelFormatType_32BGRA,
-          kCVPixelBufferWidthKey as String: width,
-          kCVPixelBufferHeightKey as String: height,
-        ]
-      )
-      guard writer.canAdd(writerInput) else {
-        DispatchQueue.main.async { result(inputPath) }
-        return
-      }
-      writer.add(writerInput)
 
-      guard writer.startWriting() else {
-        DispatchQueue.main.async { result(inputPath) }
-        return
-      }
-      writer.startSession(atSourceTime: .zero)
-      reader.startReading()
-
-      let context = AppDelegate.gradingContext
-      let sRGB = CGColorSpace(name: CGColorSpace.sRGB)
-      let renderQueue = DispatchQueue(label: "com.cinelens.proresBake")
-
-      writerInput.requestMediaDataWhenReady(on: renderQueue) {
-        while writerInput.isReadyForMoreMediaData {
-          guard let sample = readerOutput.copyNextSampleBuffer() else {
-            writerInput.markAsFinished()
-            reader.cancelReading()
-            writer.finishWriting {
-              let ok = writer.status == .completed
-              DispatchQueue.main.async {
-                result(ok ? outputURL.path : inputPath)
-              }
-            }
-            return
-          }
-
-          guard let buffer = CMSampleBufferGetImageBuffer(sample) else {
-            continue
-          }
-
-          let time = CMSampleBufferGetPresentationTimeStamp(sample)
-          let frameIndex = Int((time.seconds * 30.0).rounded())
-          var graded = CIImage(cvPixelBuffer: buffer)
-          if let look = look {
-            graded = look.apply(to: graded, frameIndex: frameIndex)
-          } else {
-            graded = AppDelegate.colorMatrixImage(matrix, to: graded)
-            if let effectLook = effectLook {
-              graded = effectLook.apply(to: graded, frameIndex: frameIndex)
-            }
-          }
-
-          if !transform.isIdentity {
-            graded = graded.transformed(by: transform)
-          }
-          let extent = graded.extent
-          if extent.origin != .zero {
-            graded = graded.transformed(
-              by: CGAffineTransform(
-                translationX: -extent.origin.x,
-                y: -extent.origin.y
-              )
-            )
-          }
-
-          // The pool only exists once the writer has started; ask again on
-          // every frame so a slow first sample is not silently dropped.
-          guard let pool = adaptor.pixelBufferPool else {
-            continue
-          }
-          var outputBuffer: CVPixelBuffer?
-          guard CVPixelBufferPoolCreatePixelBuffer(
-            nil,
-            pool,
-            &outputBuffer
-          ) == kCVReturnSuccess, let outputBuffer = outputBuffer else {
-            continue
-          }
-          context.render(
-            graded,
-            to: outputBuffer,
-            bounds: CGRect(x: 0, y: 0, width: width, height: height),
-            colorSpace: sRGB
+      // Re-encoding an existing ProRes master through AVAssetExportSession
+      // keeps the codec (ProRes 422) and, unlike the old reader/writer loop,
+      // carries the audio track over and cannot wedge the Flutter call.
+      guard let exportSession = AVAssetExportSession(
+        asset: asset,
+        presetName: AVAssetExportPresetAppleProRes422LPCM
+      ) else {
+        done.send(
+          FlutterError(
+            code: "prores_unavailable",
+            message: "Perangkat ini tidak bisa menulis ProRes.",
+            details: nil
           )
-
-          if !adaptor.append(outputBuffer, withPresentationTime: time) {
-            break
-          }
-        }
+        )
+        return
       }
+
+      exportSession.outputURL = outputURL
+      exportSession.outputFileType = .mov
+      exportSession.videoComposition = composition
+      exportSession.shouldOptimizeForNetworkUse = false
+
+      let duration = (try? await asset.load(.duration))?.seconds ?? 0
+      let timeout = min(max(300.0, duration * 25.0), 1800.0)
+      AppDelegate.finishExport(
+        exportSession,
+        outputURL: outputURL,
+        inputPath: inputPath,
+        timeout: timeout,
+        channel: self.nativeChannel,
+        done: done
+      )
     }
   }
 
@@ -2552,28 +2620,33 @@ struct FilmLook {
     }
 
     // 3. Halation: red-orange glow around highlights (light bouncing off the
-    //    film base), then a wide white bloom like a diffusion filter.
+    //    film base), and a wide white bloom like a diffusion filter. Both are
+    //    low-frequency, so they share one quarter-resolution pass.
     let halation = p.halation * fx
+    let bloom = p.bloom * fx
+    var glowLayers: [FilmLook.GlowLayer] = []
     if halation > 0.001 {
-      output = FilmLook.glow(
-        over: output,
-        extent: extent,
-        threshold: 0.80,
-        tint: [1.0, 0.32, 0.10],
-        amount: halation * 1.6,
-        sigma: 11.0 * scale
+      glowLayers.append(
+        FilmLook.GlowLayer(
+          threshold: 0.80,
+          tint: [1.0, 0.32, 0.10],
+          amount: halation * 1.6,
+          sigma: 11.0 * scale
+        )
       )
     }
-    let bloom = p.bloom * fx
     if bloom > 0.001 {
-      output = FilmLook.glow(
-        over: output,
-        extent: extent,
-        threshold: 0.62,
-        tint: [1.0, 1.0, 1.0],
-        amount: bloom * 1.4,
-        sigma: 30.0 * scale
+      glowLayers.append(
+        FilmLook.GlowLayer(
+          threshold: 0.62,
+          tint: [1.0, 1.0, 1.0],
+          amount: bloom * 1.4,
+          sigma: 30.0 * scale
+        )
       )
+    }
+    if !glowLayers.isEmpty {
+      output = FilmLook.glow(over: output, extent: extent, layers: glowLayers)
     }
 
     // 4. Grain: monochrome noise, soft-light blended so it lives in the
@@ -2612,68 +2685,90 @@ struct FilmLook {
     )
   }
 
+  /// One glow request: highlights above [threshold], tinted, added at
+  /// [amount] with a blur of [sigma] (in full-resolution pixels).
+  private struct GlowLayer {
+    let threshold: Double
+    let tint: [Double]
+    let amount: Double
+    let sigma: Double
+  }
+
+  /// Screens every requested glow over [base] with a single downscale, blur and
+  /// upscale round trip.
+  ///
+  /// Glow is a low-frequency effect, so evaluating it at a quarter of the
+  /// resolution is visually identical but roughly sixteen times cheaper per
+  /// pass. Video export used to run two full-resolution Lanczos glows per
+  /// frame, which is what made saving slow.
   private static func glow(
     over base: CIImage,
     extent: CGRect,
-    threshold: Double,
-    tint: [Double],
-    amount: Double,
-    sigma: Double
+    layers: [GlowLayer]
   ) -> CIImage {
-    let k = 1.0 / (1.0 - threshold)
+    let reduction = 4.0
+    let downscale = CGAffineTransform(scaleX: 1 / reduction, y: 1 / reduction)
+    let smallExtent = extent.applying(downscale)
+    let smallBase = base.transformed(by: downscale).cropped(to: smallExtent)
 
-    func row(_ t: Double) -> CIVector {
-      CIVector(
-        x: CGFloat(t * amount * k * 0.2126),
-        y: CGFloat(t * amount * k * 0.7152),
-        z: CGFloat(t * amount * k * 0.0722),
-        w: 0
+    var combined: CIImage?
+    for layer in layers {
+      let k = 1.0 / (1.0 - layer.threshold)
+
+      func row(_ t: Double) -> CIVector {
+        CIVector(
+          x: CGFloat(t * layer.amount * k * 0.2126),
+          y: CGFloat(t * layer.amount * k * 0.7152),
+          z: CGFloat(t * layer.amount * k * 0.0722),
+          w: 0
+        )
+      }
+
+      // Luma above the threshold, tinted and scaled, clamped to 0...1.
+      let extracted = smallBase.applyingFilter(
+        "CIColorMatrix",
+        parameters: [
+          "inputRVector": row(layer.tint[0]),
+          "inputGVector": row(layer.tint[1]),
+          "inputBVector": row(layer.tint[2]),
+          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputBiasVector": CIVector(
+            x: CGFloat(-layer.tint[0] * layer.amount * k * layer.threshold),
+            y: CGFloat(-layer.tint[1] * layer.amount * k * layer.threshold),
+            z: CGFloat(-layer.tint[2] * layer.amount * k * layer.threshold),
+            w: 1
+          )
+        ]
+      ).applyingFilter(
+        "CIColorClamp",
+        parameters: [
+          "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
+        ]
       )
+
+      let blurred = extracted.clampedToExtent()
+        .applyingGaussianBlur(sigma: max(layer.sigma / reduction, 0.5))
+        .cropped(to: smallExtent)
+
+      if let previous = combined {
+        combined = blurred
+          .applyingFilter(
+            "CIScreenBlendMode",
+            parameters: [kCIInputBackgroundImageKey: previous]
+          )
+          .cropped(to: smallExtent)
+      } else {
+        combined = blurred
+      }
     }
 
-    // luma above the threshold, tinted and scaled, clamped to 0...1
-    let extracted = base.applyingFilter(
-      "CIColorMatrix",
-      parameters: [
-        "inputRVector": row(tint[0]),
-        "inputGVector": row(tint[1]),
-        "inputBVector": row(tint[2]),
-        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-        "inputBiasVector": CIVector(
-          x: CGFloat(-tint[0] * amount * k * threshold),
-          y: CGFloat(-tint[1] * amount * k * threshold),
-          z: CGFloat(-tint[2] * amount * k * threshold),
-          w: 1
-        )
-      ]
-    ).applyingFilter(
-      "CIColorClamp",
-      parameters: [
-        "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-        "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
-      ]
-    )
+    guard let smallGlow = combined else { return base }
 
-    // Big soft glows do not need full resolution. Blurring a quarter-size copy
-    // is the same picture for a fraction of the cost, which keeps video export
-    // fast. Lanczos keeps tiny highlights from flickering between frames.
-    let reduction = 4.0
-    let small = extracted.cropped(to: extent).applyingFilter(
-      "CILanczosScaleTransform",
-      parameters: [
-        kCIInputScaleKey: 1.0 / reduction,
-        kCIInputAspectRatioKey: 1.0
-      ]
-    )
-    let smallExtent = small.extent
-    let blurredSmall = small.clampedToExtent()
-      .applyingGaussianBlur(sigma: max(sigma / reduction, 0.5))
-      .cropped(to: smallExtent)
-    let blurred = blurredSmall
-      .transformed(by: CGAffineTransform(scaleX: CGFloat(reduction), y: CGFloat(reduction)))
-      .cropped(to: extent)
+    let upscale = CGAffineTransform(scaleX: reduction, y: reduction)
+    let upscaled = smallGlow.transformed(by: upscale).cropped(to: extent)
 
-    return blurred
+    return upscaled
       .applyingFilter(
         "CIScreenBlendMode",
         parameters: [kCIInputBackgroundImageKey: base]
@@ -2692,6 +2787,13 @@ struct FilmLook {
       return base
     }
 
+    // Grain is built at half resolution: the blur then costs a quarter of the
+    // pixels and the upscale keeps the specks film-sized. The gain below still
+    // uses the full-resolution radius, so the slider feels the same.
+    let reduction = 2.0
+    let downscale = CGAffineTransform(scaleX: 1 / reduction, y: 1 / reduction)
+    let smallExtent = extent.applying(downscale)
+
     // A different offset per frame makes the grain move like real film.
     let offsetX = CGFloat((frameIndex &* 7919) % 2048)
     let offsetY = CGFloat((frameIndex &* 104729) % 2048)
@@ -2700,8 +2802,8 @@ struct FilmLook {
     // black and white speckles. Forcing alpha to 1 keeps the raw 0...1 values.
     let shifted = noise
       .transformed(by: CGAffineTransform(translationX: offsetX, y: offsetY))
-      .cropped(to: extent)
-      .settingAlphaOne(in: extent)
+      .cropped(to: smallExtent)
+      .settingAlphaOne(in: smallExtent)
 
     // Average the three noise channels into one monochrome value.
     let third = CGFloat(1.0 / 3.0)
@@ -2719,8 +2821,11 @@ struct FilmLook {
     // Blur sets the grain size; the gain restores the contrast the blur
     // removes so the strength stays comparable across sizes.
     let sigma = max(0.55 * size + 0.35, 0.35)
-    let softened = mono.clampedToExtent()
-      .applyingGaussianBlur(sigma: sigma)
+    let softenedSmall = mono.clampedToExtent()
+      .applyingGaussianBlur(sigma: max(sigma / reduction, 0.25))
+      .cropped(to: smallExtent)
+    let softened = softenedSmall
+      .transformed(by: CGAffineTransform(scaleX: reduction, y: reduction))
       .cropped(to: extent)
 
     let rawDeviation = 0.1667 / max(1.0, 2.0 * sigma * Double.pi.squareRoot())
