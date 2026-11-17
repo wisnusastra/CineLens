@@ -1,7 +1,7 @@
 name: cinelens_ios
 description: Hollywood Cinematic Camera for iOS with 24fps video, real-time 5x4 LUT color grading, custom tone studio, and JSON preset sharing.
 publish_to: 'none'
-version: 1.1.4+10
+version: 1.1.5+11
 
 environment:
   sdk: '>=3.5.0 <4.0.0'

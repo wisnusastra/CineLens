@@ -5,8 +5,12 @@ bingkai anamorphic 2.39:1, pembuat tone kustom, serta export/import preset `.jso
 
 ## Fitur
 
-- **7 LUT bawaan** — Standard, Kodak 2383, Teal & Orange, Fuji Velvia, Noir B&W,
-  Golden Hour, Vintage 16mm.
+- **25 LUT bawaan** — Standard, Kodak 2383, Teal & Orange, Fuji Velvia, Noir B&W,
+  CineLens Flat, Golden Hour, Vintage 16mm, plus 18 stok film: Agfacolor XRS 200
+  (exp. 1991), Agfa Chrome RSX II 200 (exp. 2006), CineStill 50D/800T, Eterna
+  Vivid 500/500D dengan print Kodak 2383 atau Fuji 3513, Provia 100F, Velvia 50
+  + 2383, Fujicolor C200 + Kodak Endura, Kodak Portra 400, Gold 200, Ektar 100,
+  Vision3 250D, Fuji Pro 400H, Superia 400, dan Ilford HP5 Plus.
 - **Grading real-time** di viewfinder lewat `ColorFilter.matrix` (matriks 5×4).
 - **Slider intensitas LUT** 0–100 %, diinterpolasi linear dari matriks identitas.
 - **Film emulation** — Foto dan video hasil export memakai mesin film native

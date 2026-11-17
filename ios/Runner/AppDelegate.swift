@@ -3213,6 +3213,211 @@ enum FilmEngine {
         grain: 0.55, grainSize: 1.5,
         halation: 0.4, bloom: 0.2,
         vignette: 0.42, soften: 0.3
+      ),
+      // MARK: Expired & cult stocks
+      //
+      // Colour models tuned by eye for each emulsion: the expired Agfas keep
+      // their age casts and lifted blacks, the CineStills their halation-prone
+      // highlights, the Eterna/print pairs the difference between the warm
+      // Kodak 2383 and the cooler Fuji 3513 print.
+      "agfa_xrs_200": FilmStockParams(
+        mix: [1.02, 0.02, -0.04, 0.0, 1.0, 0.0, -0.02, 0.05, 0.97],
+        ev: 0.02,
+        k: [4.9, 4.7, 4.4], pivot: [0.52, 0.51, 0.55],
+        sat: 0.86, hlDesat: 0.3, shDesat: 0.22,
+        shadowTint: [0.004, 0.022, 0.028], hlTint: [0.05, 0.03, -0.035],
+        black: 0.045, white: 0.945, mono: nil,
+        grain: 0.42, grainSize: 1.35,
+        halation: 0.3, bloom: 0.16,
+        vignette: 0.26, soften: 0.22
+      ),
+      "agfa_rsx_ii_200": FilmStockParams(
+        mix: [1.08, -0.02, -0.06, -0.02, 1.04, -0.02, -0.01, -0.03, 1.04],
+        ev: -0.06,
+        k: [6.6, 6.3, 6.0], pivot: [0.53, 0.53, 0.55],
+        sat: 1.1, hlDesat: 0.14, shDesat: 0.06,
+        shadowTint: [0.032, -0.006, 0.028], hlTint: [-0.008, 0.012, 0.012],
+        black: 0.012, white: 0.985, mono: nil,
+        grain: 0.2, grainSize: 1.0,
+        halation: 0.22, bloom: 0.08,
+        vignette: 0.24, soften: 0.06
+      ),
+      "cinestill_50d": FilmStockParams(
+        mix: [1.05, -0.02, -0.03, -0.01, 1.03, -0.02, -0.03, -0.01, 1.04],
+        ev: 0.0,
+        k: [6.0, 5.8, 5.5], pivot: [0.52, 0.53, 0.54],
+        sat: 1.06, hlDesat: 0.22, shDesat: 0.08,
+        shadowTint: [-0.008, 0.0, 0.026], hlTint: [0.045, 0.02, -0.026],
+        black: 0.014, white: 0.975, mono: nil,
+        grain: 0.14, grainSize: 0.85,
+        halation: 0.55, bloom: 0.14,
+        vignette: 0.18, soften: 0.05
+      ),
+      "cinestill_800t": FilmStockParams(
+        mix: [1.04, -0.02, -0.02, -0.03, 1.06, -0.02, -0.04, 0.02, 1.02],
+        ev: 0.02,
+        k: [5.6, 5.5, 5.2], pivot: [0.52, 0.53, 0.55],
+        sat: 1.0, hlDesat: 0.3, shDesat: 0.14,
+        shadowTint: [0.004, 0.006, 0.042], hlTint: [0.06, -0.004, -0.03],
+        black: 0.028, white: 0.96, mono: nil,
+        grain: 0.36, grainSize: 1.2,
+        halation: 0.62, bloom: 0.18,
+        vignette: 0.24, soften: 0.12
+      ),
+      "eterna_vivid_500_2383": FilmStockParams(
+        mix: [1.08, -0.03, -0.04, -0.02, 1.05, -0.02, -0.05, 0.02, 1.02],
+        ev: -0.05,
+        k: [6.4, 6.1, 5.8], pivot: [0.53, 0.53, 0.55],
+        sat: 1.12, hlDesat: 0.26, shDesat: 0.1,
+        shadowTint: [-0.02, 0.018, 0.052], hlTint: [0.055, 0.024, -0.048],
+        black: 0.02, white: 0.96, mono: nil,
+        grain: 0.32, grainSize: 1.1,
+        halation: 0.44, bloom: 0.16,
+        vignette: 0.22, soften: 0.1
+      ),
+      "eterna_vivid_500_3513": FilmStockParams(
+        mix: [1.06, -0.03, -0.02, -0.03, 1.05, -0.03, -0.04, 0.0, 1.05],
+        ev: -0.04,
+        k: [6.2, 6.1, 5.9], pivot: [0.53, 0.53, 0.54],
+        sat: 1.1, hlDesat: 0.16, shDesat: 0.08,
+        shadowTint: [-0.024, 0.006, 0.05], hlTint: [0.02, 0.012, -0.006],
+        black: 0.016, white: 0.975, mono: nil,
+        grain: 0.3, grainSize: 1.1,
+        halation: 0.38, bloom: 0.14,
+        vignette: 0.2, soften: 0.08
+      ),
+      "eterna_vivid_500d_2383": FilmStockParams(
+        mix: [1.07, -0.02, -0.04, -0.01, 1.05, -0.02, -0.05, 0.02, 1.03],
+        ev: -0.03,
+        k: [6.3, 6.1, 5.8], pivot: [0.53, 0.53, 0.54],
+        sat: 1.12, hlDesat: 0.26, shDesat: 0.1,
+        shadowTint: [-0.014, 0.024, 0.044], hlTint: [0.052, 0.024, -0.042],
+        black: 0.02, white: 0.965, mono: nil,
+        grain: 0.28, grainSize: 1.05,
+        halation: 0.42, bloom: 0.15,
+        vignette: 0.2, soften: 0.09
+      ),
+      "eterna_vivid_500d_3513": FilmStockParams(
+        mix: [1.05, -0.02, -0.02, -0.02, 1.06, -0.03, -0.04, 0.0, 1.05],
+        ev: -0.03,
+        k: [6.2, 6.2, 6.0], pivot: [0.53, 0.53, 0.54],
+        sat: 1.09, hlDesat: 0.15, shDesat: 0.07,
+        shadowTint: [-0.02, 0.01, 0.048], hlTint: [0.014, 0.014, 0.0],
+        black: 0.014, white: 0.98, mono: nil,
+        grain: 0.26, grainSize: 1.05,
+        halation: 0.36, bloom: 0.13,
+        vignette: 0.19, soften: 0.07
+      ),
+      "provia_100f": FilmStockParams(
+        mix: [1.06, -0.03, -0.03, -0.02, 1.06, -0.03, -0.02, -0.04, 1.06],
+        ev: -0.05,
+        k: [6.8, 6.8, 6.6], pivot: [0.54, 0.54, 0.54],
+        sat: 1.14, hlDesat: 0.1, shDesat: 0.0,
+        shadowTint: [-0.006, 0.002, 0.02], hlTint: [0.008, 0.006, -0.006],
+        black: 0.004, white: 0.99, mono: nil,
+        grain: 0.1, grainSize: 0.8,
+        halation: 0.16, bloom: 0.06,
+        vignette: 0.15, soften: 0.0
+      ),
+      "velvia_50_2383": FilmStockParams(
+        mix: [1.12, -0.06, -0.05, -0.06, 1.14, -0.07, -0.03, -0.09, 1.12],
+        ev: -0.08,
+        k: [7.2, 7.3, 7.0], pivot: [0.54, 0.54, 0.55],
+        sat: 1.24, hlDesat: 0.18, shDesat: 0.02,
+        shadowTint: [0.006, -0.004, 0.036], hlTint: [0.05, 0.024, -0.04],
+        black: 0.018, white: 0.975, mono: nil,
+        grain: 0.16, grainSize: 0.85,
+        halation: 0.3, bloom: 0.1,
+        vignette: 0.18, soften: 0.02
+      ),
+      "c200_endura": FilmStockParams(
+        mix: [1.04, 0.0, -0.04, 0.0, 1.02, -0.02, -0.03, 0.03, 0.98],
+        ev: 0.0,
+        k: [5.4, 5.2, 4.9], pivot: [0.52, 0.52, 0.54],
+        sat: 1.02, hlDesat: 0.28, shDesat: 0.1,
+        shadowTint: [-0.006, 0.018, 0.018], hlTint: [0.05, 0.03, -0.03],
+        black: 0.02, white: 0.965, mono: nil,
+        grain: 0.26, grainSize: 1.15,
+        halation: 0.3, bloom: 0.12,
+        vignette: 0.2, soften: 0.12
+      ),
+      // MARK: Portraits, consumer film & motion picture
+      "kodak_portra_400": FilmStockParams(
+        mix: [1.04, -0.01, -0.03, 0.0, 1.02, -0.02, -0.02, 0.01, 1.01],
+        ev: 0.0,
+        k: [5.6, 5.4, 5.1], pivot: [0.52, 0.52, 0.54],
+        sat: 1.02, hlDesat: 0.28, shDesat: 0.12,
+        shadowTint: [-0.004, 0.012, 0.016], hlTint: [0.045, 0.028, -0.022],
+        black: 0.018, white: 0.968, mono: nil,
+        grain: 0.22, grainSize: 1.0,
+        halation: 0.3, bloom: 0.12,
+        vignette: 0.18, soften: 0.1
+      ),
+      "kodak_gold_200": FilmStockParams(
+        mix: [1.05, 0.01, -0.05, 0.0, 1.02, -0.02, -0.04, 0.03, 0.99],
+        ev: 0.0,
+        k: [5.8, 5.5, 5.2], pivot: [0.52, 0.52, 0.54],
+        sat: 1.08, hlDesat: 0.24, shDesat: 0.1,
+        shadowTint: [0.008, 0.018, -0.006], hlTint: [0.07, 0.04, -0.05],
+        black: 0.016, white: 0.97, mono: nil,
+        grain: 0.26, grainSize: 1.1,
+        halation: 0.34, bloom: 0.14,
+        vignette: 0.2, soften: 0.1
+      ),
+      "kodak_ektar_100": FilmStockParams(
+        mix: [1.08, -0.03, -0.05, -0.02, 1.06, -0.04, -0.03, -0.05, 1.08],
+        ev: -0.03,
+        k: [6.6, 6.5, 6.3], pivot: [0.53, 0.53, 0.54],
+        sat: 1.16, hlDesat: 0.14, shDesat: 0.04,
+        shadowTint: [-0.006, 0.0, 0.024], hlTint: [0.03, 0.018, -0.014],
+        black: 0.008, white: 0.985, mono: nil,
+        grain: 0.12, grainSize: 0.85,
+        halation: 0.2, bloom: 0.07,
+        vignette: 0.16, soften: 0.02
+      ),
+      "fuji_pro_400h": FilmStockParams(
+        mix: [1.02, 0.0, -0.02, -0.01, 1.04, -0.02, -0.01, 0.02, 1.02],
+        ev: 0.03,
+        k: [5.0, 5.0, 4.8], pivot: [0.52, 0.52, 0.54],
+        sat: 0.95, hlDesat: 0.3, shDesat: 0.14,
+        shadowTint: [-0.004, 0.014, 0.022], hlTint: [0.012, 0.032, 0.006],
+        black: 0.03, white: 0.955, mono: nil,
+        grain: 0.2, grainSize: 1.0,
+        halation: 0.26, bloom: 0.16,
+        vignette: 0.17, soften: 0.16
+      ),
+      "fuji_superia_400": FilmStockParams(
+        mix: [1.03, 0.01, -0.03, -0.01, 1.05, -0.03, -0.03, 0.03, 1.01],
+        ev: 0.0,
+        k: [5.9, 5.8, 5.5], pivot: [0.52, 0.52, 0.54],
+        sat: 1.08, hlDesat: 0.22, shDesat: 0.1,
+        shadowTint: [-0.014, 0.016, 0.026], hlTint: [0.03, 0.02, -0.012],
+        black: 0.02, white: 0.965, mono: nil,
+        grain: 0.34, grainSize: 1.2,
+        halation: 0.32, bloom: 0.13,
+        vignette: 0.22, soften: 0.12
+      ),
+      "kodak_vision3_250d": FilmStockParams(
+        mix: [1.04, -0.02, -0.02, -0.02, 1.04, -0.02, -0.03, 0.01, 1.02],
+        ev: -0.02,
+        k: [5.8, 5.7, 5.4], pivot: [0.52, 0.53, 0.54],
+        sat: 1.05, hlDesat: 0.24, shDesat: 0.1,
+        shadowTint: [-0.012, 0.006, 0.03], hlTint: [0.028, 0.02, -0.016],
+        black: 0.014, white: 0.975, mono: nil,
+        grain: 0.28, grainSize: 1.1,
+        halation: 0.34, bloom: 0.12,
+        vignette: 0.19, soften: 0.08
+      ),
+      "ilford_hp5": FilmStockParams(
+        mix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        ev: -0.02,
+        k: [6.2, 6.2, 6.2], pivot: [0.53, 0.53, 0.53],
+        sat: 1.0, hlDesat: 0.0, shDesat: 0.0,
+        shadowTint: [0.0, 0.0, 0.0], hlTint: [0.0, 0.0, 0.0],
+        black: 0.02, white: 0.96, mono: [0.3, 0.56, 0.14],
+        grain: 0.5, grainSize: 1.3,
+        halation: 0.28, bloom: 0.1,
+        vignette: 0.26, soften: 0.12
       )
   ]
 }

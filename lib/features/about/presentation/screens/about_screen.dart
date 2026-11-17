@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.1.4';
+  static const String appVersion = '1.1.5';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -132,6 +132,31 @@ class AboutScreen extends StatelessWidget {
                     ),
                   ),
                   SizedBox(height: 12),
+                  _ChangeEntry(
+                    title: '18 stok film baru',
+                    detail:
+                        'Expired & cult: Agfacolor XRS 200 (exp. 1991), Agfa '
+                        'Chrome RSX II 200 (exp. 2006), CineStill 50D, CineStill '
+                        '800T, Eterna Vivid 500 & 500D dengan print Kodak 2383 '
+                        'atau Fuji 3513, Provia 100F, Velvia 50 + 2383, dan '
+                        'Fujicolor C200 + Endura. Plus Kodak Portra 400, Gold '
+                        '200, Ektar 100, Vision3 250D, Fuji Pro 400H, Superia '
+                        '400, dan Ilford HP5 Plus. Semua memakai mesin emulasi '
+                        'CineLens sendiri: cube 33³ native untuk hasil foto/'
+                        'video, plus matriks preview yang di-fit dari cube yang '
+                        'sama agar viewfinder mendekati hasil akhir.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Karakter expired & print film',
+                    detail:
+                        'Agfa expired mempertahankan cast hijau-cyan dengan '
+                        'black terangkat dan kontras lembut, CineStill memakai '
+                        'shadow teal dan highlight hangat, sedangkan pasangan '
+                        'Eterna dibedakan lewat print: 2383 hangat ala Kodak, '
+                        '3513 lebih dingin ala Fuji. Untuk menebalkan karakter '
+                        'halasi khas CineStill, naikkan slider Halation di '
+                        'panel FILM LOOK.',
+                  ),
                   _ChangeEntry(
                     title: 'Simpan ProRes tidak lagi berputar selamanya',
                     detail:
