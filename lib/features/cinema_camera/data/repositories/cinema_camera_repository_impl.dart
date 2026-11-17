@@ -676,6 +676,7 @@ class CinemaCameraRepository {
       toneName: toneName,
       intensity: intensity,
       isAnamorphic: isAnamorphic,
+      source: CapturedMediaSource.capture,
     );
     await _prependToLibrary(media);
     return media;
@@ -711,6 +712,41 @@ class CinemaCameraRepository {
       toneName: toneName,
       intensity: intensity,
       isAnamorphic: isAnamorphic,
+      source: CapturedMediaSource.capture,
+    );
+    await _prependToLibrary(media);
+    return media;
+  }
+
+  /// Indexes a photo or clip that was already copied into the app media folder
+  /// by the Photos importer.
+  ///
+  /// No copy is made: the importer writes a uniquely named file straight into
+  /// [AppConstants.mediaFolderName], which is exactly where the gallery keeps
+  /// its own captures, so storage stays single-copy.
+  Future<CapturedMedia> indexImportedMedia({
+    required String path,
+    required bool isVideo,
+    String toneId = 'standard',
+    String toneName = 'Standard',
+  }) async {
+    final file = File(path);
+    if (!await file.exists()) {
+      throw Exception('File impor tidak ditemukan.');
+    }
+
+    final createdAt = DateTime.now();
+    final media = CapturedMedia(
+      id: '${isVideo ? 'video' : 'photo'}_import_'
+          '${createdAt.microsecondsSinceEpoch}',
+      type: isVideo ? CapturedMediaType.video : CapturedMediaType.photo,
+      path: path,
+      createdAt: createdAt,
+      toneId: toneId,
+      toneName: toneName,
+      intensity: 1.0,
+      isAnamorphic: false,
+      source: CapturedMediaSource.imported,
     );
     await _prependToLibrary(media);
     return media;

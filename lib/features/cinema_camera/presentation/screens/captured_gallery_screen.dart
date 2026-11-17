@@ -13,7 +13,8 @@ import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../providers/cinema_camera_provider.dart';
 
-/// Local gallery of everything captured on this device.
+/// Local gallery of everything captured on this device plus everything imported
+/// from the iPhone camera roll.
 ///
 /// It reads the index kept by [CinemaCameraRepository] instead of Apple Photos,
 /// so it opens instantly and works without library permission.
@@ -27,6 +28,7 @@ class CapturedGalleryScreen extends ConsumerStatefulWidget {
 
 class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
   late Future<List<CapturedMedia>> _mediaFuture;
+  bool _importing = false;
 
   @override
   void initState() {
@@ -57,30 +59,165 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
     );
   }
 
-  void _openMedia(CapturedMedia media) {
+  Future<void> _openMedia(CapturedMedia media) async {
     final tone = _resolveTone(media);
-    if (media.isVideo) {
-      context.push(
-        '/preview',
-        extra: CapturedPreviewArgs.video(
-          videoFilePath: media.path,
-          tone: tone,
-          intensity: media.intensity,
-          isAnamorphic: media.isAnamorphic,
-        ),
-      );
-      return;
-    }
+    final result = media.isVideo
+        ? await context.push<bool>(
+            '/preview',
+            extra: CapturedPreviewArgs.video(
+              videoFilePath: media.path,
+              tone: tone,
+              intensity: media.intensity,
+              isAnamorphic: media.isAnamorphic,
+            ),
+          )
+        : await context.push<bool>(
+            '/preview',
+            extra: CapturedPreviewArgs.photoFile(
+              imageFilePath: media.path,
+              tone: tone,
+              intensity: media.intensity,
+              isAnamorphic: media.isAnamorphic,
+            ),
+          );
+    if (result == true && mounted) _reload();
+  }
 
-    context.push(
-      '/preview',
-      extra: CapturedPreviewArgs.photoFile(
-        imageFilePath: media.path,
-        tone: tone,
-        intensity: media.intensity,
-        isAnamorphic: media.isAnamorphic,
+  Future<void> _openEditor(CapturedMedia media) async {
+    final edited = await context.push<bool>(
+      '/editor',
+      extra: PhotoEditorArgs(
+        path: media.path,
+        isVideo: media.isVideo,
+        bakedToneName: media.isImported ? '' : media.toneName,
       ),
     );
+    if (edited == true && mounted) {
+      _reload();
+      _snack('Hasil edit ditambahkan ke galeri.');
+    }
+  }
+
+  Future<void> _importFromPhotos() async {
+    if (_importing) return;
+    setState(() => _importing = true);
+
+    try {
+      final imported = await ref
+          .read(cinemaCameraProvider.notifier)
+          .importFromPhotoLibrary();
+      if (!mounted) return;
+      setState(() => _importing = false);
+      if (imported.isEmpty) {
+        _snack('Tidak ada foto atau video yang dipilih.');
+        return;
+      }
+      _reload();
+      _snack('${imported.length} media dari Photos ditambahkan ke galeri.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _importing = false);
+      _snack('Gagal mengimpor: ${_describe(error)}');
+    }
+  }
+
+  Future<void> _saveToPhotos(CapturedMedia media) async {
+    try {
+      await ref.read(cinemaCameraProvider.notifier).saveMediaToPhotos(media);
+      if (!mounted) return;
+      _snack('Disimpan ke Apple Photos.');
+    } catch (error) {
+      if (!mounted) return;
+      _snack('Gagal menyimpan ke Photos: ${_describe(error)}');
+    }
+  }
+
+  Future<void> _showActions(CapturedMedia media) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppTheme.surfaceDark,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 6),
+              child: Row(
+                children: [
+                  Icon(
+                    media.isVideo
+                        ? Icons.movie_outlined
+                        : Icons.image_outlined,
+                    color: AppTheme.cinemaAmber,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      media.toneName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppTheme.textPrimary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.tune_rounded,
+                color: AppTheme.cinemaAmber,
+              ),
+              title: const Text(
+                'Edit (Cahaya, Warna, Kurva, Film)',
+                style: TextStyle(color: AppTheme.textPrimary, fontSize: 13),
+              ),
+              onTap: () => Navigator.of(sheetContext).pop('edit'),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.photo_camera_outlined,
+                color: AppTheme.textPrimary,
+              ),
+              title: const Text(
+                'Simpan ke Apple Photos',
+                style: TextStyle(color: AppTheme.textPrimary, fontSize: 13),
+              ),
+              onTap: () => Navigator.of(sheetContext).pop('photos'),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.delete_outline_rounded,
+                color: Colors.redAccent,
+              ),
+              title: const Text(
+                'Hapus dari galeri',
+                style: TextStyle(color: Colors.redAccent, fontSize: 13),
+              ),
+              onTap: () => Navigator.of(sheetContext).pop('delete'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+
+    if (!mounted) return;
+    switch (action) {
+      case 'edit':
+        await _openEditor(media);
+      case 'photos':
+        await _saveToPhotos(media);
+      case 'delete':
+        await _confirmDelete(media);
+    }
   }
 
   Future<void> _confirmDelete(CapturedMedia media) async {
@@ -120,6 +257,24 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
     _reload();
   }
 
+  void _snack(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message, style: const TextStyle(fontSize: 12)),
+          backgroundColor: AppTheme.surfaceDark,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+  }
+
+  String _describe(Object error) {
+    final text = error.toString();
+    return text.startsWith('Exception: ') ? text.substring(11) : text;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -127,6 +282,26 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
       appBar: AppBar(
         title: const Text('GALERI CINELENS'),
         actions: [
+          if (_importing)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppTheme.cinemaAmber,
+                  ),
+                ),
+              ),
+            )
+          else
+            IconButton(
+              tooltip: 'Impor dari Photos',
+              icon: const Icon(Icons.add_photo_alternate_outlined),
+              onPressed: _importFromPhotos,
+            ),
           IconButton(
             tooltip: 'Muat ulang',
             icon: const Icon(Icons.refresh_rounded),
@@ -193,14 +368,31 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
             ),
             const SizedBox(height: 6),
             const Text(
-              'Foto dan video yang kamu ambil akan muncul di sini.',
+              'Foto dan video yang kamu ambil atau impor dari Photos akan muncul di sini.',
               textAlign: TextAlign.center,
               style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
             const SizedBox(height: 18),
-            CupertinoButton.filled(
-              onPressed: () => context.pop(),
-              child: const Text('Kembali ke Kamera'),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _importFromPhotos,
+                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
+                  label: const Text('Impor dari Photos'),
+                ),
+                const SizedBox(width: 10),
+                FilledButton(
+                  onPressed: () => context.pop(),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppTheme.cinemaAmber,
+                  ),
+                  child: const Text(
+                    'Kamera',
+                    style: TextStyle(color: Colors.black),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -211,7 +403,7 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
   Widget _buildTile(CapturedMedia media) {
     return GestureDetector(
       onTap: () => _openMedia(media),
-      onLongPress: () => _confirmDelete(media),
+      onLongPress: () => _showActions(media),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
         child: Container(
@@ -223,16 +415,7 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
                   fit: StackFit.expand,
                   children: [
                     if (media.isVideo)
-                      const ColoredBox(
-                        color: Color(0xFF151518),
-                        child: Center(
-                          child: Icon(
-                            Icons.play_circle_fill_rounded,
-                            color: Colors.white70,
-                            size: 34,
-                          ),
-                        ),
-                      )
+                      _buildVideoTile(media)
                     else
                       Image.file(
                         File(media.path),
@@ -263,7 +446,11 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(
-                          media.isVideo ? 'VIDEO' : 'FOTO',
+                          media.isImported
+                              ? 'IMPOR'
+                              : media.isVideo
+                                  ? 'VIDEO'
+                                  : 'FOTO',
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 8,
@@ -306,6 +493,21 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Imported clips have no poster frame on disk yet, so the first frame is
+  /// shown by the preview screen; the tile keeps the old play glyph.
+  Widget _buildVideoTile(CapturedMedia media) {
+    return const ColoredBox(
+      color: Color(0xFF151518),
+      child: Center(
+        child: Icon(
+          Icons.play_circle_fill_rounded,
+          color: Colors.white70,
+          size: 34,
         ),
       ),
     );

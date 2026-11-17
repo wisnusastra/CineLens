@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../../photo_editor/data/photo_editor_repository.dart';
 import '../../data/repositories/cinema_camera_repository_impl.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
@@ -1562,6 +1564,44 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   Future<void> deleteCapturedMedia(CapturedMedia media) {
     return ref.read(cinemaCameraRepositoryProvider).deleteCapturedMedia(media);
+  }
+
+  /// Opens the iOS photo picker and indexes everything the user selected.
+  ///
+  /// The native side copies the files into the app media folder, so this works
+  /// without photo-library permission (PHPicker runs out of process). Returns
+  /// the entries that were added, newest first.
+  Future<List<CapturedMedia>> importFromPhotoLibrary({int limit = 40}) async {
+    final picker = ref.read(photoEditorRepositoryProvider);
+    final files = await picker.importFromPhotoLibrary(limit: limit);
+    if (files.isEmpty) return const <CapturedMedia>[];
+
+    final repository = ref.read(cinemaCameraRepositoryProvider);
+    final imported = <CapturedMedia>[];
+    for (final file in files) {
+      try {
+        imported.add(
+          await repository.indexImportedMedia(
+            path: file.path,
+            isVideo: file.isVideo,
+          ),
+        );
+      } catch (_) {
+        // A single unreadable item must not abort the whole import.
+      }
+    }
+    return imported;
+  }
+
+  /// Saves an existing gallery entry back to Apple Photos.
+  Future<void> saveMediaToPhotos(CapturedMedia media) async {
+    final repository = ref.read(cinemaCameraRepositoryProvider);
+    if (media.isVideo) {
+      await repository.saveVideoToGallery(media.path);
+      return;
+    }
+    final bytes = await File(media.path).readAsBytes();
+    await repository.saveImageToIosGallery(bytes);
   }
 
   String _describeError(Object error) {

@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.1.5';
+  static const String appVersion = '1.2.0';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -132,6 +132,46 @@ class AboutScreen extends StatelessWidget {
                     ),
                   ),
                   SizedBox(height: 12),
+                  _ChangeEntry(
+                    title: 'Impor foto & video dari kamera iPhone',
+                    detail:
+                        'Tombol impor di Galeri CineLens membuka pemilih Photos '
+                        'dan menyalin foto maupun video ke galeri aplikasi. '
+                        'Pemilihnya berjalan di luar proses aplikasi, jadi tidak '
+                        'ada dialog izin foto. Foto HEIC otomatis dikonversi ke '
+                        'JPEG resolusi penuh dengan orientasi tetap benar.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Editor lengkap ala Lightroom',
+                    detail:
+                        'Setiap media di galeri bisa diedit lewat tab Cahaya '
+                        '(exposure, contrast, highlights, shadows, whites, '
+                        'blacks), Warna (suhu, tint, vibrance, saturation), '
+                        'Kurva (RGB/R/G/B point curve), Campur (8 band HSL: '
+                        'hue, saturasi, luminans), Efek (clarity, texture, '
+                        'dehaze, fade, grain, vignette), dan Detail (sharpen, '
+                        'noise reduction). Tahan tombol ASLI untuk '
+                        'membandingkan sebelum/sesudah.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Tone film CineLens bisa dipakai di hasil impor',
+                    detail:
+                        'Tab Film di editor memuat semua stok CineLens dan LUT '
+                        '.cube yang sudah diimpor, lengkap dengan slider '
+                        'intensitas. Efek bawaan stok (grain, halation, bloom, '
+                        'vignette) aktif secara default dan bisa diganti manual. '
+                        'Foto dan video memakai cube 33³ yang sama dengan '
+                        'kamera, jadi tampilan editor dan hasil ekspor identik.',
+                  ),
+                  _ChangeEntry(
+                    title: 'Simpan hasil edit & kirim ke Apple Photos',
+                    detail:
+                        'Hasil edit masuk ke galeri CineLens sebagai entri baru '
+                        '(file asli tidak ditimpa), dengan opsi sekaligus '
+                        'menyalinnya ke aplikasi Photos. Video dirender ulang '
+                        'per frame dengan audio tetap utuh. Tekan lama kartu di '
+                        'galeri untuk menu Edit, Simpan ke Photos, atau Hapus.',
+                  ),
                   _ChangeEntry(
                     title: '18 stok film baru',
                     detail:

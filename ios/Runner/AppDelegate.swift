@@ -4,7 +4,9 @@ import CoreMedia
 import CoreVideo
 import Flutter
 import ImageIO
+import PhotosUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Sends a Flutter method result exactly once.
 ///
@@ -127,7 +129,7 @@ final class ExportProgressReporter {
   /// offsets expressed in 0…255. Core Image defaults to a linear working space,
   /// so grading there used to look flatter/different from the live preview.
   /// Pinning the working space to sRGB makes preview and export match.
-  private static let gradingContext: CIContext = {
+  static let gradingContext: CIContext = {
     let sRGB = CGColorSpace(name: CGColorSpace.sRGB)
     var options: [CIContextOption: Any] = [
       .useSoftwareRenderer: false
@@ -318,6 +320,59 @@ final class ExportProgressReporter {
 
       case "stopProRes":
         self?.stopProResRecording(result: result)
+
+      case "editorLoadPreview":
+        guard let args = call.arguments as? [String: Any],
+              let path = args["path"] as? String else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        let isVideo = (args["isVideo"] as? Bool) ?? false
+        let maxDimension = (args["maxDimension"] as? NSNumber)?.intValue ?? 1600
+        self?.editorLoadPreview(
+          path: path,
+          isVideo: isVideo,
+          maxDimension: maxDimension,
+          result: result
+        )
+
+      case "editorRenderPreview":
+        guard let args = call.arguments as? [String: Any],
+              let path = args["path"] as? String else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        let isVideo = (args["isVideo"] as? Bool) ?? false
+        let maxDimension = (args["maxDimension"] as? NSNumber)?.intValue ?? 1600
+        self?.editorRenderPreview(
+          args: args,
+          path: path,
+          isVideo: isVideo,
+          maxDimension: maxDimension,
+          result: result
+        )
+
+      case "editorExportPhoto":
+        guard let args = call.arguments as? [String: Any],
+              let path = args["path"] as? String else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        self?.editorExportPhoto(args: args, path: path, result: result)
+
+      case "editorExportVideo":
+        guard let args = call.arguments as? [String: Any],
+              let path = args["path"] as? String else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        let fps = (args["fps"] as? NSNumber)?.int32Value ?? 30
+        self?.editorExportVideo(args: args, path: path, fps: fps, result: result)
+
+      case "importMediaFromPhotos":
+        let args = call.arguments as? [String: Any] ?? [:]
+        let limit = (args["limit"] as? NSNumber)?.intValue ?? 40
+        self?.importMediaFromPhotos(limit: limit, result: result)
 
       default:
         result(FlutterMethodNotImplemented)
@@ -1647,7 +1702,8 @@ final class ExportProgressReporter {
     filmLook: FilmLook?,
     effectLook: FilmLook?,
     anamorphic: Bool,
-    frameRate: Int32
+    frameRate: Int32,
+    edit: PhotoEditor.Params? = nil
   ) async -> AVMutableVideoComposition? {
     // Read the track orientation first: the recorder may store portrait
     // footage in landscape sensor space plus a rotation transform, and a
@@ -1683,7 +1739,22 @@ final class ExportProgressReporter {
       let sourceExtent = request.sourceImage.extent
       var output: CIImage
 
-      if let look = filmLook {
+      // The gallery editor owns its own colour chain, so it runs first and then
+      // hands over to the film look and the editor's grain/vignette.
+      if let edit = edit {
+        let frameIndex = Int(
+          (request.compositionTime.seconds * Double(fps)).rounded()
+        )
+        output = PhotoEditor.applyColor(edit, to: request.sourceImage)
+        if let look = filmLook {
+          output = look.apply(to: output, frameIndex: frameIndex)
+        } else if let look = effectLook {
+          output = look.apply(to: output, frameIndex: frameIndex)
+        } else if matrix.count == 20 {
+          output = AppDelegate.colorMatrixImage(matrix, to: output)
+        }
+        output = PhotoEditor.applyFinish(edit, to: output, frameIndex: frameIndex)
+      } else if let look = filmLook {
         // The compositor time gives every frame its own grain pattern.
         let frameIndex = Int(
           (request.compositionTime.seconds * Double(fps)).rounded()
@@ -2044,6 +2115,251 @@ final class ExportProgressReporter {
     )
 
     return colorFilter.outputImage?.cropped(to: image.extent) ?? image
+  }
+
+  // MARK: - Gallery editor bridge
+
+  /// Resolves the film emulation sent by the editor.
+  ///
+  /// `look` present means the user chose the manual film-effect sliders (or an
+  /// imported `.cube`), so those values replace the stock's own grain/halation.
+  /// Without it the stock keeps its built-in effects, which is the editor's
+  /// default "efek bawaan stok".
+  private static func editorLooks(
+    args: [String: Any]
+  ) -> (FilmLook?, FilmLook?) {
+    let toneId = args["toneId"] as? String
+    let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
+    let effects = FilmEffects.from(args)
+    let imported = ImportedLut.from(args)
+
+    let filmLook = imported.flatMap {
+      FilmEngine.importedLook($0, effects: effects)
+    } ?? FilmEngine.look(
+      toneId: toneId,
+      intensity: intensity,
+      effects: effects
+    )
+
+    let effectLook: FilmLook? = {
+      guard filmLook == nil, let effects = effects, !effects.isNeutral else {
+        return nil
+      }
+      return FilmEngine.effectsLook(effects)
+    }()
+    return (filmLook, effectLook)
+  }
+
+  /// The controller to present the Photos picker from.
+  private func topViewController() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+    let window = scenes
+      .flatMap { $0.windows }
+      .first { $0.isKeyWindow } ?? scenes.first?.windows.first
+    var top = window?.rootViewController
+    while let presented = top?.presentedViewController {
+      top = presented
+    }
+    return top
+  }
+
+  private func importMediaFromPhotos(
+    limit: Int,
+    result: @escaping FlutterResult
+  ) {
+    guard let presenter = topViewController() else {
+      result(
+        FlutterError(
+          code: "no_presenter",
+          message: "Tidak ada layar untuk membuka Apple Photos.",
+          details: nil
+        )
+      )
+      return
+    }
+    MediaImporter.shared.present(from: presenter, limit: limit, result: result)
+  }
+
+  private func editorLoadPreview(
+    path: String,
+    isVideo: Bool,
+    maxDimension: Int,
+    result: @escaping FlutterResult
+  ) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      let image = PhotoEditor.previewImage(
+        path: path,
+        isVideo: isVideo,
+        maxDimension: maxDimension
+      )
+      let data = image.flatMap { PhotoEditor.jpegData(from: $0, quality: 0.9) }
+      DispatchQueue.main.async {
+        guard let data = data else {
+          result(
+            FlutterError(
+              code: "preview_failed",
+              message: "Pratinjau editor tidak dapat dibuat.",
+              details: nil
+            )
+          )
+          return
+        }
+        result(FlutterStandardTypedData(bytes: data))
+      }
+    }
+  }
+
+  private func editorRenderPreview(
+    args: [String: Any],
+    path: String,
+    isVideo: Bool,
+    maxDimension: Int,
+    result: @escaping FlutterResult
+  ) {
+    let params = PhotoEditor.Params.from(args)
+    let (filmLook, effectLook) = AppDelegate.editorLooks(args: args)
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      var output: CIImage?
+      if let source = PhotoEditor.previewImage(
+        path: path,
+        isVideo: isVideo,
+        maxDimension: maxDimension
+      ) {
+        output = PhotoEditor.render(
+          params,
+          look: filmLook ?? effectLook,
+          matrix: nil,
+          source: source
+        )
+      }
+      let data = output.flatMap { PhotoEditor.jpegData(from: $0, quality: 0.9) }
+      DispatchQueue.main.async {
+        guard let data = data else {
+          result(
+            FlutterError(
+              code: "preview_failed",
+              message: "Render pratinjau gagal.",
+              details: nil
+            )
+          )
+          return
+        }
+        result(FlutterStandardTypedData(bytes: data))
+      }
+    }
+  }
+
+  private func editorExportPhoto(
+    args: [String: Any],
+    path: String,
+    result: @escaping FlutterResult
+  ) {
+    let params = PhotoEditor.Params.from(args)
+    let (filmLook, effectLook) = AppDelegate.editorLooks(args: args)
+    let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.95
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      var output: CIImage?
+      if let source = PhotoEditor.loadFullImage(path: path) {
+        output = PhotoEditor.render(
+          params,
+          look: filmLook ?? effectLook,
+          matrix: nil,
+          source: source
+        )
+      }
+      let data = output.flatMap {
+        PhotoEditor.jpegData(from: $0, quality: quality)
+      }
+      DispatchQueue.main.async {
+        guard let data = data else {
+          result(
+            FlutterError(
+              code: "export_failed",
+              message: "Foto hasil edit tidak dapat dirender.",
+              details: nil
+            )
+          )
+          return
+        }
+        result(FlutterStandardTypedData(bytes: data))
+      }
+    }
+  }
+
+  private func editorExportVideo(
+    args: [String: Any],
+    path: String,
+    fps: Int32,
+    result: @escaping FlutterResult
+  ) {
+    let params = PhotoEditor.Params.from(args)
+    let (filmLook, effectLook) = AppDelegate.editorLooks(args: args)
+    let identity: [Double] = [
+      1, 0, 0, 0, 0,
+      0, 1, 0, 0, 0,
+      0, 0, 1, 0, 0,
+      0, 0, 0, 1, 0,
+    ]
+    let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+    let outputURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent(
+        "CINELENS_EDIT_\(Int(Date().timeIntervalSince1970)).mov"
+      )
+    let done = ReplyOnce(result)
+
+    Task {
+      guard let composition = await AppDelegate.gradedVideoComposition(
+        asset: asset,
+        matrix: identity,
+        filmLook: filmLook,
+        effectLook: effectLook,
+        anamorphic: false,
+        frameRate: fps,
+        edit: params
+      ) else {
+        done.send(
+          FlutterError(
+            code: "export_failed",
+            message: "Video tidak dapat dibaca untuk diedit.",
+            details: nil
+          )
+        )
+        return
+      }
+
+      guard let exportSession = AVAssetExportSession(
+        asset: asset,
+        presetName: AVAssetExportPresetHighestQuality
+      ) else {
+        done.send(
+          FlutterError(
+            code: "export_unavailable",
+            message: "Perangkat ini tidak bisa mengekspor video hasil edit.",
+            details: nil
+          )
+        )
+        return
+      }
+
+      exportSession.outputURL = outputURL
+      exportSession.outputFileType = .mov
+      exportSession.videoComposition = composition
+      exportSession.shouldOptimizeForNetworkUse = true
+
+      let duration = (try? await asset.load(.duration))?.seconds ?? 0
+      let timeout = min(max(600.0, duration * 30.0), 2100.0)
+      AppDelegate.finishExport(
+        exportSession,
+        outputURL: outputURL,
+        inputPath: path,
+        timeout: timeout,
+        channel: self.nativeChannel,
+        done: done
+      )
+    }
   }
 }
 
@@ -2776,7 +3092,7 @@ struct FilmLook {
       .cropped(to: extent)
   }
 
-  private static func addGrain(
+  static func addGrain(
     to base: CIImage,
     extent: CGRect,
     amount: Double,
@@ -2860,7 +3176,7 @@ struct FilmLook {
       .cropped(to: extent)
   }
 
-  private static func addVignette(
+  static func addVignette(
     to base: CIImage,
     extent: CGRect,
     amount: Double
@@ -3420,4 +3736,810 @@ enum FilmEngine {
         vignette: 0.26, soften: 0.12
       )
   ]
+}
+
+// MARK: - Gallery editor
+
+/// Non-destructive editor for media opened from the CineLens gallery.
+///
+/// The pipeline is a single Core Image chain so a preview and the final export
+/// can never drift apart: white balance, exposure, a 256-step tone-curve LUT
+/// (basic sliders + the four point curves), an HSL colour cube, vibrance,
+/// saturation, clarity/texture, noise reduction, sharpening, then the chosen
+/// film look and finally grain/vignette.
+///
+/// The film look is the exact same `FilmEngine` cube the camera uses, so every
+/// built-in stock (plus imported `.cube` files) can be applied to photos and
+/// clips imported from the iPhone camera roll.
+enum PhotoEditor {
+  struct CurvePoint {
+    let x: Double
+    let y: Double
+  }
+
+  struct Params {
+    var exposure: Double = 0
+    var contrast: Double = 0
+    var highlights: Double = 0
+    var shadows: Double = 0
+    var whites: Double = 0
+    var blacks: Double = 0
+    var temperature: Double = 0
+    var tint: Double = 0
+    var vibrance: Double = 0
+    var saturation: Double = 0
+    var clarity: Double = 0
+    var texture: Double = 0
+    var dehaze: Double = 0
+    var fade: Double = 0
+    var grain: Double = 0
+    var vignette: Double = 0
+    var sharpen: Double = 0
+    var noiseReduction: Double = 0
+    var curveRgb: [CurvePoint] = []
+    var curveRed: [CurvePoint] = []
+    var curveGreen: [CurvePoint] = []
+    var curveBlue: [CurvePoint] = []
+    var hsl: [[Double]] = Array(repeating: [0, 0, 0], count: 8)
+
+    static func from(_ args: [String: Any]) -> Params {
+      var params = Params()
+      guard let raw = args["edit"] as? [String: Any] else { return params }
+
+      func number(_ key: String) -> Double {
+        (raw[key] as? NSNumber)?.doubleValue ?? 0
+      }
+      func signed(_ key: String) -> Double {
+        min(max(number(key), -1), 1)
+      }
+      func positive(_ key: String) -> Double {
+        min(max(number(key), 0), 1)
+      }
+      func curve(_ value: Any?) -> [CurvePoint] {
+        guard let rows = value as? [Any] else { return [] }
+        var points: [CurvePoint] = []
+        for row in rows {
+          guard let values = row as? [Any], values.count >= 2,
+                let x = (values[0] as? NSNumber)?.doubleValue,
+                let y = (values[1] as? NSNumber)?.doubleValue else { continue }
+          points.append(
+            CurvePoint(x: min(max(x, 0), 1), y: min(max(y, 0), 1))
+          )
+        }
+        points.sort { $0.x < $1.x }
+        return points.count >= 2 ? points : []
+      }
+
+      params.exposure = min(max(number("exposure"), -2), 2)
+      params.contrast = signed("contrast")
+      params.highlights = signed("highlights")
+      params.shadows = signed("shadows")
+      params.whites = signed("whites")
+      params.blacks = signed("blacks")
+      params.temperature = signed("temperature")
+      params.tint = signed("tint")
+      params.vibrance = signed("vibrance")
+      params.saturation = signed("saturation")
+      params.clarity = signed("clarity")
+      params.texture = signed("texture")
+      params.dehaze = signed("dehaze")
+      params.fade = positive("fade")
+      params.grain = positive("grain")
+      params.vignette = positive("vignette")
+      params.sharpen = positive("sharpen")
+      params.noiseReduction = positive("noiseReduction")
+      params.curveRgb = curve(raw["curveRgb"])
+      params.curveRed = curve(raw["curveRed"])
+      params.curveGreen = curve(raw["curveGreen"])
+      params.curveBlue = curve(raw["curveBlue"])
+
+      if let rows = raw["hsl"] as? [Any] {
+        for index in 0..<min(rows.count, 8) {
+          guard let values = rows[index] as? [Any] else { continue }
+          let triple = values.compactMap { ($0 as? NSNumber)?.doubleValue }
+          guard triple.count >= 3 else { continue }
+          params.hsl[index] = [
+            min(max(triple[0], -1), 1),
+            min(max(triple[1], -1), 1),
+            min(max(triple[2], -1), 1)
+          ]
+        }
+      }
+      return params
+    }
+  }
+
+  // MARK: Pipeline
+
+  /// Colour and detail half of the edit. Used directly by the video
+  /// compositor, which then layers the film look and the grain itself.
+  static func applyColor(_ params: Params, to image: CIImage) -> CIImage {
+    let extent = image.extent
+    guard extent.width > 1, extent.height > 1 else { return image }
+    let scale = Double(max(extent.width, extent.height)) / 1920.0
+    var output = image
+
+    // 1. White balance as channel gains, which keeps the slider predictable.
+    if abs(params.temperature) > 0.001 || abs(params.tint) > 0.001 {
+      let t = params.temperature
+      let ti = params.tint
+      let red = max(1.0 + 0.20 * t + 0.05 * ti, 0.05)
+      let green = max(1.0 - 0.02 * t - 0.12 * ti, 0.05)
+      let blue = max(1.0 - 0.24 * t + 0.05 * ti, 0.05)
+      output = output.applyingFilter(
+        "CIColorMatrix",
+        parameters: [
+          "inputRVector": CIVector(x: CGFloat(red), y: 0, z: 0, w: 0),
+          "inputGVector": CIVector(x: 0, y: CGFloat(green), z: 0, w: 0),
+          "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(blue), w: 0)
+        ]
+      )
+    }
+
+    // 2. Exposure in stops.
+    if abs(params.exposure) > 0.001 {
+      output = output.applyingFilter(
+        "CIExposureAdjust",
+        parameters: ["inputEV": params.exposure]
+      )
+    }
+
+    // 3. Basic sliders + point curves, baked into one 256-step LUT.
+    if let curves = curveData(params) {
+      output = output.applyingFilter(
+        "CIColorCurves",
+        parameters: [
+          "inputCurvesData": curves,
+          "inputCurvesDomain": CIVector(x: 0, y: 1)
+        ]
+      )
+    }
+
+    // 4. Colour Mix (HSL) as a 17³ cube.
+    if let cube = hslCube(params) {
+      output = output.applyingFilter(
+        "CIColorCube",
+        parameters: [
+          "inputCubeDimension": 17,
+          "inputCubeData": cube
+        ]
+      )
+    }
+
+    // 5. Vibrance then saturation.
+    if abs(params.vibrance) > 0.001 {
+      output = output.applyingFilter(
+        "CIVibrance",
+        parameters: ["inputAmount": params.vibrance]
+      )
+    }
+    if abs(params.saturation) > 0.001 {
+      output = output.applyingFilter(
+        "CIColorControls",
+        parameters: ["inputSaturation": 1.0 + params.saturation]
+      )
+    }
+
+    // 6. Clarity and texture: local contrast with opposite signs softening.
+    if abs(params.clarity) > 0.001 {
+      if params.clarity > 0 {
+        output = output.applyingFilter(
+          "CIUnsharpMask",
+          parameters: [
+            "inputRadius": 9.0 * scale + 1.0,
+            "inputIntensity": 0.9 * params.clarity
+          ]
+        )
+      } else {
+        let blurred = output.clampedToExtent()
+          .applyingGaussianBlur(sigma: 2.0 * scale + 0.4)
+          .cropped(to: extent)
+        output = mix(
+          blurred,
+          over: output,
+          amount: -params.clarity * 0.55,
+          extent: extent
+        )
+      }
+    }
+
+    if abs(params.texture) > 0.001 {
+      if params.texture > 0 {
+        output = output.applyingFilter(
+          "CIUnsharpMask",
+          parameters: [
+            "inputRadius": 1.6 * scale + 0.6,
+            "inputIntensity": 0.7 * params.texture
+          ]
+        )
+      } else {
+        let blurred = output.clampedToExtent()
+          .applyingGaussianBlur(sigma: 0.8 * scale + 0.3)
+          .cropped(to: extent)
+        output = mix(
+          blurred,
+          over: output,
+          amount: -params.texture * 0.5,
+          extent: extent
+        )
+      }
+    }
+
+    // 7. Detail: noise reduction first, then sharpening.
+    if params.noiseReduction > 0.001 {
+      output = output.applyingFilter(
+        "CINoiseReduction",
+        parameters: [
+          "inputNoiseLevel": 0.02 + params.noiseReduction * 0.05,
+          "inputSharpness": 0.4
+        ]
+      )
+    }
+    if params.sharpen > 0.001 {
+      output = output.applyingFilter(
+        "CISharpenLuminance",
+        parameters: ["inputSharpness": params.sharpen * 1.2]
+      )
+    }
+
+    return output.cropped(to: extent)
+  }
+
+  /// Grain and vignette, layered after the film look so they act on the final
+  /// graded image just like a light leak or a lens would.
+  static func applyFinish(
+    _ params: Params,
+    to image: CIImage,
+    frameIndex: Int = 0
+  ) -> CIImage {
+    let extent = image.extent
+    guard extent.width > 1, extent.height > 1 else { return image }
+    let scale = Double(max(extent.width, extent.height)) / 1920.0
+    var output = image
+
+    if params.grain > 0.001 {
+      output = FilmLook.addGrain(
+        to: output,
+        extent: extent,
+        amount: params.grain,
+        size: 1.0 * scale,
+        frameIndex: frameIndex
+      )
+    }
+    if params.vignette > 0.001 {
+      output = FilmLook.addVignette(
+        to: output,
+        extent: extent,
+        amount: params.vignette * 0.9
+      )
+    }
+    return output.cropped(to: extent)
+  }
+
+  /// Full still pipeline: manual edit, film look, then grain/vignette.
+  static func render(
+    _ params: Params,
+    look: FilmLook?,
+    matrix: [Double]?,
+    source: CIImage,
+    frameIndex: Int = 0
+  ) -> CIImage {
+    let extent = source.extent
+    var output = applyColor(params, to: source)
+
+    if let look = look {
+      output = look.apply(to: output, frameIndex: frameIndex)
+    } else if let matrix = matrix, matrix.count == 20 {
+      output = AppDelegate.colorMatrixImage(matrix, to: output)
+    }
+
+    output = applyFinish(params, to: output, frameIndex: frameIndex)
+    return output.cropped(to: extent)
+  }
+
+  // MARK: Curve LUT
+
+  private static func needsCurve(_ params: Params) -> Bool {
+    abs(params.contrast) > 0.001
+      || abs(params.highlights) > 0.001
+      || abs(params.shadows) > 0.001
+      || abs(params.whites) > 0.001
+      || abs(params.blacks) > 0.001
+      || abs(params.fade) > 0.001
+      || abs(params.dehaze) > 0.001
+      || !params.curveRgb.isEmpty
+      || !params.curveRed.isEmpty
+      || !params.curveGreen.isEmpty
+      || !params.curveBlue.isEmpty
+  }
+
+  private static func curveData(_ params: Params) -> Data? {
+    guard needsCurve(params) else { return nil }
+
+    var values = [Float](repeating: 0, count: 256 * 3)
+    for index in 0..<256 {
+      let shaped = basic(Double(index) / 255.0, params)
+      let master = sample(params.curveRgb, shaped)
+      values[index] = Float(sample(params.curveRed, master))
+      values[256 + index] = Float(sample(params.curveGreen, master))
+      values[512 + index] = Float(sample(params.curveBlue, master))
+    }
+    return values.withUnsafeBytes { Data($0) }
+  }
+
+  private static func basic(_ input: Double, _ params: Params) -> Double {
+    var value = min(max(input, 0), 1)
+
+    let contrast = 1.0 + params.contrast * 0.9 + params.dehaze * 0.35
+    if abs(contrast - 1.0) > 0.0001 {
+      value = 0.5 + (value - 0.5) * contrast
+    }
+    value -= params.dehaze * 0.02
+
+    let highlightWeight = smoothstep(0.45, 1.0, value) * (1.0 - value) * 0.9
+    let shadowWeight = (1.0 - smoothstep(0.0, 0.55, value)) * value * 0.9
+    value += (params.whites + params.highlights) * highlightWeight
+    value += (params.blacks + params.shadows) * shadowWeight
+    value = value * (1.0 - params.fade * 0.20) + params.fade * 0.07
+    return min(max(value, 0), 1)
+  }
+
+  private static func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
+    let t = min(max((x - a) / (b - a), 0), 1)
+    return t * t * (3.0 - 2.0 * t)
+  }
+
+  private static func sample(_ points: [CurvePoint], _ x: Double) -> Double {
+    guard points.count >= 2 else { return min(max(x, 0), 1) }
+    let value = min(max(x, 0), 1)
+    if value <= points[0].x { return points[0].y }
+    if value >= points[points.count - 1].x { return points[points.count - 1].y }
+
+    for index in 0..<(points.count - 1) {
+      let a = points[index]
+      let b = points[index + 1]
+      if value >= a.x && value <= b.x {
+        let span = b.x - a.x
+        if abs(span) < 0.00001 { return b.y }
+        let t = (value - a.x) / span
+        return min(max(a.y + (b.y - a.y) * t, 0), 1)
+      }
+    }
+    return points[points.count - 1].y
+  }
+
+  // MARK: Colour Mix cube
+
+  private static let hslLock = NSLock()
+  private static var hslCache: [String: Data] = [:]
+
+  private static func hslCube(_ params: Params) -> Data? {
+    guard params.hsl.count == 8 else { return nil }
+    let active = params.hsl.contains { band in
+      band.contains { abs($0) > 0.001 }
+    }
+    guard active else { return nil }
+
+    let key = params.hsl
+      .map { $0.map { String(format: "%.3f", $0) }.joined(separator: ",") }
+      .joined(separator: "|")
+
+    hslLock.lock()
+    let cached = hslCache[key]
+    hslLock.unlock()
+    if let cached = cached { return cached }
+
+    let dimension = 17
+    let last = Double(dimension - 1)
+    let centers: [Double] = [0, 30, 60, 120, 180, 240, 280, 320]
+    let sigma = 30.0
+    var values = [Float](repeating: 0, count: dimension * dimension * dimension * 4)
+
+    for blueIndex in 0..<dimension {
+      for greenIndex in 0..<dimension {
+        for redIndex in 0..<dimension {
+          let red = Double(redIndex) / last
+          let green = Double(greenIndex) / last
+          let blue = Double(blueIndex) / last
+          var (hue, saturation, lightness) = rgbToHsl(red, green, blue)
+
+          var hueShift = 0.0
+          var saturationShift = 0.0
+          var luminanceShift = 0.0
+          var weightSum = 0.0
+
+          for (index, center) in centers.enumerated() {
+            var distance = abs(hue - center)
+            distance = min(distance, 360.0 - distance)
+            let weight = exp(-(distance * distance) / (2.0 * sigma * sigma))
+            if weight < 0.0005 { continue }
+            weightSum += weight
+            hueShift += weight * params.hsl[index][0]
+            saturationShift += weight * params.hsl[index][1]
+            luminanceShift += weight * params.hsl[index][2]
+          }
+
+          if weightSum > 0.0001 {
+            hueShift /= weightSum
+            saturationShift /= weightSum
+            luminanceShift /= weightSum
+
+            if abs(hueShift) > 0.001 {
+              hue += hueShift * 32.0
+              hue = hue.truncatingRemainder(dividingBy: 360.0)
+              if hue < 0 { hue += 360.0 }
+            }
+            if abs(saturationShift) > 0.001 {
+              saturation = min(max(saturation * (1.0 + saturationShift), 0), 1)
+            }
+            if abs(luminanceShift) > 0.001 {
+              let midtone = 1.0 - abs(2.0 * lightness - 1.0)
+              lightness = min(
+                max(lightness + luminanceShift * 0.18 * midtone, 0),
+                1
+              )
+            }
+          }
+
+          let (outRed, outGreen, outBlue) = hslToRgb(hue, saturation, lightness)
+          let offset = ((blueIndex * dimension + greenIndex) * dimension + redIndex) * 4
+          values[offset] = Float(outRed)
+          values[offset + 1] = Float(outGreen)
+          values[offset + 2] = Float(outBlue)
+          values[offset + 3] = 1
+        }
+      }
+    }
+
+    let data = values.withUnsafeBytes { Data($0) }
+    hslLock.lock()
+    if hslCache.count > 60 { hslCache.removeAll() }
+    hslCache[key] = data
+    hslLock.unlock()
+    return data
+  }
+
+  private static func rgbToHsl(
+    _ red: Double,
+    _ green: Double,
+    _ blue: Double
+  ) -> (Double, Double, Double) {
+    let maximum = max(red, max(green, blue))
+    let minimum = min(red, min(green, blue))
+    let lightness = (maximum + minimum) / 2.0
+    let delta = maximum - minimum
+    if delta < 0.00001 { return (0, 0, lightness) }
+
+    let saturation = lightness > 0.5
+      ? delta / max(2.0 - maximum - minimum, 0.00001)
+      : delta / max(maximum + minimum, 0.00001)
+
+    var hue: Double
+    if maximum == red {
+      hue = (green - blue) / delta + (green < blue ? 6.0 : 0.0)
+    } else if maximum == green {
+      hue = (blue - red) / delta + 2.0
+    } else {
+      hue = (red - green) / delta + 4.0
+    }
+    return (hue * 60.0, saturation, lightness)
+  }
+
+  private static func hslToRgb(
+    _ hue: Double,
+    _ saturation: Double,
+    _ lightness: Double
+  ) -> (Double, Double, Double) {
+    guard saturation > 0.00001 else {
+      return (lightness, lightness, lightness)
+    }
+    let q = lightness < 0.5
+      ? lightness * (1.0 + saturation)
+      : lightness + saturation - lightness * saturation
+    let p = 2.0 * lightness - q
+
+    func channel(_ input: Double) -> Double {
+      var value = input
+      if value < 0 { value += 1 }
+      if value > 1 { value -= 1 }
+      if value < 1.0 / 6.0 { return p + (q - p) * 6.0 * value }
+      if value < 1.0 / 2.0 { return q }
+      if value < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - value) * 6.0 }
+      return p
+    }
+
+    let normalized = hue / 360.0
+    return (
+      channel(normalized + 1.0 / 3.0),
+      channel(normalized),
+      channel(normalized - 1.0 / 3.0)
+    )
+  }
+
+  // MARK: Image IO
+
+  private static func mix(
+    _ top: CIImage,
+    over bottom: CIImage,
+    amount: Double,
+    extent: CGRect
+  ) -> CIImage {
+    let alpha = CGFloat(min(max(amount, 0), 1))
+    let scaled = top.applyingFilter(
+      "CIColorMatrix",
+      parameters: [
+        "inputRVector": CIVector(x: alpha, y: 0, z: 0, w: 0),
+        "inputGVector": CIVector(x: 0, y: alpha, z: 0, w: 0),
+        "inputBVector": CIVector(x: 0, y: 0, z: alpha, w: 0),
+        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha)
+      ]
+    )
+    return scaled.composited(over: bottom).cropped(to: extent)
+  }
+
+  private static let previewLock = NSLock()
+  private static var previewCache: [String: CIImage] = [:]
+
+  /// Decodes (or reuses) the preview-resolution image. Stills are scaled with
+  /// Core Image, clips are sampled from their first frame.
+  static func previewImage(
+    path: String,
+    isVideo: Bool,
+    maxDimension: Int
+  ) -> CIImage? {
+    let key = "\(path)|\(isVideo)|\(maxDimension)"
+
+    previewLock.lock()
+    let cached = previewCache[key]
+    previewLock.unlock()
+    if let cached = cached { return cached }
+
+    let image: CIImage?
+    if isVideo {
+      let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+      let generator = AVAssetImageGenerator(asset: asset)
+      generator.appliesPreferredTrackTransform = true
+      generator.maximumSize = CGSize(
+        width: maxDimension,
+        height: maxDimension
+      )
+      if let frame = try? generator.copyCGImage(at: .zero, actualTime: nil) {
+        image = CIImage(cgImage: frame)
+      } else {
+        image = nil
+      }
+    } else {
+      image = loadFullImage(path: path).map { original in
+        let extent = original.extent
+        let longest = Double(max(extent.width, extent.height))
+        guard longest > Double(maxDimension) else { return original }
+        let factor = CGFloat(Double(maxDimension) / longest)
+        return original.transformed(
+          by: CGAffineTransform(scaleX: factor, y: factor)
+        )
+      }
+    }
+
+    guard let image = image else { return nil }
+    previewLock.lock()
+    if previewCache.count > 3 { previewCache.removeAll() }
+    previewCache[key] = image
+    previewLock.unlock()
+    return image
+  }
+
+  /// Decodes the original file at full resolution with its orientation applied.
+  static func loadFullImage(path: String) -> CIImage? {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+      return nil
+    }
+    return CIImage(
+      data: data,
+      options: [.applyOrientationProperty: true]
+    )
+  }
+
+  static func jpegData(from image: CIImage, quality: Double) -> Data? {
+    let extent = image.extent
+    guard extent.width > 1, extent.height > 1,
+          let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+          let cgImage = AppDelegate.gradingContext.createCGImage(
+            image,
+            from: extent,
+            format: .RGBA8,
+            colorSpace: colorSpace
+          ) else {
+      return nil
+    }
+
+    let data = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(
+      data as CFMutableData,
+      "public.jpeg" as CFString,
+      1,
+      nil
+    ) else {
+      return nil
+    }
+    CGImageDestinationAddImage(
+      destination,
+      cgImage,
+      [kCGImageDestinationLossyCompressionQuality: min(max(quality, 0.4), 1.0)]
+        as CFDictionary
+    )
+    guard CGImageDestinationFinalize(destination) else { return nil }
+    return data as Data
+  }
+}
+
+// MARK: - Photos library import
+
+/// Copies photos and videos picked from Apple Photos into the app's own media
+/// folder.
+///
+/// `PHPickerViewController` runs out of process, so importing never asks for
+/// photo-library permission. Stills are re-encoded as JPEG (Flutter's decoder
+/// cannot read HEIC), keeping the original orientation and full resolution.
+final class MediaImporter: NSObject, PHPickerViewControllerDelegate {
+  static let shared = MediaImporter()
+
+  private var pending: FlutterResult?
+
+  func present(
+    from presenter: UIViewController,
+    limit: Int,
+    result: @escaping FlutterResult
+  ) {
+    guard pending == nil else {
+      result(
+        FlutterError(
+          code: "busy",
+          message: "Impor lain sedang berjalan. Tunggu sampai selesai.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    var configuration = PHPickerConfiguration()
+    configuration.filter = .any(of: [.images, .videos])
+    configuration.selectionLimit = max(1, min(limit, 50))
+    configuration.preferredAssetRepresentationMode = .current
+
+    let picker = PHPickerViewController(configuration: configuration)
+    picker.delegate = self
+    pending = result
+    presenter.present(picker, animated: true)
+  }
+
+  func picker(
+    _ picker: PHPickerViewController,
+    didFinishPicking results: [PHPickerResult]
+  ) {
+    picker.dismiss(animated: true)
+    guard let result = pending else { return }
+    pending = nil
+
+    guard !results.isEmpty else {
+      result([])
+      return
+    }
+
+    let directory = MediaImporter.mediaDirectory()
+    var outputs = Array<[String: Any]?>(repeating: nil, count: results.count)
+    let group = DispatchGroup()
+    let lock = NSLock()
+
+    for (index, item) in results.enumerated() {
+      group.enter()
+      let provider = item.itemProvider
+      let identifier = UUID().uuidString.prefix(8).lowercased()
+
+      if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+        provider.loadFileRepresentation(
+          forTypeIdentifier: UTType.movie.identifier
+        ) { url, _ in
+          defer { group.leave() }
+          guard let url = url else { return }
+          let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension
+          let target = directory.appendingPathComponent(
+            "import_\(identifier)_\(index).\(ext)"
+          )
+          do {
+            try FileManager.default.copyItem(at: url, to: target)
+            lock.lock()
+            outputs[index] = ["path": target.path, "type": "video"]
+            lock.unlock()
+          } catch {
+            // A failed item is simply skipped; the caller reports the count.
+          }
+        }
+      } else {
+        provider.loadFileRepresentation(
+          forTypeIdentifier: UTType.image.identifier
+        ) { url, _ in
+          defer { group.leave() }
+          guard let url = url else { return }
+          let target = directory.appendingPathComponent(
+            "import_\(identifier)_\(index).jpg"
+          )
+          if MediaImporter.writeJPEG(from: url, to: target) {
+            lock.lock()
+            outputs[index] = ["path": target.path, "type": "photo"]
+            lock.unlock()
+          }
+        }
+      }
+    }
+
+    group.notify(queue: .main) {
+      result(outputs.compactMap { $0 })
+    }
+  }
+
+  private static func mediaDirectory() -> URL {
+    let documents = FileManager.default.urls(
+      for: .documentDirectory,
+      in: .userDomainMask
+    )[0]
+    // Keep in sync with AppConstants.mediaFolderName.
+    let directory = documents.appendingPathComponent(
+      "cinelens_media",
+      isDirectory: true
+    )
+    if !FileManager.default.fileExists(atPath: directory.path) {
+      try? FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: true
+      )
+    }
+    return directory
+  }
+
+  private static func writeJPEG(from source: URL, to target: URL) -> Bool {
+    guard let imageSource = CGImageSourceCreateWithURL(
+      source as CFURL,
+      nil
+    ) else {
+      return false
+    }
+    let properties = CGImageSourceCopyPropertiesAtIndex(
+      imageSource,
+      0,
+      nil
+    ) as? [CFString: Any]
+
+    let options: [CFString: Any] = [
+      kCGImageSourceShouldCacheImmediately: true
+    ]
+    guard let image = CGImageSourceCreateImageAtIndex(
+      imageSource,
+      0,
+      options as CFDictionary
+    ) else {
+      return false
+    }
+
+    guard let destination = CGImageDestinationCreateWithURL(
+      target as CFURL,
+      UTType.jpeg.identifier as CFString,
+      1,
+      nil
+    ) else {
+      return false
+    }
+
+    var destinationOptions: [CFString: Any] = [
+      kCGImageDestinationLossyCompressionQuality: 0.95
+    ]
+    if let orientation = properties?[kCGImagePropertyOrientation] as? NSNumber {
+      destinationOptions[kCGImagePropertyOrientation] = orientation
+    }
+    CGImageDestinationAddImage(
+      destination,
+      image,
+      destinationOptions as CFDictionary
+    )
+    return CGImageDestinationFinalize(destination)
+  }
 }

@@ -1,0 +1,165 @@
+// lib/features/photo_editor/data/photo_editor_repository.dart
+
+import 'dart:async';
+
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../core/constants/app_constants.dart';
+
+/// Result of one native Photos-library import.
+class ImportedMediaFile {
+  final String path;
+  final bool isVideo;
+
+  const ImportedMediaFile({required this.path, required this.isVideo});
+
+  static ImportedMediaFile? tryParse(Object? raw) {
+    if (raw is! Map) return null;
+    final path = raw['path'];
+    if (path is! String || path.isEmpty) return null;
+    return ImportedMediaFile(
+      path: path,
+      isVideo: raw['type'] == 'video',
+    );
+  }
+}
+
+/// Bridge to the native Core Image editor and the iOS Photos picker.
+///
+/// Every render happens natively so the gallery editor can offer real curves,
+/// HSL bands and the same film emulation cubes the camera uses, instead of the
+/// 4×5 colour-matrix approximation of the live viewfinder.
+class PhotoEditorRepository {
+  const PhotoEditorRepository();
+
+  static const MethodChannel _channel =
+      MethodChannel(AppConstants.videoGraderChannel);
+
+  /// A downscaled JPEG of the untouched media, used as the editor backdrop and
+  /// as the "before" image while comparing.
+  Future<Uint8List> loadPreview({
+    required String path,
+    required bool isVideo,
+    int maxDimension = 1600,
+  }) async {
+    try {
+      final bytes = await _channel.invokeMethod<Uint8List>(
+        'editorLoadPreview',
+        <String, dynamic>{
+          'path': path,
+          'isVideo': isVideo,
+          'maxDimension': maxDimension,
+        },
+      ).timeout(const Duration(seconds: 90));
+      if (bytes == null || bytes.isEmpty) {
+        throw PlatformException(
+          code: 'preview_failed',
+          message: 'Pratinjau editor tidak dapat dibuat.',
+        );
+      }
+      return bytes;
+    } on MissingPluginException {
+      throw PlatformException(
+        code: 'unsupported',
+        message: 'Editor hanya tersedia di aplikasi iOS.',
+      );
+    }
+  }
+
+  /// Renders the current adjustment set at preview resolution.
+  Future<Uint8List> renderPreview({
+    required String path,
+    required bool isVideo,
+    required Map<String, dynamic> payload,
+    int maxDimension = 1600,
+  }) async {
+    final bytes = await _channel.invokeMethod<Uint8List>(
+      'editorRenderPreview',
+      <String, dynamic>{
+        'path': path,
+        'isVideo': isVideo,
+        'maxDimension': maxDimension,
+        ...payload,
+      },
+    ).timeout(const Duration(seconds: 60));
+    if (bytes == null || bytes.isEmpty) {
+      throw PlatformException(
+        code: 'preview_failed',
+        message: 'Render pratinjau gagal.',
+      );
+    }
+    return bytes;
+  }
+
+  /// Renders the edit at full resolution and returns JPEG bytes.
+  Future<Uint8List> exportPhoto({
+    required String path,
+    required Map<String, dynamic> payload,
+  }) async {
+    final bytes = await _channel.invokeMethod<Uint8List>(
+      'editorExportPhoto',
+      <String, dynamic>{
+        'path': path,
+        ...payload,
+        'quality': 0.95,
+      },
+    ).timeout(const Duration(minutes: 3));
+    if (bytes == null || bytes.isEmpty) {
+      throw PlatformException(
+        code: 'export_failed',
+        message: 'Foto hasil edit tidak dapat dirender.',
+      );
+    }
+    return bytes;
+  }
+
+  /// Re-encodes a clip with the edit + tone burned in and returns its path.
+  Future<String> exportVideo({
+    required String path,
+    required Map<String, dynamic> payload,
+    int fps = 30,
+  }) async {
+    final exported = await _channel.invokeMethod<String>(
+      'editorExportVideo',
+      <String, dynamic>{
+        'path': path,
+        ...payload,
+        'fps': fps,
+      },
+    ).timeout(const Duration(minutes: 40));
+    if (exported == null || exported.isEmpty) {
+      throw PlatformException(
+        code: 'export_failed',
+        message: 'Video hasil edit tidak dapat diekspor.',
+      );
+    }
+    return exported;
+  }
+
+  /// Opens the system Photos picker (no permission prompt: PHPicker runs out
+  /// of process) and copies the chosen photos/videos into the app.
+  Future<List<ImportedMediaFile>> importFromPhotoLibrary({
+    int limit = 40,
+  }) async {
+    try {
+      final raw = await _channel.invokeListMethod<Object?>(
+        'importMediaFromPhotos',
+        <String, dynamic>{'limit': limit},
+      );
+      if (raw == null) return const <ImportedMediaFile>[];
+      return raw
+          .map(ImportedMediaFile.tryParse)
+          .whereType<ImportedMediaFile>()
+          .toList();
+    } on MissingPluginException {
+      throw PlatformException(
+        code: 'unsupported',
+        message: 'Impor Apple Photos hanya tersedia di aplikasi iOS.',
+      );
+    }
+  }
+}
+
+final Provider<PhotoEditorRepository> photoEditorRepositoryProvider =
+    Provider<PhotoEditorRepository>((ref) => const PhotoEditorRepository());

@@ -29,6 +29,29 @@ bingkai anamorphic 2.39:1, pembuat tone kustom, serta export/import preset `.jso
   (`AVMutableVideoComposition` + `CIColorMatrix` di `ios/Runner/AppDelegate.swift`).
 - **Custom Tone Studio** — atur temperature, tint, contrast, saturation, exposure;
   simpan sebagai preset dengan label warna.
+- **Galeri + impor dari kamera iPhone** — tombol impor membuka pemilih Photos
+  (`PHPickerViewController`, berjalan di luar proses aplikasi sehingga tidak
+  memunculkan dialog izin). Foto dan video disalin ke
+  `Documents/cinelens_media` lalu diindeks di galeri lokal. Foto HEIC
+  dikonversi ke JPEG 0.95 resolusi penuh dengan orientasi yang benar; video
+  disalin apa adanya. Entri impor diberi badge `IMPOR`.
+- **Editor foto & video ala Lightroom** — setiap media di galeri bisa diedit
+  lewat tab Cahaya (exposure, contrast, highlights, shadows, whites, blacks),
+  Warna (suhu, tint, vibrance, saturation), Kurva (point curve RGB/R/G/B),
+  Campur (8 band HSL: hue, saturasi, luminans), Film (semua tone CineLens +
+  LUT `.cube` impor, intensitas, efek stok), Efek (clarity, texture, dehaze,
+  fade, grain, vignette), dan Detail (sharpen, noise reduction). Pratinjau dan
+  ekspor memakai pipeline Core Image native yang sama: white balance →
+  exposure → LUT kurva 256 langkah → cube HSL 17³ → vibrance/saturation →
+  clarity/texture → noise reduction/sharpen → film look → grain/vignette.
+  Tahan tombol **ASLI** untuk membandingkan sebelum/sesudah.
+- **Tone film di hasil impor** — tab Film memuat seluruh stok CineLens dan LUT
+  `.cube` milik pengguna. Slider intensitas menskalakan look, dan efek bawaan
+  stok (grain, halation, bloom, vignette) aktif secara default; matikan untuk
+  mengatur efek film manual.
+- **Simpan hasil edit** — hasil edit disimpan sebagai entri **baru** di galeri
+  (file asli tidak ditimpa), dengan opsi sekaligus menyalin ke Apple Photos.
+  Video dirender ulang per frame dengan audio tetap utuh.
 - **Library preset** — export satu/semua preset sebagai file `.json`, bagikan lewat
   share sheet, import dari file atau tempel JSON.
 - **Kontrol kamera** — tap-to-focus, exposure offset, flash (off/auto/on/torch),
@@ -40,7 +63,7 @@ bingkai anamorphic 2.39:1, pembuat tone kustom, serta export/import preset `.jso
 lib/
   core/
     constants/     # AppConstants (channel name, pref key, fps, rasio)
-    routing/       # GoRouter + argumen navigasi /preview
+    routing/       # GoRouter + argumen navigasi /preview dan /editor
     theme/         # AppTheme (palet dark cinema)
   features/
     about/         # Layar About & support
@@ -48,6 +71,10 @@ lib/
       data/        # Preset source, repository (grading, galeri, JSON I/O)
       domain/      # Entity CinemaTone, color matrix builder
       presentation/# Provider (Riverpod AsyncNotifier), screen, widget
+    photo_editor/
+      data/        # Bridge `com.cinelens.ios/video_grader` + impor Photos
+      domain/      # PhotoEdit (slider, curve, HSL, payload native)
+      presentation/# Editor layar penuh, slider, editor kurva
     options/       # Grid, aspect ratio, HUD, haptic, mirror
 ios/Runner/        # AppDelegate.swift (native video grader), Info.plist
 sample_presets/    # Contoh paket preset .json

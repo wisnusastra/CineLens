@@ -1,3 +1,5 @@
+// lib/core/routing/capture_args.dart
+
 import 'dart:typed_data';
 
 import '../../features/cinema_camera/domain/entities/cinema_tone.dart';
@@ -42,4 +44,23 @@ class CapturedPreviewArgs {
   })  : mediaType = MediaCaptureType.video,
         imageBytes = null,
         imageFilePath = null;
+}
+
+/// Extra payload used by the `/editor` route.
+///
+/// The editor only needs the file on disk; the native Core Image pipeline
+/// decodes it, so a 4K clip never has to fit in Dart memory.
+class PhotoEditorArgs {
+  final String path;
+  final bool isVideo;
+
+  /// Tone that was already baked into the capture, shown as a hint so the user
+  /// does not double-grade a CineLens shot by stacking the same stock twice.
+  final String bakedToneName;
+
+  const PhotoEditorArgs({
+    required this.path,
+    required this.isVideo,
+    this.bakedToneName = '',
+  });
 }

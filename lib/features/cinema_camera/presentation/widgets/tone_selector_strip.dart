@@ -14,6 +14,9 @@ class ToneSelectorStrip extends StatelessWidget {
   /// Shorter cards used in landscape, where the tray must stay out of the way.
   final bool compact;
 
+  /// The gallery editor has no custom-tone creator, so it hides that card.
+  final bool showCustomCard;
+
   const ToneSelectorStrip({
     super.key,
     required this.tones,
@@ -22,6 +25,7 @@ class ToneSelectorStrip extends StatelessWidget {
     required this.onOpenCustomCreator,
     this.onDeleteCustomTone,
     this.compact = false,
+    this.showCustomCard = true,
   });
 
   @override
@@ -34,10 +38,10 @@ class ToneSelectorStrip extends StatelessWidget {
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: tones.length + 1,
+        itemCount: tones.length + (showCustomCard ? 1 : 0),
         separatorBuilder: (_, __) => const SizedBox(width: 10),
         itemBuilder: (context, index) {
-          if (index == 0) {
+          if (showCustomCard && index == 0) {
             return GestureDetector(
               onTap: () {
                 HapticFeedback.mediumImpact();
@@ -78,7 +82,7 @@ class ToneSelectorStrip extends StatelessWidget {
             );
           }
 
-          final tone = tones[index - 1];
+          final tone = tones[index - (showCustomCard ? 1 : 0)];
           final isSelected = tone.id == selectedTone.id;
 
           return GestureDetector(

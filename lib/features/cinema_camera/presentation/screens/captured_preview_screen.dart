@@ -19,9 +19,16 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
   VideoPlayerController? _videoController;
   bool _isVideoReady = false;
   bool _isInitializingVideo = false;
+  bool _didEdit = false;
   String? _videoError;
 
   bool get _isVideo => widget.args.mediaType == MediaCaptureType.video;
+
+   /// Path of the file on disk, when this preview came from the gallery (or a
+   /// recorded clip). A still that only exists as in-memory bytes cannot be
+   /// reopened by the native editor.
+  String? get _editablePath =>
+      _isVideo ? widget.args.videoFilePath : widget.args.imageFilePath;
 
   @override
   void initState() {
@@ -100,7 +107,34 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
 
   void _close() {
     _videoController?.pause();
-    context.pop();
+    context.pop(_didEdit ? true : null);
+  }
+
+  Future<void> _openEditor() async {
+    final path = _editablePath;
+    if (path == null) return;
+
+    _videoController?.pause();
+    final edited = await context.push<bool>(
+      '/editor',
+      extra: PhotoEditorArgs(path: path, isVideo: _isVideo),
+    );
+    if (!mounted) return;
+    if (edited == true) {
+      setState(() => _didEdit = true);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Hasil edit ditambahkan ke galeri CineLens.',
+              style: TextStyle(fontSize: 12),
+            ),
+            backgroundColor: AppTheme.surfaceDark,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+    }
   }
 
   @override
@@ -113,6 +147,15 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
           onPressed: _close,
         ),
         title: Text(_isVideo ? 'CINEMA REEL' : 'CINEMA STILL'),
+        actions: [
+          IconButton(
+            tooltip: _editablePath == null
+                ? 'Edit hanya untuk media yang tersimpan di galeri'
+                : 'Edit foto/video',
+            icon: const Icon(Icons.tune_rounded),
+            onPressed: _editablePath == null ? null : _openEditor,
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
