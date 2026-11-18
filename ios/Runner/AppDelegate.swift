@@ -3884,13 +3884,17 @@ enum PhotoEditor {
       )
     }
 
-    // 3. Basic sliders + point curves, baked into one 256-step LUT.
-    if let curves = curveData(params) {
+    // 3. Basic sliders + point curves, baked into a 33³ colour cube.
+    //    CIColorCurves silently misread the 32-bit float curve data on iOS and
+    //    turned contrast/shadow/fade into random channel values (the "broken
+    //    TV" colours). CIColorCube uses the same RGBA-float layout as the HSL
+    //    cube below, so preview and export decode it identically everywhere.
+    if let cube = toneCube(params) {
       output = output.applyingFilter(
-        "CIColorCurves",
+        "CIColorCube",
         parameters: [
-          "inputCurvesData": curves,
-          "inputCurvesDomain": CIVector(x: 0, y: 1)
+          "inputCubeDimension": 33,
+          "inputCubeData": cube
         ]
       )
     }
@@ -4053,18 +4057,78 @@ enum PhotoEditor {
       || !params.curveBlue.isEmpty
   }
 
-  private static func curveData(_ params: Params) -> Data? {
+  private static let toneLock = NSLock()
+  private static var toneCache: [String: Data] = [:]
+
+  /// Tone shaping as a 33³ `CIColorCube`.
+  ///
+  /// The previous implementation fed a 256×3 float table to `CIColorCurves`.
+  /// On iOS that filter interprets `inputCurvesData` with a different element
+  /// size, so contrast/shadows/fade produced scrambled RGB values. A cube uses
+  /// the same data layout as the HSL stage and is interpolated by Core Image,
+  /// which is why it renders correctly on every device and stays identical
+  /// between the live preview and the exported file.
+  private static func toneCube(_ params: Params) -> Data? {
     guard needsCurve(params) else { return nil }
 
-    var values = [Float](repeating: 0, count: 256 * 3)
-    for index in 0..<256 {
-      let shaped = basic(Double(index) / 255.0, params)
-      let master = sample(params.curveRgb, shaped)
-      values[index] = Float(sample(params.curveRed, master))
-      values[256 + index] = Float(sample(params.curveGreen, master))
-      values[512 + index] = Float(sample(params.curveBlue, master))
+    func curveKey(_ points: [CurvePoint]) -> String {
+      points
+        .map { String(format: "%.4f:%.4f", $0.x, $0.y) }
+        .joined(separator: ";")
     }
-    return values.withUnsafeBytes { Data($0) }
+
+    let key = [
+      params.contrast, params.highlights, params.shadows, params.whites,
+      params.blacks, params.fade, params.dehaze,
+    ].map { String(format: "%.4f", $0) }.joined(separator: ",")
+      + "|" + curveKey(params.curveRgb)
+      + "|" + curveKey(params.curveRed)
+      + "|" + curveKey(params.curveGreen)
+      + "|" + curveKey(params.curveBlue)
+
+    toneLock.lock()
+    let cached = toneCache[key]
+    toneLock.unlock()
+    if let cached = cached { return cached }
+
+    let dimension = 33
+    let last = Double(dimension - 1)
+    var values = [Float](
+      repeating: 0,
+      count: dimension * dimension * dimension * 4
+    )
+
+    for blueIndex in 0..<dimension {
+      for greenIndex in 0..<dimension {
+        for redIndex in 0..<dimension {
+          let masterRed = sample(
+            params.curveRgb,
+            basic(Double(redIndex) / last, params)
+          )
+          let masterGreen = sample(
+            params.curveRgb,
+            basic(Double(greenIndex) / last, params)
+          )
+          let masterBlue = sample(
+            params.curveRgb,
+            basic(Double(blueIndex) / last, params)
+          )
+          let offset = ((blueIndex * dimension + greenIndex) * dimension
+            + redIndex) * 4
+          values[offset] = Float(sample(params.curveRed, masterRed))
+          values[offset + 1] = Float(sample(params.curveGreen, masterGreen))
+          values[offset + 2] = Float(sample(params.curveBlue, masterBlue))
+          values[offset + 3] = 1
+        }
+      }
+    }
+
+    let data = values.withUnsafeBytes { Data($0) }
+    toneLock.lock()
+    if toneCache.count > 5 { toneCache.removeAll() }
+    toneCache[key] = data
+    toneLock.unlock()
+    return data
   }
 
   private static func basic(_ input: Double, _ params: Params) -> Double {

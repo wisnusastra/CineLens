@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.2.0';
+  static const String appVersion = '1.2.1';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -132,6 +132,17 @@ class AboutScreen extends StatelessWidget {
                     ),
                   ),
                   SizedBox(height: 12),
+                  _ChangeEntry(
+                    title: 'Perbaikan warna rusak saat atur Cahaya',
+                    detail:
+                        'Slider contrast, shadow, highlight, white, black, '
+                        'dehaze, dan fade dulu memakai filter kurva yang salah '
+                        'membaca data 32-bit di iOS, sehingga foto dan video '
+                        'berubah jadi warna acak seperti TV rusak. Sekarang '
+                        'seluruh shaping itu dihitung sebagai color cube 33³ '
+                        'native yang sama untuk pratinjau dan ekspor, jadi '
+                        'hasilnya halus dan identik di foto maupun video.',
+                  ),
                   _ChangeEntry(
                     title: 'Impor foto & video dari kamera iPhone',
                     detail:
