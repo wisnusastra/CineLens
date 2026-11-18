@@ -11,6 +11,9 @@ permissions:
 jobs:
   build-ios:
     runs-on: macos-latest
+    # An explicit limit keeps a stuck Xcode/SPM step from being killed by an
+    # invisible runner cap with no diagnostics at all.
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -104,7 +107,9 @@ jobs:
       # Action logs are only readable while signed in, so the tail of every log
       # is pushed to the `ci-debug` branch to keep failures diagnosable.
       - name: Publish failure log
-        if: failure()
+        # `cancelled` is not covered by `failure()`, and the previous run died
+        # at exactly 15 minutes without leaving a single log behind.
+        if: failure() || cancelled()
         shell: bash
         run: |
           mkdir -p ci-logs
