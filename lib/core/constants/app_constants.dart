@@ -14,6 +14,10 @@ class AppConstants {
   static const String prefFilmLookJson = 'film_look_json';
   static const String prefBakeLookIntoProRes = 'bake_look_into_prores';
   static const String prefToneIntensityFullV2 = 'tone_intensity_full_v2';
+
+  /// Set once the first-install opening clip has been shown. Keeping this as a
+  /// versioned key means a future opening can be shown again if needed.
+  static const String prefOpeningSeen = 'opening_video_seen_v1';
   static const String videoGraderChannel = 'com.cinelens.ios/video_grader';
 
   static const int presetJsonSchemaVersion = 1;

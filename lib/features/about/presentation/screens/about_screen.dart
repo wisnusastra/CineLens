@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.2.1';
+  static const String appVersion = '1.2.2';
 
   void _copyEmail(BuildContext context) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -132,6 +132,15 @@ class AboutScreen extends StatelessWidget {
                     ),
                   ),
                   SizedBox(height: 12),
+                  _ChangeEntry(
+                    title: 'Opening pertama kali install (tanpa suara)',
+                    detail:
+                        'Saat pertama kali membuka CineLens setelah install, '
+                        'video opening kini tampil lebih dulu. Audio sengaja '
+                        'dimatikan, video bisa dilewati atau ditunggu sampai '
+                        'selesai, lalu tidak muncul lagi pada peluncuran '
+                        'berikutnya.',
+                  ),
                   _ChangeEntry(
                     title: 'Perbaikan warna rusak saat atur Cahaya',
                     detail:

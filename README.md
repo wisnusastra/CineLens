@@ -5,6 +5,9 @@ bingkai anamorphic 2.39:1, pembuat tone kustom, serta export/import preset `.jso
 
 ## Fitur
 
+- **Opening first-install** — saat pertama kali dibuka setelah install, aplikasi
+  memutar klip pembuka dari `assets/video/opening_cinelens.mp4` **tanpa suara**.
+  Bisa dilewati, dan hanya tampil sekali (flag di `SharedPreferences`).
 - **25 LUT bawaan** — Standard, Kodak 2383, Teal & Orange, Fuji Velvia, Noir B&W,
   CineLens Flat, Golden Hour, Vintage 16mm, plus 18 stok film: Agfacolor XRS 200
   (exp. 1991), Agfa Chrome RSX II 200 (exp. 2006), CineStill 50D/800T, Eterna
