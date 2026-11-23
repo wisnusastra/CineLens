@@ -259,6 +259,75 @@ class CinemaCameraRepository {
     await prefs.setBool(AppConstants.prefBakeLookIntoProRes, enabled);
   }
 
+  Future<({bool processZero, bool anamorphicCrop, double desqueeze, bool highlightMetering})>
+      loadProImagingSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (
+      processZero: prefs.getBool(AppConstants.prefProcessZeroRaw) ?? false,
+      anamorphicCrop: prefs.getBool(AppConstants.prefAnamorphicCrop) ?? false,
+      desqueeze: prefs.getDouble(AppConstants.prefAnamorphicDesqueeze) ?? 1.0,
+      highlightMetering:
+          prefs.getBool(AppConstants.prefHighlightMetering) ?? false,
+    );
+  }
+
+  Future<void> saveProcessZero(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefProcessZeroRaw, enabled);
+  }
+
+  Future<void> saveAnamorphicCrop(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefAnamorphicCrop, enabled);
+  }
+
+  Future<void> saveAnamorphicDesqueeze(double factor) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(AppConstants.prefAnamorphicDesqueeze, factor);
+  }
+
+  Future<void> saveHighlightMetering(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefHighlightMetering, enabled);
+  }
+
+  /// Captures a true Process Zero Bayer RAW photo natively (bypassing Apple
+  /// Smart HDR shadow-lifting) and grades it through the 16-bit FilmEngine.
+  /// Returns `null` when Bayer RAW isn't available so caller falls back cleanly.
+  Future<Uint8List?> captureProcessZeroPhoto({
+    required List<double> colorMatrix,
+    required bool applyAnamorphicBars,
+    bool anamorphicCrop = false,
+    double desqueeze = 1.0,
+    String? toneId,
+    double intensity = 1.0,
+    Map<String, dynamic>? look,
+  }) async {
+    try {
+      final graded = await _videoChannel.invokeMethod<Uint8List>(
+        'captureProcessZeroPhoto',
+        <String, dynamic>{
+          'matrix': colorMatrix,
+          'toneId': toneId,
+          'intensity': intensity,
+          'anamorphic': applyAnamorphicBars,
+          'anamorphicCrop': anamorphicCrop,
+          'desqueeze': desqueeze,
+          'quality': 0.98,
+          if (look != null) 'look': look,
+        },
+      ).timeout(const Duration(seconds: 15));
+      if (graded != null && graded.isNotEmpty) return graded;
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    } on TimeoutException {
+      return null;
+    }
+    return null;
+  }
+
   Future<List<CinemaTone>> importTonesFromJsonString(String rawJson) async {
     final importedTones =
         CinemaTonePresetPackage.parseAndValidateTones(rawJson);
@@ -322,6 +391,9 @@ class CinemaCameraRepository {
     required Uint8List rawBytes,
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
+    bool anamorphicCrop = false,
+    double desqueeze = 1.0,
+    bool appleLogInput = false,
     String? toneId,
     double intensity = 1.0,
     Map<String, dynamic>? look,
@@ -335,6 +407,9 @@ class CinemaCameraRepository {
           'toneId': toneId,
           'intensity': intensity,
           'anamorphic': applyAnamorphicBars,
+          'anamorphicCrop': anamorphicCrop,
+          'desqueeze': desqueeze,
+          'appleLogInput': appleLogInput,
           'quality': 0.98,
           if (look != null) 'look': look,
         },
@@ -419,6 +494,9 @@ class CinemaCameraRepository {
     required String rawVideoPath,
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
+    bool anamorphicCrop = false,
+    double desqueeze = 1.0,
+    bool appleLogInput = false,
     required int fps,
     String? toneId,
     double intensity = 1.0,
@@ -433,6 +511,9 @@ class CinemaCameraRepository {
           'toneId': toneId,
           'intensity': intensity,
           'anamorphic': applyAnamorphicBars,
+          'anamorphicCrop': anamorphicCrop,
+          'desqueeze': desqueeze,
+          'appleLogInput': appleLogInput,
           'fps': fps,
           if (look != null) 'look': look,
         },
@@ -458,6 +539,8 @@ class CinemaCameraRepository {
     required String path,
     required List<double> colorMatrix,
     required Map<String, dynamic> look,
+    bool appleLogInput = false,
+    double desqueeze = 1.0,
     String? toneId,
     double intensity = 1.0,
   }) async {
@@ -469,6 +552,8 @@ class CinemaCameraRepository {
           'matrix': colorMatrix,
           'toneId': toneId,
           'intensity': intensity,
+          'appleLogInput': appleLogInput,
+          'desqueeze': desqueeze,
           'look': look,
         },
       ).timeout(const Duration(minutes: 35));

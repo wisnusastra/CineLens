@@ -1,4 +1,6 @@
+import 'package:cinelens_ios/features/cinema_camera/data/datasources/cinema_tones_preset_source.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/cinema_tone.dart';
+import 'package:cinelens_ios/features/cinema_camera/domain/entities/film_look.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -62,6 +64,48 @@ void main() {
       expect(restored.isValidMatrix, isTrue);
       expect(restored.matrix, CinemaTone.identityMatrix);
       expect(restored.filmReference, 'Imported LUT');
+    });
+  });
+
+  group('Pro FilmLook & Built-in Stocks v2.0', () {
+    test('defaults preserve stock halation/grain and crisp acutance', () {
+      const look = FilmLook();
+      expect(look.useStockEffects, isTrue);
+      expect(look.acutance, greaterThan(0.1));
+      expect(look.shadowDepth, 0.0);
+
+      final native = look.toNative();
+      expect(native['useStockEffects'], isTrue);
+      expect(native['shadowDepth'], 0.0);
+      expect(native['acutance'], look.acutance);
+    });
+
+    test('FilmLook JSON round trip preserves shadowDepth & acutance', () {
+      const custom = FilmLook(
+        useStockEffects: false,
+        shadowDepth: 0.65,
+        acutance: 0.45,
+        halation: 0.5,
+      );
+      final restored = FilmLook.fromJson(custom.toJson());
+      expect(restored.useStockEffects, isFalse);
+      expect(restored.shadowDepth, closeTo(0.65, 1e-6));
+      expect(restored.acutance, closeTo(0.45, 1e-6));
+      expect(restored.halation, closeTo(0.5, 1e-6));
+    });
+
+    test('built-in presets include Leica Chiaroscuro, ARRI Alexa 709 & Tri-X', () {
+      final ids = const CinemaTonesPresetSource()
+          .getHollywoodTones()
+          .map((t) => t.id)
+          .toSet();
+      expect(ids, containsAll(<String>[
+        'leica_chiaroscuro',
+        'arri_alexa_709',
+        'kodak_trix_400',
+        'cinestill_800t',
+        'kodak_2383',
+      ]));
     });
   });
 }

@@ -163,18 +163,20 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
     final tone = _resolveTone();
     final payload = <String, dynamic>{
       'edit': _edit.toParameters(),
-      'toneId': tone.isLutTone ? null : tone.id,
+      'toneId': (tone.isLutTone || tone.isCustom) ? null : tone.id,
       'intensity': _toneIntensity,
+      if (!tone.isLutTone && tone.isCustom)
+        'matrix': tone.blendedMatrix(_toneIntensity),
     };
 
     if (tone.isLutTone) {
-      payload['look'] = _film.toNative(
-        lutPath: tone.lutPath,
-        lutSize: tone.lutSize,
-        mix: _toneIntensity,
-      );
+      payload['look'] = _film.copyWith(useStockEffects: false).toNative(
+            lutPath: tone.lutPath,
+            lutSize: tone.lutSize,
+            mix: _toneIntensity,
+          );
     } else if (!_stockEffects) {
-      payload['look'] = _film.toNative();
+      payload['look'] = _film.copyWith(useStockEffects: false).toNative();
     }
     return payload;
   }

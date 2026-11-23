@@ -702,6 +702,38 @@ class CameraOptionsSheet extends ConsumerWidget {
                   ),
                   onChangeEnd: (_) => notifier.commitManualExposure(),
                 ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: state.is180ShutterLocked
+                            ? Colors.black
+                            : Colors.amber,
+                        backgroundColor: state.is180ShutterLocked
+                            ? Colors.amber
+                            : Colors.transparent,
+                        side: const BorderSide(color: Colors.amber),
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                      ),
+                      onPressed: () {
+                        tap();
+                        notifier.toggle180DegreeShutter();
+                      },
+                      icon: const Icon(Icons.shutter_speed_rounded, size: 16),
+                      label: Text(
+                        state.is180ShutterLocked
+                            ? '180° SHUTTER TERKUNCI (1/${state.frameRate.value * 2}s)'
+                            : 'KUNCI 180° SHUTTER RULE (1/${state.frameRate.value * 2}s @ ${state.frameRate.value}FPS)',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
                 const Divider(height: 1, color: Colors.white12),
                 SwitchListTile(
                   activeThumbColor: Colors.amber,

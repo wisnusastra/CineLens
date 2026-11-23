@@ -7,6 +7,21 @@ import '../../domain/services/color_matrix_builder.dart';
 
 enum CinemaCaptureMode { photo, video24fps }
 
+/// One physical back camera lens discovered on the iPhone (Ultra-Wide, Wide,
+/// Telephoto). Switching optical lenses keeps full sensor sharpness & real
+/// optical compression instead of blurry digital crop.
+class OpticalLensOption {
+  final int index;
+  final String cameraName;
+  final String label;
+
+  const OpticalLensOption({
+    required this.index,
+    required this.cameraName,
+    required this.label,
+  });
+}
+
 /// Output resolution offered to the user.
 ///
 /// Photos and video are treated differently on purpose:
@@ -119,6 +134,27 @@ class CinemaCameraState {
   /// Off by default: a ProRes master is normally kept flat for grading.
   final bool bakeLookIntoProRes;
 
+  /// Process Zero Bayer RAW still capture (bypasses Apple Smart HDR shadow
+  /// lifting so directional shadows stay velvety ink-black & organic).
+  final bool processZeroEnabled;
+
+  /// Highlight-weighted exposure metering (biases exposure to protect sunlit
+  /// highlights & deepen shadows like Leica/Ricoh chiaroscuro mode).
+  final bool highlightMeteringEnabled;
+
+  /// True when anamorphic mode crops output to real 2.39:1 instead of baking
+  /// dead black letterbox bars.
+  final bool anamorphicCrop;
+
+  /// Horizontal desqueeze factor for external anamorphic lenses (1.0, 1.33, 1.55).
+  final double anamorphicDesqueeze;
+
+  /// Physical back camera lenses discovered on this device (0.5x, 1x, 2x/3x).
+  final List<OpticalLensOption> backLenses;
+
+  /// Index inside [backLenses] currently active when using the rear camera.
+  final int activeBackLensIndex;
+
   /// Text under the processing spinner, e.g. "Membakar look ke ProRes...".
   final String? videoProcessingLabel;
 
@@ -168,6 +204,12 @@ class CinemaCameraState {
     this.proResEnabled = false,
     this.filmLook = const FilmLook(),
     this.bakeLookIntoProRes = false,
+    this.processZeroEnabled = false,
+    this.highlightMeteringEnabled = false,
+    this.anamorphicCrop = false,
+    this.anamorphicDesqueeze = 1.0,
+    this.backLenses = const <OpticalLensOption>[],
+    this.activeBackLensIndex = 0,
     this.videoProcessingLabel,
     this.videoProcessingProgress,
     this.proControlError,
@@ -196,13 +238,20 @@ class CinemaCameraState {
     return selectedTone.blendedMatrix(intensity);
   }
 
-  /// Payload for `AppDelegate.filmLook(from:)`.
-  ///
-  /// The parsed LUT path and its mix ride along with the effects so one call
-  /// reproduces the whole look.
+  /// True when the shutter speed is locked to the 180° cinema rule (`1 / 2×fps`).
+  bool get is180ShutterLocked {
+    if (!manualExposureEnabled || shutterSeconds <= 0) return false;
+    final target = 1.0 / (frameRate.value * 2);
+    return (shutterSeconds - target).abs() < target * 0.08;
+  }
+
+  /// Payload for `AppDelegate.FilmEffects.from` & `ImportedLut.from`.
   Map<String, dynamic> get nativeLook {
     final tone = selectedTone;
-    return filmLook.toNative(
+    final effectiveLook = highlightMeteringEnabled && filmLook.shadowDepth < 0.35
+        ? filmLook.copyWith(shadowDepth: 0.42)
+        : filmLook;
+    return effectiveLook.toNative(
       lutPath: tone.isLutTone ? tone.lutPath : null,
       lutSize: tone.isLutTone ? tone.lutSize : null,
       mix: tone.isLutTone ? intensity.clamp(0.0, 1.0) : 0,
@@ -284,6 +333,12 @@ class CinemaCameraState {
     bool? proResEnabled,
     FilmLook? filmLook,
     bool? bakeLookIntoProRes,
+    bool? processZeroEnabled,
+    bool? highlightMeteringEnabled,
+    bool? anamorphicCrop,
+    double? anamorphicDesqueeze,
+    List<OpticalLensOption>? backLenses,
+    int? activeBackLensIndex,
     String? videoProcessingLabel,
     double? videoProcessingProgress,
     bool clearVideoProcessingProgress = false,
@@ -334,6 +389,13 @@ class CinemaCameraState {
       proResEnabled: proResEnabled ?? this.proResEnabled,
       filmLook: filmLook ?? this.filmLook,
       bakeLookIntoProRes: bakeLookIntoProRes ?? this.bakeLookIntoProRes,
+      processZeroEnabled: processZeroEnabled ?? this.processZeroEnabled,
+      highlightMeteringEnabled:
+          highlightMeteringEnabled ?? this.highlightMeteringEnabled,
+      anamorphicCrop: anamorphicCrop ?? this.anamorphicCrop,
+      anamorphicDesqueeze: anamorphicDesqueeze ?? this.anamorphicDesqueeze,
+      backLenses: backLenses ?? this.backLenses,
+      activeBackLensIndex: activeBackLensIndex ?? this.activeBackLensIndex,
       videoProcessingLabel: videoProcessingLabel ?? this.videoProcessingLabel,
       videoProcessingProgress: clearVideoProcessingProgress
           ? null

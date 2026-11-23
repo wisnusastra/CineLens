@@ -368,6 +368,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           children: [
             if (showTray) ...[
               if (isLandscape) _buildTrayHeader(state),
+              _buildProQuickBar(state, haptics),
+              SizedBox(height: isLandscape ? 4 : 6),
               ToneSelectorStrip(
                 tones: state.tones,
                 selectedTone: state.selectedTone,
@@ -383,6 +385,105 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             _buildShutterRow(state, haptics, isLandscape),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Quick Pro HUD bar above the tone strip: Optical Multi-Lens switcher
+  /// (`0.5×` / `1×` / `TEL`), Highlight-Weighted Metering (`HL`), Process Zero
+  /// RAW (`RAW 0`), and 180° Cinema Shutter lock (`180°`).
+  Widget _buildProQuickBar(CinemaCameraState state, bool haptics) {
+    final isBack = state.lensDirection == CameraLensDirection.back;
+    final showLenses = isBack && state.backLenses.length > 1;
+
+    Widget pill({
+      required String label,
+      required bool active,
+      required VoidCallback? onTap,
+    }) {
+      return GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+          decoration: BoxDecoration(
+            color: active
+                ? AppTheme.cinemaAmber
+                : Colors.black.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: active ? AppTheme.cinemaAmber : Colors.white24,
+              width: 1,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: active ? Colors.black : Colors.white70,
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.4,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        children: [
+          if (showLenses)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var i = 0; i < state.backLenses.length; i++)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 5),
+                    child: pill(
+                      label: state.backLenses[i].label,
+                      active: state.activeBackLensIndex == i,
+                      onTap: state.isRecordingVideo
+                          ? null
+                          : () {
+                              if (haptics) HapticFeedback.selectionClick();
+                              _notifier.switchBackLens(i);
+                            },
+                    ),
+                  ),
+              ],
+            ),
+          const Spacer(),
+          pill(
+            label: 'HL SHADOW',
+            active: state.highlightMeteringEnabled,
+            onTap: () {
+              if (haptics) HapticFeedback.selectionClick();
+              _notifier.setHighlightMeteringEnabled(
+                !state.highlightMeteringEnabled,
+              );
+            },
+          ),
+          const SizedBox(width: 5),
+          pill(
+            label: 'RAW 0',
+            active: state.processZeroEnabled,
+            onTap: () {
+              if (haptics) HapticFeedback.selectionClick();
+              _notifier.setProcessZeroEnabled(!state.processZeroEnabled);
+            },
+          ),
+          if (state.proCapabilities.available) ...[
+            const SizedBox(width: 5),
+            pill(
+              label: '180°',
+              active: state.is180ShutterLocked,
+              onTap: () {
+                if (haptics) HapticFeedback.selectionClick();
+                _notifier.toggle180DegreeShutter();
+              },
+            ),
+          ],
+        ],
       ),
     );
   }

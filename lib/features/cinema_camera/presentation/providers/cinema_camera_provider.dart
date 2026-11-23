@@ -91,6 +91,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final captureSettings = await repository.loadCaptureSettings();
     final filmLook = await repository.loadFilmLook();
     final bakeLook = await repository.loadBakeLookIntoProRes();
+    final proImaging = await repository.loadProImagingSettings();
 
     // Subscribe before the session starts: the native side reports the active
     // stabilisation mode as soon as `AVCaptureSession` starts running.
@@ -118,10 +119,15 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       throw Exception('Kamera tidak ditemukan pada perangkat iOS ini.');
     }
 
-    final backCamera = _availableCameras.firstWhere(
-      (cam) => cam.lensDirection == CameraLensDirection.back,
-      orElse: () => _availableCameras.first,
-    );
+    final backCameras = _availableCameras
+        .where((cam) => cam.lensDirection == CameraLensDirection.back)
+        .toList();
+    final backLenses = _buildBackLensOptions(backCameras);
+    final wideIdx = backLenses.indexWhere((l) => l.label == '1×');
+    final initialLensIdx = wideIdx >= 0 ? wideIdx : 0;
+    final backCamera = backCameras.isNotEmpty
+        ? backCameras[initialLensIdx.clamp(0, backCameras.length - 1)]
+        : _availableCameras.first;
 
     final bounds = await _initializeCameraController(
       backCamera,
@@ -129,6 +135,15 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       frameRate: frameRate,
       mode: CinemaCaptureMode.photo,
     );
+
+    var initialExposureOffset = 0.0;
+    if (proImaging.highlightMetering && _controller != null) {
+      final bias = (-0.9).clamp(bounds.minExposure, bounds.maxExposure);
+      try {
+        await _controller!.setExposureOffset(bias);
+        initialExposureOffset = bias;
+      } catch (_) {}
+    }
 
     // The plugin does not expose the device, so the manual limits (ISO range,
     // shutter range, Apple Log/ProRes support) are read from the running
@@ -139,6 +154,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       tones: tones,
       selectedTone: selectedTone,
       intensity: savedPrefs.intensity,
+      exposureOffset: initialExposureOffset,
       minExposure: bounds.minExposure,
       maxExposure: bounds.maxExposure,
       lensDirection: backCamera.lensDirection,
@@ -152,6 +168,12 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       proCapabilities: capabilities,
       filmLook: filmLook,
       bakeLookIntoProRes: bakeLook,
+      processZeroEnabled: proImaging.processZero,
+      highlightMeteringEnabled: proImaging.highlightMetering,
+      anamorphicCrop: proImaging.anamorphicCrop,
+      anamorphicDesqueeze: proImaging.desqueeze,
+      backLenses: backLenses,
+      activeBackLensIndex: initialLensIdx,
       iso: 400.0.clamp(capabilities.minIso, capabilities.maxIso).toDouble(),
       shutterSeconds: (1 / 48)
           .clamp(
@@ -160,6 +182,54 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           )
           .toDouble(),
     );
+  }
+
+  /// Labels the physical back lenses exposed by iOS (`0.5×`, `1×`, `TEL`).
+  List<OpticalLensOption> _buildBackLensOptions(
+    List<CameraDescription> backCameras,
+  ) {
+    final options = <OpticalLensOption>[];
+    final seenLabels = <String>{};
+    for (var i = 0; i < backCameras.length; i++) {
+      final name = backCameras[i].name;
+      final lower = name.toLowerCase();
+      String label;
+      if (lower.contains('ultrawide') || lower.contains('ultra')) {
+        label = '0.5×';
+      } else if (lower.contains('telephoto') || lower.contains('tele')) {
+        label = 'TEL';
+      } else if (lower.contains('dual') || lower.contains('triple')) {
+        // Skip composite virtual cameras so each pill switches a discrete lens.
+        continue;
+      } else {
+        label = '1×';
+      }
+      if (seenLabels.contains(label)) {
+        label = '${label}_${i + 1}';
+      }
+      seenLabels.add(label);
+      options.add(
+        OpticalLensOption(index: i, cameraName: name, label: label),
+      );
+    }
+    if (options.isEmpty && backCameras.isNotEmpty) {
+      options.add(
+        OpticalLensOption(
+          index: 0,
+          cameraName: backCameras.first.name,
+          label: '1×',
+        ),
+      );
+    }
+    // Order cleanly: 0.5× -> 1× -> TEL
+    int rank(String l) {
+      if (l.startsWith('0.5')) return 0;
+      if (l.startsWith('1×')) return 1;
+      return 2;
+    }
+
+    options.sort((a, b) => rank(a.label).compareTo(rank(b.label)));
+    return options;
   }
 
   /// Native export progress (0…1) from `AppDelegate.finishExport`.
@@ -555,6 +625,161 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     unawaited(
       ref.read(cinemaCameraRepositoryProvider).saveBakeLookIntoProRes(enabled),
     );
+  }
+
+  void setProcessZeroEnabled(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(processZeroEnabled: enabled));
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveProcessZero(enabled),
+    );
+  }
+
+  void setAnamorphicCrop(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo) return;
+    state = AsyncData(current.copyWith(anamorphicCrop: enabled));
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveAnamorphicCrop(enabled),
+    );
+  }
+
+  void setAnamorphicDesqueeze(double factor) {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo) return;
+    state = AsyncData(current.copyWith(anamorphicDesqueeze: factor));
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveAnamorphicDesqueeze(factor),
+    );
+  }
+
+  /// Highlight-Weighted Metering (Chiaroscuro / Leica mode): protects bright
+  /// sunlit highlights with `-0.9 EV` bias so shadows fall into deep ink-black.
+  Future<void> setHighlightMeteringEnabled(bool enabled) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+
+    var nextOffset = current.exposureOffset;
+    final cam = _controller;
+    if (cam != null &&
+        cam.value.isInitialized &&
+        !current.manualExposureEnabled) {
+      final target = enabled
+          ? (-0.9).clamp(current.minExposure, current.maxExposure)
+          : 0.0;
+      try {
+        await cam.setExposureOffset(target);
+        nextOffset = target;
+      } catch (_) {}
+    }
+
+    state = AsyncData(
+      current.copyWith(
+        highlightMeteringEnabled: enabled,
+        exposureOffset: nextOffset,
+      ),
+    );
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveHighlightMetering(enabled),
+    );
+  }
+
+  /// Locks shutter to the 180° cinema rule (`1 / 2×fps`: 1/48 @ 24fps,
+  /// 1/60 @ 30fps, 1/120 @ 60fps) for authentic motion blur.
+  Future<void> toggle180DegreeShutter() async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (!current.proCapabilities.available) {
+      _setProError('Kontrol shutter manual belum siap.');
+      return;
+    }
+
+    if (current.is180ShutterLocked) {
+      await setManualExposureEnabled(false);
+      return;
+    }
+
+    final targetShutter = (1.0 / (current.frameRate.value * 2)).clamp(
+      current.proCapabilities.minShutterSeconds,
+      current.proCapabilities.maxShutterSeconds,
+    );
+    state = AsyncData(
+      current.copyWith(
+        manualExposureEnabled: true,
+        shutterSeconds: targetShutter,
+      ),
+    );
+    await _runProAction(
+      () => ref.read(cinemaCameraRepositoryProvider).setManualExposure(
+            shutterSeconds: targetShutter,
+            iso: current.iso,
+          ),
+    );
+  }
+
+  /// Switches directly to another physical optical back lens (0.5× / 1× / TEL).
+  Future<void> switchBackLens(int optionIndex) async {
+    final current = state.valueOrNull;
+    if (current == null ||
+        current.isRecordingVideo ||
+        _isSwitchingProfile ||
+        optionIndex < 0 ||
+        optionIndex >= current.backLenses.length) {
+      return;
+    }
+    if (current.lensDirection == CameraLensDirection.back &&
+        current.activeBackLensIndex == optionIndex) {
+      return;
+    }
+
+    final option = current.backLenses[optionIndex];
+    final backCameras = _availableCameras
+        .where((cam) => cam.lensDirection == CameraLensDirection.back)
+        .toList();
+    if (option.index < 0 || option.index >= backCameras.length) return;
+    final targetCamera = backCameras[option.index];
+
+    _isSwitchingProfile = true;
+    try {
+      final bounds = await _initializeCameraController(
+        targetCamera,
+        resolution: current.resolution,
+        frameRate: current.frameRate,
+        mode: current.captureMode,
+      );
+      if (_disposed) return;
+
+      var nextOffset = 0.0;
+      if (current.highlightMeteringEnabled &&
+          !current.manualExposureEnabled &&
+          _controller != null) {
+        final bias = (-0.9).clamp(bounds.minExposure, bounds.maxExposure);
+        try {
+          await _controller!.setExposureOffset(bias);
+          nextOffset = bias;
+        } catch (_) {}
+      }
+
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(
+        latest.copyWith(
+          lensDirection: CameraLensDirection.back,
+          activeBackLensIndex: optionIndex,
+          flashMode: FlashMode.off,
+          exposureOffset: nextOffset,
+          minExposure: bounds.minExposure,
+          maxExposure: bounds.maxExposure,
+          zoomLevel: bounds.minZoom,
+          minZoom: bounds.minZoom,
+          maxZoom: bounds.maxZoom,
+          clearFocusPoint: true,
+        ),
+      );
+      await _refreshProCapabilities();
+    } finally {
+      _isSwitchingProfile = false;
+    }
   }
 
   /// Imports `.cube` files and selects the first one.
@@ -1137,18 +1362,38 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     state = AsyncData(current.copyWith(isCapturing: true));
 
     try {
-      final XFile rawFile = await cam.takePicture();
-      final Uint8List rawBytes = await rawFile.readAsBytes();
-
       final repository = ref.read(cinemaCameraRepositoryProvider);
-      final Uint8List gradedBytes = await repository.renderGradedImage(
-        rawBytes: rawBytes,
-        colorMatrix: current.captureColorMatrix,
-        applyAnamorphicBars: current.isAnamorphicRatio,
-        look: current.nativeLook,
-        toneId: current.selectedTone.isCustom ? null : current.selectedTone.id,
-        intensity: current.intensity,
-      );
+      final toneId = current.selectedTone.isCustom ? null : current.selectedTone.id;
+      Uint8List? gradedBytes;
+
+      if (current.processZeroEnabled &&
+          current.lensDirection == CameraLensDirection.back) {
+        gradedBytes = await repository.captureProcessZeroPhoto(
+          colorMatrix: current.captureColorMatrix,
+          applyAnamorphicBars: current.isAnamorphicRatio,
+          anamorphicCrop: current.anamorphicCrop,
+          desqueeze: current.anamorphicDesqueeze,
+          look: current.nativeLook,
+          toneId: toneId,
+          intensity: current.intensity,
+        );
+      }
+
+      if (gradedBytes == null) {
+        final XFile rawFile = await cam.takePicture();
+        final Uint8List rawBytes = await rawFile.readAsBytes();
+        gradedBytes = await repository.renderGradedImage(
+          rawBytes: rawBytes,
+          colorMatrix: current.captureColorMatrix,
+          applyAnamorphicBars: current.isAnamorphicRatio,
+          anamorphicCrop: current.anamorphicCrop,
+          desqueeze: current.anamorphicDesqueeze,
+          appleLogInput: current.appleLogEnabled,
+          look: current.nativeLook,
+          toneId: toneId,
+          intensity: current.intensity,
+        );
+      }
 
       String? warning;
       try {
@@ -1378,6 +1623,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         rawVideoPath: rawPath,
         colorMatrix: current.captureColorMatrix,
         applyAnamorphicBars: current.isAnamorphicRatio,
+        anamorphicCrop: current.anamorphicCrop,
+        desqueeze: current.anamorphicDesqueeze,
+        appleLogInput: current.appleLogEnabled,
         fps: current.frameRate.value,
         look: current.nativeLook,
         toneId: current.selectedTone.isCustom ? null : current.selectedTone.id,
@@ -1445,6 +1693,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           path: finalPath,
           colorMatrix: current.captureColorMatrix,
           look: current.nativeLook,
+          appleLogInput: current.appleLogEnabled,
+          desqueeze: current.anamorphicDesqueeze,
           toneId:
               current.selectedTone.isCustom ? null : current.selectedTone.id,
           intensity: current.intensity,

@@ -111,31 +111,64 @@ class FilmLookSection extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 10),
+              if (!tone.isLutTone && !tone.isCustom) ...[
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  activeThumbColor: Colors.amber,
+                  title: const Text(
+                    'Efek Bawaan Film Stock',
+                    style: TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                  subtitle: Text(
+                    look.useStockEffects
+                        ? 'Aktif: memakai halation, bloom & grain asli milik ${tone.name}.'
+                        : 'Manual: halation, bloom & grain mengikuti slider di bawah.',
+                    style: const TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                  value: look.useStockEffects,
+                  onChanged: (value) =>
+                      apply(look.copyWith(useStockEffects: value)),
+                ),
+                const SizedBox(height: 4),
+              ],
               _FilmSlider(
-                label: 'GRAIN',
-                value: look.grain,
-                onChanged: (value) => apply(look.copyWith(grain: value)),
+                label: 'DEEP SHADOW (CHIAROSCURO)',
+                value: look.shadowDepth,
+                onChanged: (value) => apply(look.copyWith(shadowDepth: value)),
               ),
               _FilmSlider(
-                label: 'UKURAN GRAIN',
-                value: look.grainSize,
-                onChanged: (value) => apply(look.copyWith(grainSize: value)),
+                label: 'KETAJAMAN OPTIK (ACUTANCE)',
+                value: look.acutance,
+                onChanged: (value) => apply(look.copyWith(acutance: value)),
               ),
-              _FilmSlider(
-                label: 'HALATION',
-                value: look.halation,
-                onChanged: (value) => apply(look.copyWith(halation: value)),
-              ),
-              _FilmSlider(
-                label: 'BLOOM',
-                value: look.bloom,
-                onChanged: (value) => apply(look.copyWith(bloom: value)),
-              ),
-              _FilmSlider(
-                label: 'VIGNETTE',
-                value: look.vignette,
-                onChanged: (value) => apply(look.copyWith(vignette: value)),
-              ),
+              if (!look.useStockEffects || tone.isLutTone || tone.isCustom) ...[
+                _FilmSlider(
+                  label: 'GRAIN',
+                  value: look.grain,
+                  onChanged: (value) => apply(look.copyWith(grain: value)),
+                ),
+                _FilmSlider(
+                  label: 'UKURAN GRAIN',
+                  value: look.grainSize,
+                  onChanged: (value) => apply(look.copyWith(grainSize: value)),
+                ),
+                _FilmSlider(
+                  label: 'HALATION',
+                  value: look.halation,
+                  onChanged: (value) => apply(look.copyWith(halation: value)),
+                ),
+                _FilmSlider(
+                  label: 'BLOOM',
+                  value: look.bloom,
+                  onChanged: (value) => apply(look.copyWith(bloom: value)),
+                ),
+                _FilmSlider(
+                  label: 'VIGNETTE',
+                  value: look.vignette,
+                  onChanged: (value) => apply(look.copyWith(vignette: value)),
+                ),
+              ],
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton(
@@ -153,6 +186,113 @@ class FilmLookSection extends StatelessWidget {
                     'RESET EFEK',
                     style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
                   ),
+                ),
+              ),
+              const Divider(height: 12, color: Colors.white12),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                activeThumbColor: Colors.amber,
+                title: const Text(
+                  'Process Zero RAW (Bypass Smart HDR)',
+                  style: TextStyle(color: Colors.white, fontSize: 13),
+                ),
+                subtitle: const Text(
+                  'Foto diambil langsung dari sensor RAW tanpa angkat bayangan '
+                  'Smart HDR Apple — shadow hitam pekat & organik ala kamera pro.',
+                  style: TextStyle(color: Colors.white54, fontSize: 11),
+                ),
+                value: state.processZeroEnabled,
+                onChanged: (value) {
+                  if (haptics) HapticFeedback.selectionClick();
+                  notifier.setProcessZeroEnabled(value);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                activeThumbColor: Colors.amber,
+                title: const Text(
+                  'Highlight Metering (Chiaroscuro)',
+                  style: TextStyle(color: Colors.white, fontSize: 13),
+                ),
+                subtitle: const Text(
+                  'Mengukur cahaya dari area terang (-0.9 EV + Deep Shadow) '
+                  'supaya sorotan matahari tajam & bayangan jatuh hitam pekat.',
+                  style: TextStyle(color: Colors.white54, fontSize: 11),
+                ),
+                value: state.highlightMeteringEnabled,
+                onChanged: (value) {
+                  if (haptics) HapticFeedback.selectionClick();
+                  notifier.setHighlightMeteringEnabled(value);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                activeThumbColor: Colors.amber,
+                title: const Text(
+                  'True 2.39:1 Crop (Tanpa Bar Hitam)',
+                  style: TextStyle(color: Colors.white, fontSize: 13),
+                ),
+                subtitle: const Text(
+                  'Saat mode Anamorphic aktif, hasil foto & video benar-benar '
+                  'di-crop 2.39:1 sinema tanpa bar hitam atas-bawah.',
+                  style: TextStyle(color: Colors.white54, fontSize: 11),
+                ),
+                value: state.anamorphicCrop,
+                onChanged: state.isRecordingVideo
+                    ? null
+                    : (value) {
+                        if (haptics) HapticFeedback.selectionClick();
+                        notifier.setAnamorphicCrop(value);
+                      },
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'DESQUEEZE LENSA ANAMORPHIC',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.6,
+                        ),
+                      ),
+                    ),
+                    for (final factor in const <double>[1.0, 1.33, 1.55])
+                      Padding(
+                        padding: const EdgeInsets.only(left: 6),
+                        child: ChoiceChip(
+                          label: Text(
+                            factor == 1.0 ? 'OFF' : '${factor}×',
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          selected:
+                              (state.anamorphicDesqueeze - factor).abs() < 0.02,
+                          selectedColor: Colors.amber,
+                          backgroundColor: const Color(0xFF28282E),
+                          labelStyle: TextStyle(
+                            color: (state.anamorphicDesqueeze - factor).abs() <
+                                    0.02
+                                ? Colors.black
+                                : Colors.white70,
+                          ),
+                          onSelected: state.isRecordingVideo
+                              ? null
+                              : (_) {
+                                  if (haptics) HapticFeedback.selectionClick();
+                                  notifier.setAnamorphicDesqueeze(factor);
+                                },
+                        ),
+                      ),
+                  ],
                 ),
               ),
               const Divider(height: 12, color: Colors.white12),

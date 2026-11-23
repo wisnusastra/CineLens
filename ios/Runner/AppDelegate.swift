@@ -132,7 +132,11 @@ final class ExportProgressReporter {
   static let gradingContext: CIContext = {
     let sRGB = CGColorSpace(name: CGColorSpace.sRGB)
     var options: [CIContextOption: Any] = [
-      .useSoftwareRenderer: false
+      .useSoftwareRenderer: false,
+      // 16-bit half-float working precision eliminates 8-bit colour banding
+      // across skies, deep shadows, halation glows, and smooth vignettes.
+      .workingFormat: CIFormat.RGBAh,
+      .highQualityDownsample: true,
     ]
     if let sRGB = sRGB {
       options[.workingColorSpace] = sRGB
@@ -140,6 +144,9 @@ final class ExportProgressReporter {
     }
     return CIContext(options: options)
   }()
+
+  /// Active Process Zero RAW capture delegate held for the duration of one shot.
+  private var rawPhotoDelegate: ProcessZeroPhotoDelegate?
 
   override func application(
     _ application: UIApplication,
@@ -177,6 +184,9 @@ final class ExportProgressReporter {
         }
 
         let anamorphic = (args["anamorphic"] as? Bool) ?? false
+        let anamorphicCrop = (args["anamorphicCrop"] as? Bool) ?? false
+        let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
+        let appleLogInput = (args["appleLogInput"] as? Bool) ?? false
         let fps = (args["fps"] as? NSNumber)?.int32Value ?? 24
         let toneId = args["toneId"] as? String
         let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
@@ -188,6 +198,9 @@ final class ExportProgressReporter {
           effects: FilmEffects.from(args),
           importedLut: ImportedLut.from(args),
           anamorphic: anamorphic,
+          anamorphicCrop: anamorphicCrop,
+          desqueeze: desqueeze,
+          appleLogInput: appleLogInput,
           fps: fps,
           result: result
         )
@@ -201,6 +214,8 @@ final class ExportProgressReporter {
         }
         let toneId = args["toneId"] as? String
         let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
+        let appleLogInput = (args["appleLogInput"] as? Bool) ?? false
+        let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
         self?.bakeLookIntoProRes(
           inputPath: inputPath,
           matrix: matrix,
@@ -208,6 +223,8 @@ final class ExportProgressReporter {
           intensity: intensity,
           effects: FilmEffects.from(args),
           importedLut: ImportedLut.from(args),
+          appleLogInput: appleLogInput,
+          desqueeze: desqueeze,
           result: result
         )
 
@@ -220,6 +237,9 @@ final class ExportProgressReporter {
         }
 
         let anamorphic = (args["anamorphic"] as? Bool) ?? false
+        let anamorphicCrop = (args["anamorphicCrop"] as? Bool) ?? false
+        let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
+        let appleLogInput = (args["appleLogInput"] as? Bool) ?? false
         let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.98
         let toneId = args["toneId"] as? String
         let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
@@ -231,9 +251,16 @@ final class ExportProgressReporter {
           effects: FilmEffects.from(args),
           importedLut: ImportedLut.from(args),
           anamorphic: anamorphic,
+          anamorphicCrop: anamorphicCrop,
+          desqueeze: desqueeze,
+          appleLogInput: appleLogInput,
           quality: quality,
           result: result
         )
+
+      case "captureProcessZeroPhoto":
+        let args = call.arguments as? [String: Any] ?? [:]
+        self?.captureProcessZeroPhoto(args: args, result: result)
 
       case "cameraCapabilities":
         result(self?.cameraCapabilities() ?? ["available": false])
@@ -1522,12 +1549,118 @@ final class ExportProgressReporter {
     }
   }
 
-  // MARK: - Still photography
+  // MARK: - Still photography & Process Zero RAW
 
-  /// Applies the LUT at the still's native resolution and returns JPEG bytes.
+  /// Captures a true Process Zero Bayer RAW photo directly from the active
+  /// `AVCaptureSession` (bypassing Apple Smart HDR & Deep Fusion shadow-lifting),
+  /// decodes it via `CIRAWFilter` with `localToneMapAmount = 0.0` and deep shadow
+  /// preservation, then grades it through the exact same 16-bit FilmEngine chain.
   ///
-  /// Doing this in Core Image keeps the full sensor detail and avoids the huge
-  /// PNG that the Dart renderer used to produce for 12–48 MP captures.
+  /// Returns `nil` cleanly when the active camera/format cannot shoot Bayer RAW
+  /// (e.g. front camera or simulator), allowing Dart to fall back seamlessly.
+  private func captureProcessZeroPhoto(
+    args: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    let done = ReplyOnce(result)
+    guard let session = activeSession,
+          let photoOutput = session.outputs.compactMap({ $0 as? AVCapturePhotoOutput }).first,
+          let rawFormat = photoOutput.availableRawPhotoPixelFormatTypes.first(where: {
+            AVCapturePhotoOutput.isBayerRAWPixelFormat($0)
+          }) else {
+      done.send(nil)
+      return
+    }
+
+    let matrix = (args["matrix"] as? [Double]) ?? [
+      1, 0, 0, 0, 0,
+      0, 1, 0, 0, 0,
+      0, 0, 1, 0, 0,
+      0, 0, 0, 1, 0,
+    ]
+    let anamorphic = (args["anamorphic"] as? Bool) ?? false
+    let anamorphicCrop = (args["anamorphicCrop"] as? Bool) ?? false
+    let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
+    let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.98
+    let toneId = args["toneId"] as? String
+    let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
+    let effects = FilmEffects.from(args)
+    let importedLut = ImportedLut.from(args)
+
+    let settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+    settings.photoQualityPrioritization = .speed
+
+    let delegate = ProcessZeroPhotoDelegate { [weak self] rawData in
+      self?.rawPhotoDelegate = nil
+      guard let self = self, let rawData = rawData else {
+        done.send(nil)
+        return
+      }
+      DispatchQueue.global(qos: .userInitiated).async {
+        let decoded: CIImage?
+        if let rawFilter = CIRAWFilter(imageData: rawData, identifierHint: nil) {
+          if rawFilter.isLocalToneMapSupported {
+            rawFilter.localToneMapAmount = 0.0
+          }
+          rawFilter.boostAmount = 0.15
+          rawFilter.boostShadowAmount = 0.0
+          if rawFilter.isLuminanceNoiseReductionSupported {
+            rawFilter.luminanceNoiseReductionAmount = 0.14
+          }
+          if rawFilter.isColorNoiseReductionSupported {
+            rawFilter.colorNoiseReductionAmount = 0.35
+          }
+          if rawFilter.isSharpnessSupported {
+            rawFilter.sharpnessAmount = 0.28
+          }
+          decoded = rawFilter.outputImage
+        } else {
+          decoded = CIImage(data: rawData, options: [.applyOrientationProperty: true])
+        }
+
+        guard let source = decoded else {
+          DispatchQueue.main.async { done.send(nil) }
+          return
+        }
+
+        let jpegData = self.renderGradedStill(
+          source: source,
+          sourceMetadataBytes: rawData,
+          matrix: matrix,
+          toneId: toneId,
+          intensity: intensity,
+          effects: effects,
+          importedLut: importedLut,
+          anamorphic: anamorphic,
+          anamorphicCrop: anamorphicCrop,
+          desqueeze: desqueeze,
+          appleLogInput: false,
+          quality: quality
+        )
+        DispatchQueue.main.async {
+          if let data = jpegData {
+            done.send(FlutterStandardTypedData(bytes: data))
+          } else {
+            done.send(nil)
+          }
+        }
+      }
+    }
+
+    self.rawPhotoDelegate = delegate
+    photoOutput.capturePhoto(with: settings, delegate: delegate)
+
+    // Watchdog so Dart never hangs if iOS drops the photo callback.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 12.0) { [weak self] in
+      if self?.rawPhotoDelegate === delegate {
+        self?.rawPhotoDelegate = nil
+        done.send(nil)
+      }
+    }
+  }
+
+  /// Applies the LUT at the still's native resolution and returns JPEG bytes
+  /// while preserving original EXIF / TIFF / GPS metadata.
   private func exportGradedPhoto(
     inputBytes: Data,
     matrix: [Double],
@@ -1536,6 +1669,9 @@ final class ExportProgressReporter {
     effects: FilmEffects?,
     importedLut: ImportedLut?,
     anamorphic: Bool,
+    anamorphicCrop: Bool = false,
+    desqueeze: Double = 1.0,
+    appleLogInput: Bool = false,
     quality: Double,
     result: @escaping FlutterResult
   ) {
@@ -1550,37 +1686,88 @@ final class ExportProgressReporter {
       return
     }
 
-    guard let source = CIImage(
-      data: inputBytes,
-      options: [.applyOrientationProperty: true]
-    ) else {
-      result(
-        FlutterError(
-          code: "decode_failed",
-          message: "The captured photo could not be decoded.",
-          details: nil
-        )
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      guard let self = self,
+            let source = CIImage(
+              data: inputBytes,
+              options: [.applyOrientationProperty: true]
+            ) else {
+        DispatchQueue.main.async {
+          result(
+            FlutterError(
+              code: "decode_failed",
+              message: "The captured photo could not be decoded.",
+              details: nil
+            )
+          )
+        }
+        return
+      }
+
+      let jpegData = self.renderGradedStill(
+        source: source,
+        sourceMetadataBytes: inputBytes,
+        matrix: matrix,
+        toneId: toneId,
+        intensity: intensity,
+        effects: effects,
+        importedLut: importedLut,
+        anamorphic: anamorphic,
+        anamorphicCrop: anamorphicCrop,
+        desqueeze: desqueeze,
+        appleLogInput: appleLogInput,
+        quality: quality
       )
-      return
+
+      DispatchQueue.main.async {
+        guard let data = jpegData else {
+          result(
+            FlutterError(
+              code: "encode_failed",
+              message: "The graded photo could not be encoded.",
+              details: nil
+            )
+          )
+          return
+        }
+        result(FlutterStandardTypedData(bytes: data))
+      }
+    }
+  }
+
+  /// Shared 16-bit Core Image still renderer used by both normal captures and
+  /// Process Zero RAW captures. Preserves EXIF/TIFF/GPS metadata.
+  private func renderGradedStill(
+    source: CIImage,
+    sourceMetadataBytes: Data,
+    matrix: [Double],
+    toneId: String?,
+    intensity: Double,
+    effects: FilmEffects?,
+    importedLut: ImportedLut?,
+    anamorphic: Bool,
+    anamorphicCrop: Bool,
+    desqueeze: Double,
+    appleLogInput: Bool,
+    quality: Double
+  ) -> Data? {
+    var working = source
+    if appleLogInput {
+      working = FilmEngine.applyAppleLogIDT(to: working)
     }
 
     var output: CIImage
     if let imported = importedLut,
        let look = FilmEngine.importedLook(imported, effects: effects) {
-      // An imported .cube is used verbatim; the viewfinder only approximates
-      // it with a fitted matrix, the export gets the real thing.
-      output = look.apply(to: source, frameIndex: Int.random(in: 0..<4096))
+      output = look.apply(to: working, frameIndex: Int.random(in: 0..<4096))
     } else if let look = FilmEngine.look(
       toneId: toneId,
       intensity: intensity,
       effects: effects
     ) {
-      // Authentic film emulation: colour cube, halation, bloom, grain.
-      output = look.apply(to: source, frameIndex: Int.random(in: 0..<4096))
+      output = look.apply(to: working, frameIndex: Int.random(in: 0..<4096))
     } else {
-      // Custom tones and imported presets keep their matrix, then the film
-      // effects are layered on top when the user dialled any in.
-      var graded = AppDelegate.colorMatrixImage(matrix, to: source)
+      var graded = AppDelegate.colorMatrixImage(matrix, to: working)
       if let effects = effects, !effects.isNeutral {
         graded = FilmEngine.effectsLook(effects).apply(
           to: graded,
@@ -1588,6 +1775,14 @@ final class ExportProgressReporter {
         )
       }
       output = graded
+    }
+
+    // Optional anamorphic adapter desqueeze (1.33x / 1.55x horizontal stretch).
+    if desqueeze > 1.02 && desqueeze <= 2.0 {
+      let isPortrait = output.extent.height > output.extent.width
+      let sx: CGFloat = isPortrait ? 1.0 : CGFloat(desqueeze)
+      let sy: CGFloat = isPortrait ? CGFloat(desqueeze) : 1.0
+      output = output.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
     }
 
     if anamorphic {
@@ -1601,13 +1796,18 @@ final class ExportProgressReporter {
           width: frame.width,
           height: targetHeight
         )
-        let blackBackground = CIImage(color: .black).cropped(to: frame)
-        output = output.cropped(to: activeRect)
-          .composited(over: blackBackground)
+        if anamorphicCrop {
+          // True 2.39:1 cinema crop without dead black bars.
+          output = output.cropped(to: activeRect)
+        } else {
+          let blackBackground = CIImage(color: .black).cropped(to: frame)
+          output = output.cropped(to: activeRect)
+            .composited(over: blackBackground)
+        }
       }
     }
 
-    // JPEG encoders are happiest when the extent starts at the origin.
+    // JPEG encoders require extent origin at (0, 0).
     let extent = output.extent
     if extent.origin != .zero {
       output = output.transformed(
@@ -1619,37 +1819,19 @@ final class ExportProgressReporter {
     }
 
     guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
-      result(
-        FlutterError(
-          code: "colorspace_failed",
-          message: "sRGB is not available on this device.",
-          details: nil
-        )
-      )
-      return
+      return nil
     }
 
     let context = AppDelegate.gradingContext
     let clampedQuality = min(max(quality, 0.5), 1.0)
 
-    // `CIContext.jpegRepresentation(of:colorSpace:options:)` and its
-    // `lossyCompressionQuality` key were both renamed in recent SDKs, which
-    // broke the device build. ImageIO has carried the same JPEG API since
-    // iOS 4, so the quality control lives there instead.
     guard let cgImage = context.createCGImage(
       output,
       from: output.extent,
       format: .RGBA8,
       colorSpace: colorSpace
     ) else {
-      result(
-        FlutterError(
-          code: "encode_failed",
-          message: "The graded photo could not be rendered.",
-          details: nil
-        )
-      )
-      return
+      return nil
     }
 
     let jpeg = NSMutableData()
@@ -1659,34 +1841,33 @@ final class ExportProgressReporter {
       1,
       nil
     ) else {
-      result(
-        FlutterError(
-          code: "encode_failed",
-          message: "The graded photo could not be encoded.",
-          details: nil
-        )
-      )
-      return
+      return nil
     }
 
-    CGImageDestinationAddImage(
-      destination,
-      cgImage,
-      [kCGImageDestinationLossyCompressionQuality: clampedQuality] as CFDictionary
-    )
-
-    guard CGImageDestinationFinalize(destination) else {
-      result(
-        FlutterError(
-          code: "encode_failed",
-          message: "The graded photo could not be encoded.",
-          details: nil
-        )
-      )
-      return
+    // Preserve EXIF, GPS, and TIFF metadata from the original capture while
+    // resetting orientation to 1 (upright, since Core Image already baked it).
+    var properties: [CFString: Any] = [
+      kCGImageDestinationLossyCompressionQuality: clampedQuality
+    ]
+    if let imgSource = CGImageSourceCreateWithData(sourceMetadataBytes as CFData, nil),
+       let srcProps = CGImageSourceCopyPropertiesAtIndex(imgSource, 0, nil) as? [CFString: Any] {
+      if let exif = srcProps[kCGImagePropertyExifDictionary] {
+        properties[kCGImagePropertyExifDictionary] = exif
+      }
+      if let gps = srcProps[kCGImagePropertyGPSDictionary] {
+        properties[kCGImagePropertyGPSDictionary] = gps
+      }
+      if var tiff = srcProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+        tiff[kCGImagePropertyTIFFOrientation] = 1
+        tiff[kCGImagePropertyTIFFSoftware] = "CineLens Pro"
+        properties[kCGImagePropertyTIFFDictionary] = tiff
+      }
+      properties[kCGImagePropertyOrientation] = 1
     }
 
-    result(FlutterStandardTypedData(bytes: jpeg as Data))
+    CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
+    guard CGImageDestinationFinalize(destination) else { return nil }
+    return jpeg as Data
   }
 
   // MARK: - Video
@@ -1696,12 +1877,26 @@ final class ExportProgressReporter {
   ///
   /// Returning `nil` means the asset has no usable video track; the caller then
   /// answers with the untouched input instead of leaving Flutter waiting.
+  /// Picks HEVC Highest Quality (10-bit capable, sharper 4K detail & cleaner
+  /// dark shadows) when the asset & hardware support it, falling back cleanly
+  /// to standard Highest Quality.
+  private static func bestVideoExportPreset(for asset: AVAsset) -> String {
+    let presets = AVAssetExportSession.exportPresets(compatibleWith: asset)
+    if presets.contains(AVAssetExportPresetHEVCHighestQuality) {
+      return AVAssetExportPresetHEVCHighestQuality
+    }
+    return AVAssetExportPresetHighestQuality
+  }
+
   private static func gradedVideoComposition(
     asset: AVURLAsset,
     matrix: [Double],
     filmLook: FilmLook?,
     effectLook: FilmLook?,
     anamorphic: Bool,
+    anamorphicCrop: Bool = false,
+    desqueeze: Double = 1.0,
+    appleLogInput: Bool = false,
     frameRate: Int32,
     edit: PhotoEditor.Params? = nil
   ) async -> AVMutableVideoComposition? {
@@ -1728,15 +1923,33 @@ final class ExportProgressReporter {
 
     let orientedRect = CGRect(origin: .zero, size: naturalSize)
       .applying(preferredTransform)
-    let renderSize = CGSize(
-      width: abs(orientedRect.width).rounded(),
-      height: abs(orientedRect.height).rounded()
-    )
+    let baseWidth = abs(orientedRect.width).rounded()
+    let baseHeight = abs(orientedRect.height).rounded()
+    let validDesqueeze = (desqueeze > 1.02 && desqueeze <= 2.0) ? desqueeze : 1.0
+    let isPortrait = baseHeight > baseWidth
+    let desqueezedWidth = isPortrait ? baseWidth : (baseWidth * validDesqueeze).rounded()
+    let desqueezedHeight = isPortrait ? (baseHeight * validDesqueeze).rounded() : baseHeight
+
+    var finalRenderWidth = desqueezedWidth
+    var finalRenderHeight = desqueezedHeight
+    if anamorphic && anamorphicCrop {
+      let targetH = (desqueezedWidth / 2.39).rounded()
+      if desqueezedHeight > targetH + 1.0 {
+        // Video encoders require even dimensions.
+        finalRenderHeight = max(2, floor(targetH / 2.0) * 2.0)
+      }
+    }
+    finalRenderWidth = max(2, floor(finalRenderWidth / 2.0) * 2.0)
+    finalRenderHeight = max(2, floor(finalRenderHeight / 2.0) * 2.0)
+    let renderSize = CGSize(width: finalRenderWidth, height: finalRenderHeight)
     let fps = max(detectedRate, 1)
     let gradingContext = AppDelegate.gradingContext
 
     let composition = AVMutableVideoComposition(asset: asset) { request in
       let sourceExtent = request.sourceImage.extent
+      let sourceImg = appleLogInput
+        ? FilmEngine.applyAppleLogIDT(to: request.sourceImage)
+        : request.sourceImage
       var output: CIImage
 
       // The gallery editor owns its own colour chain, so it runs first and then
@@ -1745,11 +1958,14 @@ final class ExportProgressReporter {
         let frameIndex = Int(
           (request.compositionTime.seconds * Double(fps)).rounded()
         )
-        output = PhotoEditor.applyColor(edit, to: request.sourceImage)
+        output = PhotoEditor.applyColor(edit, to: sourceImg)
         if let look = filmLook {
           output = look.apply(to: output, frameIndex: frameIndex)
         } else if let look = effectLook {
-          output = look.apply(to: output, frameIndex: frameIndex)
+          let graded = matrix.count == 20
+            ? AppDelegate.colorMatrixImage(matrix, to: output)
+            : output
+          output = look.apply(to: graded, frameIndex: frameIndex)
         } else if matrix.count == 20 {
           output = AppDelegate.colorMatrixImage(matrix, to: output)
         }
@@ -1759,7 +1975,7 @@ final class ExportProgressReporter {
         let frameIndex = Int(
           (request.compositionTime.seconds * Double(fps)).rounded()
         )
-        output = look.apply(to: request.sourceImage, frameIndex: frameIndex)
+        output = look.apply(to: sourceImg, frameIndex: frameIndex)
           .cropped(to: sourceExtent)
       } else if let effectLook = effectLook {
         // Effects-only: the tone matrix still owns the colour.
@@ -1768,24 +1984,30 @@ final class ExportProgressReporter {
         )
         let graded = AppDelegate.colorMatrixImage(
           matrix,
-          to: request.sourceImage
+          to: sourceImg
         )
         output = effectLook
           .apply(to: graded, frameIndex: frameIndex)
           .cropped(to: sourceExtent)
       } else {
-        output = AppDelegate.colorMatrixImage(matrix, to: request.sourceImage)
+        output = AppDelegate.colorMatrixImage(matrix, to: sourceImg)
           .cropped(to: sourceExtent)
       }
 
       // Some iOS versions hand the compositor an already oriented image.
       // Only rotate when the frame is still in the sensor's native space.
       let alreadyOriented =
-        abs(sourceExtent.width - renderSize.width) < 1.0
-        && abs(sourceExtent.height - renderSize.height) < 1.0
+        abs(sourceExtent.width - baseWidth) < 1.0
+        && abs(sourceExtent.height - baseHeight) < 1.0
 
       if !preferredTransform.isIdentity && !alreadyOriented {
         output = output.transformed(by: preferredTransform)
+      }
+
+      if validDesqueeze > 1.02 {
+        let sx: CGFloat = isPortrait ? 1.0 : CGFloat(validDesqueeze)
+        let sy: CGFloat = isPortrait ? CGFloat(validDesqueeze) : 1.0
+        output = output.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
       }
 
       // Keep the origin at (0, 0) so the composition renders inside renderSize.
@@ -1801,7 +2023,7 @@ final class ExportProgressReporter {
 
       if anamorphic {
         let frameExtent = output.extent
-        let targetHeight = frameExtent.width / 2.39
+        let targetHeight = anamorphicCrop ? finalRenderHeight : (frameExtent.width / 2.39)
         if frameExtent.height > targetHeight + 0.5 {
           let barHeight = (frameExtent.height - targetHeight) / 2.0
           let activeRect = CGRect(
@@ -1810,9 +2032,15 @@ final class ExportProgressReporter {
             width: frameExtent.width,
             height: targetHeight
           )
-          let blackBackground = CIImage(color: .black).cropped(to: frameExtent)
-          output = output.cropped(to: activeRect)
-            .composited(over: blackBackground)
+          if anamorphicCrop {
+            output = output.cropped(to: activeRect).transformed(
+              by: CGAffineTransform(translationX: 0, y: -activeRect.origin.y)
+            )
+          } else {
+            let blackBackground = CIImage(color: .black).cropped(to: frameExtent)
+            output = output.cropped(to: activeRect)
+              .composited(over: blackBackground)
+          }
         }
       }
 
@@ -1898,6 +2126,9 @@ final class ExportProgressReporter {
     effects: FilmEffects?,
     importedLut: ImportedLut?,
     anamorphic: Bool,
+    anamorphicCrop: Bool = false,
+    desqueeze: Double = 1.0,
+    appleLogInput: Bool = false,
     fps: Int32,
     result: @escaping FlutterResult
   ) {
@@ -1934,6 +2165,9 @@ final class ExportProgressReporter {
         filmLook: filmLook,
         effectLook: effectLook,
         anamorphic: anamorphic,
+        anamorphicCrop: anamorphicCrop,
+        desqueeze: desqueeze,
+        appleLogInput: appleLogInput,
         frameRate: frameRate
       ) else {
         done.send(inputPath)
@@ -1942,7 +2176,7 @@ final class ExportProgressReporter {
 
       guard let exportSession = AVAssetExportSession(
         asset: asset,
-        presetName: AVAssetExportPresetHighestQuality
+        presetName: AppDelegate.bestVideoExportPreset(for: asset)
       ) else {
         done.send(
           FlutterError(
@@ -1989,6 +2223,8 @@ final class ExportProgressReporter {
     intensity: Double,
     effects: FilmEffects?,
     importedLut: ImportedLut?,
+    appleLogInput: Bool = false,
+    desqueeze: Double = 1.0,
     result: @escaping FlutterResult
   ) {
     let done = ReplyOnce(result)
@@ -2017,7 +2253,7 @@ final class ExportProgressReporter {
       return FilmEngine.effectsLook(effects)
     }()
 
-    if look == nil && effectLook == nil && isIdentityMatrix {
+    if look == nil && effectLook == nil && isIdentityMatrix && !appleLogInput && desqueeze <= 1.02 {
       done.send(inputPath)
       return
     }
@@ -2036,6 +2272,9 @@ final class ExportProgressReporter {
         filmLook: look,
         effectLook: effectLook,
         anamorphic: false,
+        anamorphicCrop: false,
+        desqueeze: desqueeze,
+        appleLogInput: appleLogInput,
         frameRate: 0
       ) else {
         done.send(inputPath)
@@ -2219,6 +2458,7 @@ final class ExportProgressReporter {
   ) {
     let params = PhotoEditor.Params.from(args)
     let (filmLook, effectLook) = AppDelegate.editorLooks(args: args)
+    let matrix = args["matrix"] as? [Double]
 
     DispatchQueue.global(qos: .userInitiated).async {
       var output: CIImage?
@@ -2230,7 +2470,7 @@ final class ExportProgressReporter {
         output = PhotoEditor.render(
           params,
           look: filmLook ?? effectLook,
-          matrix: nil,
+          matrix: filmLook == nil ? matrix : nil,
           source: source
         )
       }
@@ -2258,6 +2498,7 @@ final class ExportProgressReporter {
   ) {
     let params = PhotoEditor.Params.from(args)
     let (filmLook, effectLook) = AppDelegate.editorLooks(args: args)
+    let matrix = args["matrix"] as? [Double]
     let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.95
 
     DispatchQueue.global(qos: .userInitiated).async {
@@ -2266,7 +2507,7 @@ final class ExportProgressReporter {
         output = PhotoEditor.render(
           params,
           look: filmLook ?? effectLook,
-          matrix: nil,
+          matrix: filmLook == nil ? matrix : nil,
           source: source
         )
       }
@@ -2303,6 +2544,8 @@ final class ExportProgressReporter {
       0, 0, 1, 0, 0,
       0, 0, 0, 1, 0,
     ]
+    let customMatrix = (args["matrix"] as? [Double])
+    let activeMatrix = (filmLook == nil && customMatrix?.count == 20) ? (customMatrix ?? identity) : identity
     let asset = AVURLAsset(url: URL(fileURLWithPath: path))
     let outputURL = FileManager.default.temporaryDirectory
       .appendingPathComponent(
@@ -2313,7 +2556,7 @@ final class ExportProgressReporter {
     Task {
       guard let composition = await AppDelegate.gradedVideoComposition(
         asset: asset,
-        matrix: identity,
+        matrix: activeMatrix,
         filmLook: filmLook,
         effectLook: effectLook,
         anamorphic: false,
@@ -2332,7 +2575,7 @@ final class ExportProgressReporter {
 
       guard let exportSession = AVAssetExportSession(
         asset: asset,
-        presetName: AVAssetExportPresetHighestQuality
+        presetName: AppDelegate.bestVideoExportPreset(for: asset)
       ) else {
         done.send(
           FlutterError(
@@ -2747,29 +2990,45 @@ struct FilmEffects {
   let halation: Double
   let bloom: Double
   let vignette: Double
+  /// When true, built-in stocks keep their authentic halation, bloom, grain and
+  /// vignette instead of being overwritten by the manual sliders; `shadowDepth`
+  /// and `acutance` still apply on top.
+  let useStockEffects: Bool
+  /// Deep Film Toe / Chiaroscuro shadow depth (0…1). Deepens shadows below luma
+  /// 0.34 into clean velvety blacks while preserving sunlit highlight texture.
+  let shadowDepth: Double
+  /// Optical film micro-contrast / edge sharpness (0…1).
+  let acutance: Double
 
-  /// True when every effect is off, so the renderer can skip the passes.
+  /// True when every manual effect is off, so the renderer can skip the passes.
   var isNeutral: Bool {
     grain <= 0.001
       && halation <= 0.001
       && bloom <= 0.001
       && vignette <= 0.001
+      && shadowDepth <= 0.001
+      && acutance <= 0.001
   }
 
   static func from(_ args: [String: Any]) -> FilmEffects? {
     guard let raw = args["look"] as? [String: Any] else { return nil }
 
-    func unit(_ key: String) -> Double {
-      let value = (raw[key] as? NSNumber)?.doubleValue ?? 0
+    func unit(_ key: String, fallback: Double = 0) -> Double {
+      let value = (raw[key] as? NSNumber)?.doubleValue ?? fallback
       return min(max(value, 0), 1)
     }
+
+    let useStock = (raw["useStockEffects"] as? Bool) ?? false
 
     return FilmEffects(
       grain: unit("grain"),
       grainSize: unit("grainSize"),
       halation: unit("halation"),
       bloom: unit("bloom"),
-      vignette: unit("vignette")
+      vignette: unit("vignette"),
+      useStockEffects: useStock,
+      shadowDepth: unit("shadowDepth"),
+      acutance: unit("acutance")
     )
   }
 }
@@ -2841,7 +3100,11 @@ extension FilmStockParams {
   /// size as 0…1, which maps onto a 0.45–1.2 px blur so the result stays fine
   /// instead of turning into digital noise blocks.
   func withEffects(_ effects: FilmEffects) -> FilmStockParams {
-    FilmStockParams(
+    if effects.useStockEffects {
+      // Keep the stock's authentic tuned halation, bloom, grain and vignette!
+      return self
+    }
+    return FilmStockParams(
       mix: mix,
       ev: ev,
       k: k,
@@ -2886,8 +3149,14 @@ struct FilmLook {
   /// legacy behaviour of scaling them with [intensity].
   var effectScale: Double?
 
-  /// Renders the full look: colour cube, softness, halation, bloom, grain and
-  /// vignette. `frameIndex` moves the grain so video grain is alive.
+  /// Chiaroscuro deep shadow toe strength (0…1).
+  var shadowDepth: Double = 0.0
+
+  /// Optical micro-contrast acutance sharpness (0…1).
+  var acutance: Double = 0.18
+
+  /// Renders the full look: colour cube, deep shadow toe, optical acutance,
+  /// subtle softness, halation, bloom, grain and vignette.
   func apply(to image: CIImage, frameIndex: Int) -> CIImage {
     let extent = image.extent
     guard extent.width > 1, extent.height > 1,
@@ -2926,13 +3195,40 @@ struct FilmLook {
       }
     }
 
-    // 2. Softness: film is never as crisp as a digital sensor.
-    let soften = p.soften * fx
+    // 1b. Chiaroscuro Deep Shadow Toe: carves rich ink-black directional
+    //     shadows without crushing sunlit highlights.
+    if shadowDepth > 0.005 {
+      output = FilmEngine.applyShadowDepth(to: output, strength: shadowDepth)
+        .cropped(to: extent)
+    }
+
+    // 2. Optical sharpness vs subtle film softness: trim heavy blur so outputs
+    //    stay razor-sharp while preserving organic highlight roll-off.
+    let soften = p.soften * 0.42 * fx
     if soften > 0.001 {
       let blurred = output.clampedToExtent()
-        .applyingGaussianBlur(sigma: 0.9 * scale)
+        .applyingGaussianBlur(sigma: 0.75 * scale)
         .cropped(to: extent)
       output = FilmLook.scaled(blurred, by: soften).composited(over: output)
+    }
+
+    if acutance > 0.005 {
+      // Fine-radius luminance acutance gives Cooke/Leica prime-lens crispness
+      // without creating harsh digital halos.
+      output = output.applyingFilter(
+        "CISharpenLuminance",
+        parameters: [
+          "inputSharpness": CGFloat(acutance * 0.55),
+          "inputRadius": CGFloat(max(0.8, 1.35 * scale))
+        ]
+      ).cropped(to: extent)
+      output = output.applyingFilter(
+        "CIUnsharpMask",
+        parameters: [
+          "inputRadius": CGFloat(max(0.7, 1.15 * scale)),
+          "inputIntensity": CGFloat(acutance * 0.28)
+        ]
+      ).cropped(to: extent)
     }
 
     // 3. Halation: red-orange glow around highlights (light bouncing off the
@@ -3236,17 +3532,8 @@ enum FilmEngine {
     guard let toneId = toneId, let stock = stocks[toneId] else { return nil }
     let clamped = min(max(intensity, 0.0), 1.0)
     let params = effects.map { stock.withEffects($0) } ?? stock
-
-    if effects != nil {
-      // The colour cube does not depend on the effect strengths, so a
-      // per-capture cube is cheap; no cache entry is created for it.
-      return FilmLook(
-        params: params,
-        intensity: clamped,
-        cubeData: makeCube(params: params, intensity: clamped),
-        effectScale: 1.0
-      )
-    }
+    let shadowDepth = effects?.shadowDepth ?? 0.0
+    let acutance = effects?.acutance ?? 0.20
 
     let key = "\(toneId)-\(Int((clamped * 100.0).rounded()))"
 
@@ -3254,13 +3541,22 @@ enum FilmEngine {
     let cached = cubeCache[key]
     cacheLock.unlock()
 
-    let cube = cached ?? makeCube(params: params, intensity: clamped)
+    let cube = cached ?? makeCube(params: stock, intensity: clamped)
     if cached == nil {
       cacheLock.lock()
       cubeCache[key] = cube
       cacheLock.unlock()
     }
-    return FilmLook(params: params, intensity: clamped, cubeData: cube)
+
+    let useStock = effects == nil || effects?.useStockEffects == true
+    return FilmLook(
+      params: params,
+      intensity: clamped,
+      cubeData: cube,
+      effectScale: useStock ? nil : 1.0,
+      shadowDepth: shadowDepth,
+      acutance: acutance
+    )
   }
 
   /// Builds a look around an imported `.cube` payload.
@@ -3285,7 +3581,9 @@ enum FilmEngine {
       cubeSize: imported.dimension,
       cubeMix: imported.mix,
       usesCube: true,
-      effectScale: effects == nil ? nil : 1.0
+      effectScale: effects == nil ? nil : 1.0,
+      shadowDepth: effects?.shadowDepth ?? 0.0,
+      acutance: effects?.acutance ?? 0.20
     )
   }
 
@@ -3296,7 +3594,9 @@ enum FilmEngine {
       intensity: 1.0,
       cubeData: Data(),
       usesCube: false,
-      effectScale: 1.0
+      effectScale: 1.0,
+      shadowDepth: effects.shadowDepth,
+      acutance: effects.acutance
     )
   }
 
@@ -3450,9 +3750,167 @@ enum FilmEngine {
     return values.withUnsafeBufferPointer { Data(buffer: $0) }
   }
 
+  // MARK: Apple Log IDT & Chiaroscuro Deep Shadow Toe
+
+  private static var appleLogCubeCache: Data?
+  private static var shadowDepthCubeCache: [Int: Data] = [:]
+
+  /// Decodes Apple Log (per Apple Log Profile White Paper) into display-ready
+  /// sRGB/Rec.709 with smooth highlight roll-off so 3D film LUTs grade properly
+  /// instead of looking flat/washed out.
+  private static func appleLogToSrgb(_ x: Double) -> Double {
+    let r0 = -0.05641088
+    let rt = 0.01
+    let c = 47.28711236
+    let beta = 0.00964052
+    let gamma = 0.08550479
+    let delta = 0.69336945
+    let pt = c * pow(rt - r0, 2.0)
+
+    let lin: Double
+    if x < 0.0 {
+      lin = r0
+    } else if x < pt {
+      lin = sqrt(x / c) + r0
+    } else {
+      lin = pow(2.0, (x - delta) / gamma) - beta
+    }
+    // Filmic shoulder compression (Reinhard-inspired) keeps Apple Log's extra
+    // highlight latitude from hard-clipping when entering Rec.709 / sRGB.
+    let exposed = max(0.0, lin * 2.2)
+    let toneMapped = exposed / (1.0 + exposed * 0.72) * 1.18
+    return min(max(linearToSrgb(toneMapped), 0.0), 1.0)
+  }
+
+  static func applyAppleLogIDT(to image: CIImage) -> CIImage {
+    cacheLock.lock()
+    var cube = appleLogCubeCache
+    cacheLock.unlock()
+
+    if cube == nil {
+      let n = 33
+      let last = Double(n - 1)
+      var values = [Float]()
+      values.reserveCapacity(n * n * n * 4)
+      for bi in 0..<n {
+        for gi in 0..<n {
+          for ri in 0..<n {
+            values.append(Float(appleLogToSrgb(Double(ri) / last)))
+            values.append(Float(appleLogToSrgb(Double(gi) / last)))
+            values.append(Float(appleLogToSrgb(Double(bi) / last)))
+            values.append(1.0)
+          }
+        }
+      }
+      let built = values.withUnsafeBufferPointer { Data(buffer: $0) }
+      cacheLock.lock()
+      appleLogCubeCache = built
+      cacheLock.unlock()
+      cube = built
+    }
+
+    guard let cubeData = cube,
+          let filter = CIFilter(name: "CIColorCube") else {
+      return image
+    }
+    filter.setValue(image, forKey: kCIInputImageKey)
+    filter.setValue(33, forKey: "inputCubeDimension")
+    filter.setValue(cubeData, forKey: "inputCubeData")
+    return filter.outputImage?.cropped(to: image.extent) ?? image
+  }
+
+  /// Sculpted Deep Film Toe: deepens shadows below luma 0.36 toward velvety
+  /// ink-black while keeping sunlit highlights & textures untouched.
+  static func applyShadowDepth(to image: CIImage, strength: Double) -> CIImage {
+    let clamped = min(max(strength, 0.0), 1.0)
+    guard clamped > 0.005 else { return image }
+    let bucket = Int((clamped * 50.0).rounded())
+
+    cacheLock.lock()
+    var cube = shadowDepthCubeCache[bucket]
+    cacheLock.unlock()
+
+    if cube == nil {
+      let s = Double(bucket) / 50.0
+      let n = 33
+      let last = Double(n - 1)
+      var values = [Float]()
+      values.reserveCapacity(n * n * n * 4)
+      for bi in 0..<n {
+        for gi in 0..<n {
+          for ri in 0..<n {
+            let r = Double(ri) / last
+            let g = Double(gi) / last
+            let b = Double(bi) / last
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            // Smooth shadow mask: 1.0 at deep shadows, 0.0 above midtones (0.42)
+            let mask = 1.0 - smoothstep(0.02, 0.42, y)
+            // Deepen toe non-linearly toward rich ink-black + suppress shadow chroma mud
+            let toeGain = max(0.0, 1.0 - s * 0.82 * mask * (1.0 - y * 1.4))
+            let nr = min(max(r * toeGain, 0.0), 1.0)
+            let ng = min(max(g * toeGain, 0.0), 1.0)
+            let nb = min(max(b * toeGain, 0.0), 1.0)
+            values.append(Float(nr))
+            values.append(Float(ng))
+            values.append(Float(nb))
+            values.append(1.0)
+          }
+        }
+      }
+      let built = values.withUnsafeBufferPointer { Data(buffer: $0) }
+      cacheLock.lock()
+      if shadowDepthCubeCache.count > 16 { shadowDepthCubeCache.removeAll() }
+      shadowDepthCubeCache[bucket] = built
+      cacheLock.unlock()
+      cube = built
+    }
+
+    guard let cubeData = cube,
+          let filter = CIFilter(name: "CIColorCube") else {
+      return image
+    }
+    filter.setValue(image, forKey: kCIInputImageKey)
+    filter.setValue(33, forKey: "inputCubeDimension")
+    filter.setValue(cubeData, forKey: "inputCubeData")
+    return filter.outputImage?.cropped(to: image.extent) ?? image
+  }
+
   // MARK: Stocks
 
   private static let stocks: [String: FilmStockParams] = [
+      "leica_chiaroscuro": FilmStockParams(
+        mix: [1.04, -0.02, -0.02, -0.01, 1.02, -0.01, -0.02, 0.0, 1.02],
+        ev: -0.08,
+        k: [7.6, 7.5, 7.4], pivot: [0.50, 0.50, 0.51],
+        sat: 0.94, hlDesat: 0.22, shDesat: 0.35,
+        shadowTint: [-0.008, -0.008, -0.004], hlTint: [0.024, 0.016, -0.008],
+        black: 0.0, white: 0.985, mono: nil,
+        grain: 0.14, grainSize: 0.75,
+        halation: 0.12, bloom: 0.06,
+        vignette: 0.22, soften: 0.0
+      ),
+      "arri_alexa_709": FilmStockParams(
+        mix: [1.05, -0.03, -0.02, -0.01, 1.03, -0.02, -0.02, 0.01, 1.01],
+        ev: -0.02,
+        k: [5.9, 5.8, 5.6], pivot: [0.52, 0.52, 0.53],
+        sat: 1.04, hlDesat: 0.26, shDesat: 0.10,
+        shadowTint: [-0.006, 0.004, 0.016], hlTint: [0.022, 0.014, -0.012],
+        black: 0.008, white: 0.98, mono: nil,
+        grain: 0.16, grainSize: 0.85,
+        halation: 0.22, bloom: 0.10,
+        vignette: 0.14, soften: 0.02
+      ),
+      "kodak_trix_400": FilmStockParams(
+        mix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        ev: -0.06,
+        k: [7.8, 7.8, 7.8], pivot: [0.51, 0.51, 0.51],
+        sat: 1.0, hlDesat: 0.0, shDesat: 0.0,
+        shadowTint: [0.0, 0.0, 0.0], hlTint: [0.0, 0.0, 0.0],
+        black: 0.0, white: 0.985, mono: [0.36, 0.54, 0.10],
+        grain: 0.44, grainSize: 1.15,
+        halation: 0.18, bloom: 0.08,
+        vignette: 0.28, soften: 0.0
+      ),
       "kodak_2383": FilmStockParams(
         mix: [1.06, -0.03, -0.03, -0.02, 1.04, -0.02, -0.04, -0.01, 1.05],
         ev: -0.04,
@@ -4031,10 +4489,15 @@ enum PhotoEditor {
     let extent = source.extent
     var output = applyColor(params, to: source)
 
-    if let look = look {
+    if let look = look, look.usesCube {
       output = look.apply(to: output, frameIndex: frameIndex)
-    } else if let matrix = matrix, matrix.count == 20 {
-      output = AppDelegate.colorMatrixImage(matrix, to: output)
+    } else {
+      if let matrix = matrix, matrix.count == 20 {
+        output = AppDelegate.colorMatrixImage(matrix, to: output)
+      }
+      if let look = look {
+        output = look.apply(to: output, frameIndex: frameIndex)
+      }
     }
 
     output = applyFinish(params, to: output, frameIndex: frameIndex)
@@ -4605,5 +5068,40 @@ final class MediaImporter: NSObject, PHPickerViewControllerDelegate {
       destinationOptions as CFDictionary
     )
     return CGImageDestinationFinalize(destination)
+  }
+}
+
+/// Captures a single Bayer RAW photo for Process Zero (zero Apple Smart HDR).
+final class ProcessZeroPhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+  private let lock = NSLock()
+  private var finished = false
+  private let completion: (Data?) -> Void
+
+  init(completion: @escaping (Data?) -> Void) {
+    self.completion = completion
+    super.init()
+  }
+
+  private func deliver(_ data: Data?) {
+    lock.lock()
+    if finished {
+      lock.unlock()
+      return
+    }
+    finished = true
+    lock.unlock()
+    completion(data)
+  }
+
+  func photoOutput(
+    _ output: AVCapturePhotoOutput,
+    didFinishProcessingPhoto photo: AVCapturePhoto,
+    error: Error?
+  ) {
+    if error != nil {
+      deliver(nil)
+      return
+    }
+    deliver(photo.fileDataRepresentation())
   }
 }

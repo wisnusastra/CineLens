@@ -14,6 +14,10 @@ class AppConstants {
   static const String prefFilmLookJson = 'film_look_json';
   static const String prefBakeLookIntoProRes = 'bake_look_into_prores';
   static const String prefToneIntensityFullV2 = 'tone_intensity_full_v2';
+  static const String prefProcessZeroRaw = 'process_zero_raw_photo';
+  static const String prefAnamorphicCrop = 'anamorphic_true_crop';
+  static const String prefAnamorphicDesqueeze = 'anamorphic_desqueeze_factor';
+  static const String prefHighlightMetering = 'highlight_weighted_metering';
 
   /// Set once the first-install opening clip has been shown. Keeping this as a
   /// versioned key means a future opening can be shown again if needed.
