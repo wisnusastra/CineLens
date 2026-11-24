@@ -396,6 +396,23 @@ final class ExportProgressReporter {
         let fps = (args["fps"] as? NSNumber)?.int32Value ?? 30
         self?.editorExportVideo(args: args, path: path, fps: fps, result: result)
 
+      case "editorAutoTone":
+        guard let args = call.arguments as? [String: Any],
+              let path = args["path"] as? String else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        let isVideo = (args["isVideo"] as? Bool) ?? false
+        self?.editorAutoTone(path: path, isVideo: isVideo, result: result)
+
+      case "editorHistogram":
+        guard let args = call.arguments as? [String: Any],
+              let bytes = (args["bytes"] as? FlutterStandardTypedData)?.data else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        self?.editorHistogram(bytes: bytes, result: result)
+
       case "importMediaFromPhotos":
         let args = call.arguments as? [String: Any] ?? [:]
         let limit = (args["limit"] as? NSNumber)?.intValue ?? 40
@@ -1953,6 +1970,14 @@ final class ExportProgressReporter {
 
     var finalRenderWidth = desqueezedWidth
     var finalRenderHeight = desqueezedHeight
+    if let edit = edit, edit.hasGeometryChanges {
+      let geoSize = PhotoEditor.outputSize(
+        for: CGSize(width: finalRenderWidth, height: finalRenderHeight),
+        params: edit
+      )
+      finalRenderWidth = geoSize.width
+      finalRenderHeight = geoSize.height
+    }
     if anamorphic && anamorphicCrop {
       let targetH = (desqueezedWidth / 2.39).rounded()
       if desqueezedHeight > targetH + 1.0 {
@@ -1979,7 +2004,24 @@ final class ExportProgressReporter {
         let frameIndex = Int(
           (request.compositionTime.seconds * Double(fps)).rounded()
         )
-        output = PhotoEditor.applyColor(edit, to: sourceImg)
+        let alreadyOrientedForEdit =
+          abs(sourceExtent.width - baseWidth) < 1.0
+          && abs(sourceExtent.height - baseHeight) < 1.0
+        var oriented = sourceImg
+        if !preferredTransform.isIdentity && !alreadyOrientedForEdit {
+          oriented = oriented.transformed(by: preferredTransform)
+        }
+        if oriented.extent.origin != .zero {
+          oriented = oriented.transformed(
+            by: CGAffineTransform(
+              translationX: -oriented.extent.origin.x,
+              y: -oriented.extent.origin.y
+            )
+          )
+        }
+        output = PhotoEditor.applyGeometryAndOptics(edit, to: oriented)
+        output = PhotoEditor.applyColor(edit, to: output)
+        output = PhotoEditor.applyMasks(edit, to: output)
         if let look = filmLook {
           output = look.apply(to: output, frameIndex: frameIndex, isVideo: true)
         } else if let look = effectLook {
@@ -1990,7 +2032,18 @@ final class ExportProgressReporter {
         } else if matrix.count == 20 {
           output = AppDelegate.colorMatrixImage(matrix, to: output)
         }
+        output = PhotoEditor.applyLensBlur(edit, to: output)
         output = PhotoEditor.applyFinish(edit, to: output, frameIndex: frameIndex)
+        if output.extent.origin != .zero {
+          output = output.transformed(
+            by: CGAffineTransform(
+              translationX: -output.extent.origin.x,
+              y: -output.extent.origin.y
+            )
+          )
+        }
+        request.finish(with: output, context: gradingContext)
+        return
       } else if let look = filmLook {
         // The compositor time gives every frame its own grain pattern.
         let frameIndex = Int(
@@ -2623,6 +2676,37 @@ final class ExportProgressReporter {
         channel: self.nativeChannel,
         done: done
       )
+    }
+  }
+
+  private func editorAutoTone(
+    path: String,
+    isVideo: Bool,
+    result: @escaping FlutterResult
+  ) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      let image = PhotoEditor.previewImage(
+        path: path,
+        isVideo: isVideo,
+        maxDimension: 512
+      )
+      let tone = image.map { PhotoEditor.computeAutoTone(for: $0) } ?? [:]
+      DispatchQueue.main.async {
+        result(tone)
+      }
+    }
+  }
+
+  private func editorHistogram(
+    bytes: Data,
+    result: @escaping FlutterResult
+  ) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      let image = CIImage(data: bytes)
+      let hist = image.map { PhotoEditor.computeHistogram(for: $0) } ?? [:]
+      DispatchQueue.main.async {
+        result(hist)
+      }
     }
   }
 }
@@ -4237,6 +4321,102 @@ enum PhotoEditor {
     let y: Double
   }
 
+  struct ColorWheelParams {
+    var hue: Double = 0
+    var saturation: Double = 0
+    var luminance: Double = 0
+
+    var isNeutral: Bool {
+      saturation <= 0.001 && abs(luminance) < 0.001
+    }
+
+    static func from(_ raw: Any?) -> ColorWheelParams {
+      guard let map = raw as? [String: Any] else { return ColorWheelParams() }
+      var h = ((map["hue"] as? NSNumber)?.doubleValue ?? 0)
+        .truncatingRemainder(dividingBy: 360.0)
+      if h < 0 { h += 360.0 }
+      let s = min(max((map["sat"] as? NSNumber)?.doubleValue ?? 0, 0), 1)
+      let l = min(max((map["lum"] as? NSNumber)?.doubleValue ?? 0, -1), 1)
+      return ColorWheelParams(hue: h, saturation: s, luminance: l)
+    }
+  }
+
+  struct ColorGradingParams {
+    var shadows = ColorWheelParams()
+    var midtones = ColorWheelParams()
+    var highlights = ColorWheelParams()
+    var blending: Double = 0.5
+    var balance: Double = 0.0
+
+    var isNeutral: Bool {
+      shadows.isNeutral && midtones.isNeutral && highlights.isNeutral
+    }
+
+    static func from(_ raw: Any?) -> ColorGradingParams {
+      guard let map = raw as? [String: Any] else { return ColorGradingParams() }
+      return ColorGradingParams(
+        shadows: ColorWheelParams.from(map["shadows"]),
+        midtones: ColorWheelParams.from(map["midtones"]),
+        highlights: ColorWheelParams.from(map["highlights"]),
+        blending: min(max((map["blending"] as? NSNumber)?.doubleValue ?? 0.5, 0), 1),
+        balance: min(max((map["balance"] as? NSNumber)?.doubleValue ?? 0, -1), 1)
+      )
+    }
+  }
+
+  struct MaskParams {
+    var isLinear: Bool = false
+    var startX: Double = 0.5
+    var startY: Double = 0.5
+    var endX: Double = 0.82
+    var endY: Double = 0.5
+    var feather: Double = 0.5
+    var inverted: Bool = false
+    var exposure: Double = 0
+    var contrast: Double = 0
+    var highlights: Double = 0
+    var shadows: Double = 0
+    var temperature: Double = 0
+    var saturation: Double = 0
+    var clarity: Double = 0
+    var sharpen: Double = 0
+
+    var isNeutral: Bool {
+      abs(exposure) < 0.001
+        && abs(contrast) < 0.001
+        && abs(highlights) < 0.001
+        && abs(shadows) < 0.001
+        && abs(temperature) < 0.001
+        && abs(saturation) < 0.001
+        && abs(clarity) < 0.001
+        && sharpen < 0.001
+    }
+
+    static func from(_ raw: Any?) -> MaskParams? {
+      guard let map = raw as? [String: Any] else { return nil }
+      func num(_ key: String, fallback: Double = 0) -> Double {
+        (map[key] as? NSNumber)?.doubleValue ?? fallback
+      }
+      var m = MaskParams()
+      m.isLinear = (map["type"] as? String) == "linear"
+      m.startX = min(max(num("startX", fallback: 0.5), 0), 1)
+      m.startY = min(max(num("startY", fallback: m.isLinear ? 0.15 : 0.5), 0), 1)
+      m.endX = min(max(num("endX", fallback: m.isLinear ? 0.5 : 0.82), 0), 1)
+      m.endY = min(max(num("endY", fallback: m.isLinear ? 0.55 : 0.5), 0), 1)
+      m.feather = min(max(num("feather", fallback: 0.5), 0.05), 1)
+      m.inverted = (map["inverted"] as? Bool) ?? false
+      m.exposure = min(max(num("exposure"), -2), 2)
+      m.contrast = min(max(num("contrast"), -1), 1)
+      m.highlights = min(max(num("highlights"), -1), 1)
+      m.shadows = min(max(num("shadows"), -1), 1)
+      m.temperature = min(max(num("temperature"), -1), 1)
+      m.saturation = min(max(num("saturation"), -1), 1)
+      m.clarity = min(max(num("clarity"), -1), 1)
+      m.sharpen = min(max(num("sharpen"), 0), 1)
+      return m
+    }
+  }
+
   struct Params {
     var exposure: Double = 0
     var contrast: Double = 0
@@ -4248,32 +4428,69 @@ enum PhotoEditor {
     var tint: Double = 0
     var vibrance: Double = 0
     var saturation: Double = 0
+    var blackAndWhite: Bool = false
     var clarity: Double = 0
     var texture: Double = 0
     var dehaze: Double = 0
     var fade: Double = 0
     var grain: Double = 0
+    var grainSize: Double = 0.25
+    var grainRoughness: Double = 0.5
     var vignette: Double = 0
+    var vignetteMidpoint: Double = 0.5
+    var vignetteFeather: Double = 0.5
+    var vignetteRoundness: Double = 0.0
     var sharpen: Double = 0
+    var sharpenRadius: Double = 0.35
     var noiseReduction: Double = 0
+    var colorNoiseReduction: Double = 0
+    var lensDistortion: Double = 0
+    var opticsVignette: Double = 0
+    var defringe: Double = 0
+    var cropAspect: String = "original"
+    var rotateQuarterTurns: Int = 0
+    var flipHorizontal: Bool = false
+    var flipVertical: Bool = false
+    var straightenDegrees: Double = 0
+    var verticalPerspective: Double = 0
+    var horizontalPerspective: Double = 0
+    var blurAmount: Double = 0
+    var blurStyle: String = "radial"
+    var blurCenterX: Double = 0.5
+    var blurCenterY: Double = 0.5
+    var blurRadius: Double = 0.32
+    var blurFeather: Double = 0.45
+    var blurBokehBoost: Double = 0.25
     var curveRgb: [CurvePoint] = []
     var curveRed: [CurvePoint] = []
     var curveGreen: [CurvePoint] = []
     var curveBlue: [CurvePoint] = []
     var hsl: [[Double]] = Array(repeating: [0, 0, 0], count: 8)
+    var colorGrading = ColorGradingParams()
+    var masks: [MaskParams] = []
+
+    var hasGeometryChanges: Bool {
+      cropAspect != "original"
+        || rotateQuarterTurns != 0
+        || flipHorizontal
+        || flipVertical
+        || abs(straightenDegrees) > 0.05
+        || abs(verticalPerspective) > 0.001
+        || abs(horizontalPerspective) > 0.001
+    }
 
     static func from(_ args: [String: Any]) -> Params {
       var params = Params()
       guard let raw = args["edit"] as? [String: Any] else { return params }
 
-      func number(_ key: String) -> Double {
-        (raw[key] as? NSNumber)?.doubleValue ?? 0
+      func number(_ key: String, fallback: Double = 0) -> Double {
+        (raw[key] as? NSNumber)?.doubleValue ?? fallback
       }
       func signed(_ key: String) -> Double {
         min(max(number(key), -1), 1)
       }
-      func positive(_ key: String) -> Double {
-        min(max(number(key), 0), 1)
+      func positive(_ key: String, fallback: Double = 0) -> Double {
+        min(max(number(key, fallback: fallback), 0), 1)
       }
       func curve(_ value: Any?) -> [CurvePoint] {
         guard let rows = value as? [Any] else { return [] }
@@ -4300,18 +4517,45 @@ enum PhotoEditor {
       params.tint = signed("tint")
       params.vibrance = signed("vibrance")
       params.saturation = signed("saturation")
+      params.blackAndWhite = (raw["blackAndWhite"] as? Bool) ?? false
       params.clarity = signed("clarity")
       params.texture = signed("texture")
       params.dehaze = signed("dehaze")
       params.fade = positive("fade")
       params.grain = positive("grain")
+      params.grainSize = positive("grainSize", fallback: 0.25)
+      params.grainRoughness = positive("grainRoughness", fallback: 0.5)
       params.vignette = positive("vignette")
+      params.vignetteMidpoint = positive("vignetteMidpoint", fallback: 0.5)
+      params.vignetteFeather = positive("vignetteFeather", fallback: 0.5)
+      params.vignetteRoundness = signed("vignetteRoundness")
       params.sharpen = positive("sharpen")
+      params.sharpenRadius = positive("sharpenRadius", fallback: 0.35)
       params.noiseReduction = positive("noiseReduction")
+      params.colorNoiseReduction = positive("colorNoiseReduction")
+      params.lensDistortion = signed("lensDistortion")
+      params.opticsVignette = positive("opticsVignette")
+      params.defringe = positive("defringe")
+      params.cropAspect = (raw["cropAspect"] as? String) ?? "original"
+      let rawTurns = (raw["rotateQuarterTurns"] as? NSNumber)?.intValue ?? 0
+      params.rotateQuarterTurns = ((rawTurns % 4) + 4) % 4
+      params.flipHorizontal = (raw["flipHorizontal"] as? Bool) ?? false
+      params.flipVertical = (raw["flipVertical"] as? Bool) ?? false
+      params.straightenDegrees = min(max(number("straightenDegrees"), -45), 45)
+      params.verticalPerspective = signed("verticalPerspective")
+      params.horizontalPerspective = signed("horizontalPerspective")
+      params.blurAmount = positive("blurAmount")
+      params.blurStyle = (raw["blurStyle"] as? String) == "linear" ? "linear" : "radial"
+      params.blurCenterX = positive("blurCenterX", fallback: 0.5)
+      params.blurCenterY = positive("blurCenterY", fallback: 0.5)
+      params.blurRadius = min(max(number("blurRadius", fallback: 0.32), 0.05), 0.9)
+      params.blurFeather = min(max(number("blurFeather", fallback: 0.45), 0.05), 1.0)
+      params.blurBokehBoost = positive("blurBokehBoost", fallback: 0.25)
       params.curveRgb = curve(raw["curveRgb"])
       params.curveRed = curve(raw["curveRed"])
       params.curveGreen = curve(raw["curveGreen"])
       params.curveBlue = curve(raw["curveBlue"])
+      params.colorGrading = ColorGradingParams.from(raw["colorGrading"])
 
       if let rows = raw["hsl"] as? [Any] {
         for index in 0..<min(rows.count, 8) {
@@ -4325,11 +4569,226 @@ enum PhotoEditor {
           ]
         }
       }
+      if let rawMasks = raw["masks"] as? [Any] {
+        params.masks = rawMasks.compactMap { MaskParams.from($0) }
+      }
       return params
     }
   }
 
+  // MARK: Geometry & Optics
+
+  private static func aspectRatioValue(for key: String) -> CGFloat? {
+    switch key {
+    case "1:1": return 1.0
+    case "4:5": return 4.0 / 5.0
+    case "3:4": return 3.0 / 4.0
+    case "2:3": return 2.0 / 3.0
+    case "4:3": return 4.0 / 3.0
+    case "3:2": return 3.0 / 2.0
+    case "16:9": return 16.0 / 9.0
+    case "9:16": return 9.0 / 16.0
+    case "2.39:1": return 2.39
+    default: return nil
+    }
+  }
+
+  /// Final pixel size after rotation and aspect crop (used by video export).
+  static func outputSize(for baseSize: CGSize, params: Params) -> CGSize {
+    var w = baseSize.width
+    var h = baseSize.height
+    if params.rotateQuarterTurns % 2 == 1 {
+      swap(&w, &h)
+    }
+    if let targetRatio = aspectRatioValue(for: params.cropAspect),
+       w > 1, h > 1 {
+      let current = w / h
+      if current > targetRatio {
+        w = h * targetRatio
+      } else {
+        h = w / targetRatio
+      }
+    }
+    return CGSize(
+      width: max(2, floor(w / 2.0) * 2.0),
+      height: max(2, floor(h / 2.0) * 2.0)
+    )
+  }
+
+  private static func reorigin(_ image: CIImage) -> CIImage {
+    let ext = image.extent
+    guard ext.origin != .zero, ext.origin.x.isFinite, ext.origin.y.isFinite else {
+      return image
+    }
+    return image.transformed(
+      by: CGAffineTransform(translationX: -ext.origin.x, y: -ext.origin.y)
+    )
+  }
+
+  static func applyGeometryAndOptics(_ params: Params, to image: CIImage) -> CIImage {
+    var output = reorigin(image)
+    let initialExtent = output.extent
+    guard initialExtent.width > 1, initialExtent.height > 1 else { return image }
+
+    // 1. 90-degree quarter turns (clockwise in UI = negative angle in Core Image Y-up).
+    if params.rotateQuarterTurns != 0 {
+      let angle = -CGFloat.pi / 2.0 * CGFloat(params.rotateQuarterTurns)
+      output = reorigin(output.transformed(by: CGAffineTransform(rotationAngle: angle)))
+    }
+
+    // 2. Flip horizontal / vertical.
+    if params.flipHorizontal || params.flipVertical {
+      let sx: CGFloat = params.flipHorizontal ? -1.0 : 1.0
+      let sy: CGFloat = params.flipVertical ? -1.0 : 1.0
+      output = reorigin(output.transformed(by: CGAffineTransform(scaleX: sx, y: sy)))
+    }
+
+    // 3. Lens barrel/pincushion distortion correction.
+    if abs(params.lensDistortion) > 0.005 {
+      let ext = output.extent
+      let radius = hypot(ext.width, ext.height) * 0.65
+      let scale = CGFloat(params.lensDistortion * 0.42)
+      let distorted = output.clampedToExtent().applyingFilter(
+        "CIBumpDistortion",
+        parameters: [
+          kCIInputCenterKey: CIVector(x: ext.midX, y: ext.midY),
+          kCIInputRadiusKey: radius,
+          kCIInputScaleKey: scale
+        ]
+      ).cropped(to: ext)
+      output = reorigin(distorted)
+    }
+
+    // 4. Perspective keystone correction (vertical & horizontal).
+    if abs(params.verticalPerspective) > 0.005 || abs(params.horizontalPerspective) > 0.005 {
+      let ext = output.extent
+      let w = ext.width
+      let h = ext.height
+      let vx = CGFloat(params.verticalPerspective) * w * 0.16
+      let hy = CGFloat(params.horizontalPerspective) * h * 0.16
+
+      let topLeft = CGPoint(x: max(0, vx), y: h - max(0, -hy))
+      let topRight = CGPoint(x: w - max(0, vx), y: h - max(0, hy))
+      let bottomLeft = CGPoint(x: max(0, -vx), y: max(0, -hy))
+      let bottomRight = CGPoint(x: w - max(0, -vx), y: max(0, hy))
+
+      if let filter = CIFilter(name: "CIPerspectiveTransform") {
+        filter.setValue(output, forKey: kCIInputImageKey)
+        filter.setValue(CIVector(cgPoint: topLeft), forKey: "inputTopLeft")
+        filter.setValue(CIVector(cgPoint: topRight), forKey: "inputTopRight")
+        filter.setValue(CIVector(cgPoint: bottomRight), forKey: "inputBottomRight")
+        filter.setValue(CIVector(cgPoint: bottomLeft), forKey: "inputBottomLeft")
+        if let warped = filter.outputImage {
+          let insetX = abs(vx)
+          let insetY = abs(hy)
+          let safeRect = CGRect(
+            x: insetX,
+            y: insetY,
+            width: max(2, w - insetX * 2.0),
+            height: max(2, h - insetY * 2.0)
+          )
+          output = reorigin(warped.cropped(to: safeRect))
+        }
+      }
+    }
+
+    // 5. Straighten (-45°…+45°) with inscribed auto-crop so corners stay clean.
+    if abs(params.straightenDegrees) > 0.05 {
+      let ext = output.extent
+      let w = ext.width
+      let h = ext.height
+      let rad = CGFloat(-params.straightenDegrees * Double.pi / 180.0)
+      let absCos = abs(cos(rad))
+      let absSin = abs(sin(rad))
+      // Largest axis-aligned rectangle of the same aspect inside rotated rect.
+      let scaleFactor = max(
+        absCos + (h / max(w, 1)) * absSin,
+        absCos + (w / max(h, 1)) * absSin
+      )
+      let cx = w / 2.0
+      let cy = h / 2.0
+      var transform = CGAffineTransform.identity
+      transform = transform.translatedBy(x: cx, y: cy)
+      transform = transform.scaledBy(x: scaleFactor, y: scaleFactor)
+      transform = transform.rotated(by: rad)
+      transform = transform.translatedBy(x: -cx, y: -cy)
+      output = reorigin(output.transformed(by: transform).cropped(to: ext))
+    }
+
+    // 6. Aspect ratio centre crop.
+    if let targetRatio = aspectRatioValue(for: params.cropAspect) {
+      let ext = output.extent
+      let current = ext.width / max(ext.height, 1)
+      let cropW: CGFloat
+      let cropH: CGFloat
+      if current > targetRatio {
+        cropH = ext.height
+        cropW = ext.height * targetRatio
+      } else {
+        cropW = ext.width
+        cropH = ext.width / targetRatio
+      }
+      let rect = CGRect(
+        x: ext.midX - cropW / 2.0,
+        y: ext.midY - cropH / 2.0,
+        width: max(2, cropW.rounded()),
+        height: max(2, cropH.rounded())
+      )
+      output = reorigin(output.cropped(to: rect))
+    }
+
+    // 7. Optics vignette correction (lifts dark lens corners cleanly in 16-bit).
+    if params.opticsVignette > 0.005 {
+      let ext = output.extent
+      let corner = hypot(ext.width, ext.height) / 2.0
+      let brightened = output.applyingFilter(
+        "CIExposureAdjust",
+        parameters: ["inputEV": params.opticsVignette * 0.85]
+      )
+      if let mask = CIFilter(
+        name: "CIRadialGradient",
+        parameters: [
+          "inputCenter": CIVector(x: ext.midX, y: ext.midY),
+          "inputRadius0": corner * 0.38,
+          "inputRadius1": corner * 1.02,
+          "inputColor0": CIColor(red: 0, green: 0, blue: 0, alpha: 1),
+          "inputColor1": CIColor(red: 1, green: 1, blue: 1, alpha: 1)
+        ]
+      )?.outputImage?.cropped(to: ext) {
+        output = brightened.applyingFilter(
+          "CIBlendWithMask",
+          parameters: [
+            kCIInputBackgroundImageKey: output,
+            kCIInputMaskImageKey: mask
+          ]
+        ).cropped(to: ext)
+      }
+    }
+
+    return output
+  }
+
   // MARK: Pipeline
+
+  private static func applyCube(_ cubeData: Data, dimension: Int, to image: CIImage) -> CIImage {
+    if let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
+       let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+      filter.setValue(image, forKey: kCIInputImageKey)
+      filter.setValue(dimension, forKey: "inputCubeDimension")
+      filter.setValue(cubeData, forKey: "inputCubeData")
+      filter.setValue(srgb, forKey: "inputColorSpace")
+      if let out = filter.outputImage {
+        return out.cropped(to: image.extent)
+      }
+    }
+    return image.applyingFilter(
+      "CIColorCube",
+      parameters: [
+        "inputCubeDimension": dimension,
+        "inputCubeData": cubeData
+      ]
+    ).cropped(to: image.extent)
+  }
 
   /// Colour and detail half of the edit. Used directly by the video
   /// compositor, which then layers the film look and the grain itself.
@@ -4365,43 +4824,48 @@ enum PhotoEditor {
     }
 
     // 3. Basic sliders + point curves, baked into a 33³ colour cube.
-    //    CIColorCurves silently misread the 32-bit float curve data on iOS and
-    //    turned contrast/shadow/fade into random channel values (the "broken
-    //    TV" colours). CIColorCube uses the same RGBA-float layout as the HSL
-    //    cube below, so preview and export decode it identically everywhere.
     if let cube = toneCube(params) {
-      output = output.applyingFilter(
-        "CIColorCube",
-        parameters: [
-          "inputCubeDimension": 33,
-          "inputCubeData": cube
-        ]
-      )
+      output = applyCube(cube, dimension: 33, to: output)
     }
 
-    // 4. Colour Mix (HSL) as a 17³ cube.
+    // 4. Colour Mix (HSL) as a 17³ cube (also drives B&W tonal luminance mix!).
     if let cube = hslCube(params) {
-      output = output.applyingFilter(
-        "CIColorCube",
-        parameters: [
-          "inputCubeDimension": 17,
-          "inputCubeData": cube
-        ]
-      )
+      output = applyCube(cube, dimension: 17, to: output)
     }
 
-    // 5. Vibrance then saturation.
-    if abs(params.vibrance) > 0.001 {
-      output = output.applyingFilter(
-        "CIVibrance",
-        parameters: ["inputAmount": params.vibrance]
-      )
+    // 4b. Defringe (purple/magenta & green chromatic aberration suppression).
+    if params.defringe > 0.005, let cube = defringeCube(amount: params.defringe) {
+      output = applyCube(cube, dimension: 17, to: output)
     }
-    if abs(params.saturation) > 0.001 {
+
+    // 4c. 3-Way Color Grading (Shadows / Midtones / Highlights wheels).
+    if let cube = colorGradingCube(params.colorGrading) {
+      output = applyCube(cube, dimension: 33, to: output)
+    }
+
+    // 5. Panchromatic Black & White OR Vibrance + Saturation.
+    if params.blackAndWhite {
       output = output.applyingFilter(
-        "CIColorControls",
-        parameters: ["inputSaturation": 1.0 + params.saturation]
+        "CIColorMatrix",
+        parameters: [
+          "inputRVector": CIVector(x: 0.299, y: 0.587, z: 0.114, w: 0),
+          "inputGVector": CIVector(x: 0.299, y: 0.587, z: 0.114, w: 0),
+          "inputBVector": CIVector(x: 0.299, y: 0.587, z: 0.114, w: 0)
+        ]
       )
+    } else {
+      if abs(params.vibrance) > 0.001 {
+        output = output.applyingFilter(
+          "CIVibrance",
+          parameters: ["inputAmount": params.vibrance]
+        )
+      }
+      if abs(params.saturation) > 0.001 {
+        output = output.applyingFilter(
+          "CIColorControls",
+          parameters: ["inputSaturation": 1.0 + params.saturation]
+        )
+      }
     }
 
     // 6. Clarity and texture: local contrast with opposite signs softening.
@@ -4449,28 +4913,222 @@ enum PhotoEditor {
       }
     }
 
-    // 7. Detail: noise reduction first, then sharpening.
+    // 7. Detail: chroma-only Color NR, luminance NR, then micro-radius sharpening.
+    if params.colorNoiseReduction > 0.005 {
+      // Blur chroma only while keeping 100% sharp original luminance via
+      // CILuminosityBlendMode — eliminates color speckle with zero oil-painting!
+      let chromaBlurred = output.clampedToExtent()
+        .applyingGaussianBlur(sigma: (1.0 + params.colorNoiseReduction * 3.0) * scale)
+        .cropped(to: extent)
+      output = output.applyingFilter(
+        "CILuminosityBlendMode",
+        parameters: [kCIInputBackgroundImageKey: chromaBlurred]
+      ).cropped(to: extent)
+    }
     if params.noiseReduction > 0.001 {
       output = output.applyingFilter(
         "CINoiseReduction",
         parameters: [
-          "inputNoiseLevel": 0.02 + params.noiseReduction * 0.05,
-          "inputSharpness": 0.4
+          "inputNoiseLevel": 0.015 + params.noiseReduction * 0.045,
+          "inputSharpness": 0.45
         ]
       )
     }
     if params.sharpen > 0.001 {
+      let radius = max(0.45, (0.45 + params.sharpenRadius * 1.45) * scale)
       output = output.applyingFilter(
         "CISharpenLuminance",
-        parameters: ["inputSharpness": params.sharpen * 1.2]
+        parameters: [
+          "inputSharpness": params.sharpen * 0.95,
+          "inputRadius": radius
+        ]
       )
     }
 
     return output.cropped(to: extent)
   }
 
-  /// Grain and vignette, layered after the film look so they act on the final
-  /// graded image just like a light leak or a lens would.
+  /// Applies layered selective gradient masks (Linear & Radial) with local
+  /// exposure, contrast, highlights, shadows, temperature, saturation, clarity
+  /// and sharpness.
+  static func applyMasks(_ params: Params, to image: CIImage) -> CIImage {
+    let active = params.masks.filter { !$0.isNeutral }
+    guard !active.isEmpty else { return image }
+    let extent = image.extent
+    let w = extent.width
+    let h = extent.height
+    guard w > 1, h > 1 else { return image }
+
+    var output = image
+    for mask in active {
+      let sx = extent.minX + CGFloat(mask.startX) * w
+      let sy = extent.minY + CGFloat(1.0 - mask.startY) * h
+      let ex = extent.minX + CGFloat(mask.endX) * w
+      let ey = extent.minY + CGFloat(1.0 - mask.endY) * h
+
+      var matte: CIImage?
+      if mask.isLinear {
+        let dx = ex - sx
+        let dy = ey - sy
+        let midX = (sx + ex) * 0.5
+        let midY = (sy + ey) * 0.5
+        let spread = CGFloat(max(0.08, mask.feather))
+        let p0 = CIVector(x: midX - dx * 0.5 * spread, y: midY - dy * 0.5 * spread)
+        let p1 = CIVector(x: midX + dx * 0.5 * spread, y: midY + dy * 0.5 * spread)
+        matte = CIFilter(
+          name: "CILinearGradient",
+          parameters: [
+            "inputPoint0": p0,
+            "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 1),
+            "inputPoint1": p1,
+            "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+          ]
+        )?.outputImage?.cropped(to: extent)
+      } else {
+        let outerR = max(8.0, hypot(ex - sx, ey - sy))
+        let innerR = max(0.0, outerR * CGFloat(1.0 - mask.feather))
+        matte = CIFilter(
+          name: "CIRadialGradient",
+          parameters: [
+            "inputCenter": CIVector(x: sx, y: sy),
+            "inputRadius0": innerR,
+            "inputRadius1": outerR,
+            "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 1),
+            "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+          ]
+        )?.outputImage?.cropped(to: extent)
+      }
+
+      guard var maskImage = matte else { continue }
+      if mask.inverted {
+        maskImage = maskImage.applyingFilter("CIColorInvert").cropped(to: extent)
+      }
+
+      var localParams = Params()
+      localParams.exposure = mask.exposure
+      localParams.contrast = mask.contrast
+      localParams.highlights = mask.highlights
+      localParams.shadows = mask.shadows
+      localParams.temperature = mask.temperature
+      localParams.saturation = mask.saturation
+      localParams.clarity = mask.clarity
+      localParams.sharpen = mask.sharpen
+
+      let adjusted = applyColor(localParams, to: output)
+      output = adjusted.applyingFilter(
+        "CIBlendWithMask",
+        parameters: [
+          kCIInputBackgroundImageKey: output,
+          kCIInputMaskImageKey: maskImage
+        ]
+      ).cropped(to: extent)
+    }
+
+    return output.cropped(to: extent)
+  }
+
+  /// Optical disc-bokeh Lens Blur (Radial spotlight or Linear tilt-shift) with
+  /// specular bokeh highlight boost.
+  static func applyLensBlur(_ params: Params, to image: CIImage) -> CIImage {
+    guard params.blurAmount > 0.005 else { return image }
+    let extent = image.extent
+    let w = extent.width
+    let h = extent.height
+    guard w > 1, h > 1 else { return image }
+
+    let scale = Double(max(w, h)) / 1920.0
+    let radius = CGFloat(max(1.0, (2.0 + params.blurAmount * 20.0) * scale))
+
+    var sourceForBlur = image
+    if params.blurBokehBoost > 0.01 {
+      // Gently boost specular highlights before disc convolution to form bright
+      // circular bokeh highlights.
+      let boost = CGFloat(params.blurBokehBoost * 0.45)
+      let hi = image.applyingFilter(
+        "CIColorMatrix",
+        parameters: [
+          "inputRVector": CIVector(x: 1.0 + boost, y: 0, z: 0, w: 0),
+          "inputGVector": CIVector(x: 0, y: 1.0 + boost, z: 0, w: 0),
+          "inputBVector": CIVector(x: 0, y: 0, z: 1.0 + boost, w: 0),
+          "inputBiasVector": CIVector(x: -boost * 0.72, y: -boost * 0.72, z: -boost * 0.72, w: 0)
+        ]
+      ).applyingFilter(
+        "CIColorClamp",
+        parameters: [
+          "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputMaxComponents": CIVector(x: 1.4, y: 1.4, z: 1.4, w: 1)
+        ]
+      )
+      sourceForBlur = hi.applyingFilter(
+        "CILightenBlendMode",
+        parameters: [kCIInputBackgroundImageKey: image]
+      ).cropped(to: extent)
+    }
+
+    let blurred = sourceForBlur.clampedToExtent()
+      .applyingFilter("CIDiscBlur", parameters: [kCIInputRadiusKey: radius])
+      .cropped(to: extent)
+
+    let cx = extent.minX + CGFloat(params.blurCenterX) * w
+    let cy = extent.minY + CGFloat(1.0 - params.blurCenterY) * h
+    let dim = min(w, h)
+    let r0 = CGFloat(params.blurRadius) * dim * 0.75
+    let r1 = r0 + CGFloat(params.blurFeather) * dim * 0.65
+
+    let blurMask: CIImage?
+    if params.blurStyle == "linear" {
+      // Horizontal tilt-shift band centred at cy: sharp inside band, blurred outside.
+      let topGrad = CIFilter(
+        name: "CILinearGradient",
+        parameters: [
+          "inputPoint0": CIVector(x: cx, y: cy + r0 * 0.55),
+          "inputColor0": CIColor(red: 0, green: 0, blue: 0, alpha: 1),
+          "inputPoint1": CIVector(x: cx, y: cy + r1 * 0.85),
+          "inputColor1": CIColor(red: 1, green: 1, blue: 1, alpha: 1)
+        ]
+      )?.outputImage?.cropped(to: extent)
+      let botGrad = CIFilter(
+        name: "CILinearGradient",
+        parameters: [
+          "inputPoint0": CIVector(x: cx, y: cy - r0 * 0.55),
+          "inputColor0": CIColor(red: 0, green: 0, blue: 0, alpha: 1),
+          "inputPoint1": CIVector(x: cx, y: cy - r1 * 0.85),
+          "inputColor1": CIColor(red: 1, green: 1, blue: 1, alpha: 1)
+        ]
+      )?.outputImage?.cropped(to: extent)
+      if let t = topGrad, let b = botGrad {
+        blurMask = t.applyingFilter(
+          "CILightenBlendMode",
+          parameters: [kCIInputBackgroundImageKey: b]
+        ).cropped(to: extent)
+      } else {
+        blurMask = topGrad ?? botGrad
+      }
+    } else {
+      blurMask = CIFilter(
+        name: "CIRadialGradient",
+        parameters: [
+          "inputCenter": CIVector(x: cx, y: cy),
+          "inputRadius0": r0,
+          "inputRadius1": max(r0 + 8.0, r1),
+          "inputColor0": CIColor(red: 0, green: 0, blue: 0, alpha: 1),
+          "inputColor1": CIColor(red: 1, green: 1, blue: 1, alpha: 1)
+        ]
+      )?.outputImage?.cropped(to: extent)
+    }
+
+    guard let mask = blurMask else { return image }
+    return blurred.applyingFilter(
+      "CIBlendWithMask",
+      parameters: [
+        kCIInputBackgroundImageKey: image,
+        kCIInputMaskImageKey: mask
+      ]
+    ).cropped(to: extent)
+  }
+
+  /// Full Lightroom vignette (amount, midpoint, feather, roundness) + full-res
+  /// grain (amount, size, roughness), layered after the film look.
   static func applyFinish(
     _ params: Params,
     to image: CIImage,
@@ -4481,25 +5139,84 @@ enum PhotoEditor {
     var output = image
 
     if params.grain > 0.001 {
+      let size = 0.45 + params.grainSize * 0.95
+      let roughBoost = 0.72 + params.grainRoughness * 0.56
       output = FilmLook.addGrain(
         to: output,
         extent: extent,
-        amount: params.grain,
-        size: 0.75,
+        amount: min(params.grain * roughBoost, 1.0),
+        size: size,
         frameIndex: frameIndex
       )
     }
     if params.vignette > 0.001 {
-      output = FilmLook.addVignette(
+      output = addCustomVignette(
         to: output,
         extent: extent,
-        amount: params.vignette * 0.9
+        amount: params.vignette * 0.92,
+        midpoint: params.vignetteMidpoint,
+        feather: params.vignetteFeather,
+        roundness: params.vignetteRoundness
       )
     }
     return output.cropped(to: extent)
   }
 
-  /// Full still pipeline: manual edit, film look, then grain/vignette.
+  private static func addCustomVignette(
+    to base: CIImage,
+    extent: CGRect,
+    amount: Double,
+    midpoint: Double,
+    feather: Double,
+    roundness: Double
+  ) -> CIImage {
+    let w = extent.width
+    let h = extent.height
+    let corner = Double(hypot(w, h)) / 2.0
+    let mid = corner * (0.20 + midpoint * 0.65)
+    let spread = corner * (0.08 + feather * 0.75)
+    let r0 = CGFloat(max(1.0, mid - spread * 0.5))
+    let r1 = CGFloat(max(Double(r0) + 4.0, mid + spread * 0.65))
+    let edge = CGFloat(max(0.0, 1.0 - amount))
+    let srgb = CGColorSpace(name: CGColorSpace.sRGB)
+
+    func color(_ v: CGFloat) -> CIColor {
+      if let srgb = srgb,
+         let c = CIColor(red: v, green: v, blue: v, alpha: 1, colorSpace: srgb) {
+        return c
+      }
+      return CIColor(red: v, green: v, blue: v, alpha: 1)
+    }
+
+    guard var gradient = CIFilter(
+      name: "CIRadialGradient",
+      parameters: [
+        "inputCenter": CIVector(x: 0, y: 0),
+        "inputRadius0": r0,
+        "inputRadius1": r1,
+        "inputColor0": color(1.0),
+        "inputColor1": color(edge)
+      ]
+    )?.outputImage else {
+      return base
+    }
+
+    // Roundness stretches the circular gradient toward image aspect (or rounder).
+    let aspect = Double(w / max(h, 1.0))
+    let stretchX = CGFloat(1.0 + (-roundness) * max(0.0, aspect - 1.0) * 0.35)
+    let stretchY = CGFloat(1.0 + (-roundness) * max(0.0, (1.0 / max(aspect, 0.1)) - 1.0) * 0.35)
+    let transform = CGAffineTransform(translationX: extent.midX, y: extent.midY)
+      .scaledBy(x: max(0.55, stretchX), y: max(0.55, stretchY))
+    gradient = gradient.transformed(by: transform).cropped(to: extent)
+
+    return gradient.applyingFilter(
+      "CIMultiplyBlendMode",
+      parameters: [kCIInputBackgroundImageKey: base]
+    ).cropped(to: extent)
+  }
+
+  /// Full still pipeline: geometry/optics -> color/detail -> selective masks ->
+  /// film look -> lens blur -> full vignette/grain.
   static func render(
     _ params: Params,
     look: FilmLook?,
@@ -4507,8 +5224,10 @@ enum PhotoEditor {
     source: CIImage,
     frameIndex: Int = 0
   ) -> CIImage {
-    let extent = source.extent
-    var output = applyColor(params, to: source)
+    var output = applyGeometryAndOptics(params, to: source)
+    let workingExtent = output.extent
+    output = applyColor(params, to: output)
+    output = applyMasks(params, to: output)
 
     if let look = look, look.usesCube {
       output = look.apply(to: output, frameIndex: frameIndex)
@@ -4521,8 +5240,282 @@ enum PhotoEditor {
       }
     }
 
+    output = applyLensBlur(params, to: output)
     output = applyFinish(params, to: output, frameIndex: frameIndex)
-    return output.cropped(to: extent)
+    return output.cropped(to: workingExtent)
+  }
+
+  // MARK: 3-Way Color Grading & Defringe Cubes
+
+  private static let gradingLock = NSLock()
+  private static var gradingCache: [String: Data] = [:]
+
+  private static func colorGradingCube(_ grading: ColorGradingParams) -> Data? {
+    guard !grading.isNeutral else { return nil }
+
+    let key = String(
+      format: "%.1f,%.3f,%.3f|%.1f,%.3f,%.3f|%.1f,%.3f,%.3f|%.2f,%.2f",
+      grading.shadows.hue, grading.shadows.saturation, grading.shadows.luminance,
+      grading.midtones.hue, grading.midtones.saturation, grading.midtones.luminance,
+      grading.highlights.hue, grading.highlights.saturation, grading.highlights.luminance,
+      grading.blending, grading.balance
+    )
+
+    gradingLock.lock()
+    let cached = gradingCache[key]
+    gradingLock.unlock()
+    if let cached = cached { return cached }
+
+    func wheelTint(_ wheel: ColorWheelParams) -> (Double, Double, Double) {
+      guard wheel.saturation > 0.001 else { return (0, 0, 0) }
+      let (tr, tg, tb) = hslToRgb(wheel.hue, 1.0, 0.5)
+      // Zero-sum chroma shift so tint adds colour cast without unwanted exposure jump.
+      let avg = (tr + tg + tb) / 3.0
+      let strength = wheel.saturation * 0.28
+      return ((tr - avg) * strength, (tg - avg) * strength, (tb - avg) * strength)
+    }
+
+    let shTint = wheelTint(grading.shadows)
+    let miTint = wheelTint(grading.midtones)
+    let hiTint = wheelTint(grading.highlights)
+
+    // Balance shifts shadow/highlight crossover; blending widens overlap.
+    let pivot = 0.5 - grading.balance * 0.25
+    let spread = 0.18 + grading.blending * 0.34
+
+    let dimension = 33
+    let last = Double(dimension - 1)
+    var values = [Float](repeating: 0, count: dimension * dimension * dimension * 4)
+
+    for bi in 0..<dimension {
+      for gi in 0..<dimension {
+        for ri in 0..<dimension {
+          let r = Double(ri) / last
+          let g = Double(gi) / last
+          let b = Double(bi) / last
+          let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+          let wShadow = 1.0 - smoothstep(max(0.0, pivot - spread), min(1.0, pivot + spread * 0.5), y)
+          let wHighlight = smoothstep(max(0.0, pivot - spread * 0.5), min(1.0, pivot + spread), y)
+          let wMid = max(0.0, 1.0 - abs(y - pivot) / max(0.22, spread * 1.45))
+
+          // Taper tint gently at pure black (0) & pure white (1) to preserve clean endpoints.
+          let endGuard = smoothstep(0.0, 0.08, y) * (1.0 - smoothstep(0.92, 1.0, y))
+          let lumShift = (wShadow * grading.shadows.luminance
+            + wMid * grading.midtones.luminance
+            + wHighlight * grading.highlights.luminance) * 0.14
+
+          let dr = (wShadow * shTint.0 + wMid * miTint.0 + wHighlight * hiTint.0) * endGuard + lumShift
+          let dg = (wShadow * shTint.1 + wMid * miTint.1 + wHighlight * hiTint.1) * endGuard + lumShift
+          let db = (wShadow * shTint.2 + wMid * miTint.2 + wHighlight * hiTint.2) * endGuard + lumShift
+
+          let offset = ((bi * dimension + gi) * dimension + ri) * 4
+          values[offset] = Float(min(max(r + dr, 0), 1))
+          values[offset + 1] = Float(min(max(g + dg, 0), 1))
+          values[offset + 2] = Float(min(max(b + db, 0), 1))
+          values[offset + 3] = 1
+        }
+      }
+    }
+
+    let data = values.withUnsafeBytes { Data($0) }
+    gradingLock.lock()
+    if gradingCache.count > 24 { gradingCache.removeAll() }
+    gradingCache[key] = data
+    gradingLock.unlock()
+    return data
+  }
+
+  private static var defringeCache: [Int: Data] = [:]
+
+  /// Suppresses purple/magenta and acid-green longitudinal chromatic aberration
+  /// fringes without desaturating natural skin or foliage tones.
+  private static func defringeCube(amount: Double) -> Data? {
+    let bucket = Int((min(max(amount, 0), 1) * 20.0).rounded())
+    guard bucket > 0 else { return nil }
+
+    gradingLock.lock()
+    let cached = defringeCache[bucket]
+    gradingLock.unlock()
+    if let cached = cached { return cached }
+
+    let s = Double(bucket) / 20.0
+    let dimension = 17
+    let last = Double(dimension - 1)
+    var values = [Float](repeating: 0, count: dimension * dimension * dimension * 4)
+
+    for bi in 0..<dimension {
+      for gi in 0..<dimension {
+        for ri in 0..<dimension {
+          let r = Double(ri) / last
+          let g = Double(gi) / last
+          let b = Double(bi) / last
+          let (hue, rawSat, lum) = rgbToHsl(r, g, b)
+          // Target narrow purple/magenta (285°-325°) high-saturation fringe band.
+          let dPurple = min(abs(hue - 305.0), 360.0 - abs(hue - 305.0))
+          let wPurple = exp(-(dPurple * dPurple) / (2.0 * 18.0 * 18.0))
+          let highSat = smoothstep(0.35, 0.80, rawSat)
+          let reduction = wPurple * highSat * s * 0.85
+          let sat = max(0.0, rawSat * (1.0 - reduction))
+          let (nr, ng, nb) = hslToRgb(hue, sat, lum)
+          let offset = ((bi * dimension + gi) * dimension + ri) * 4
+          values[offset] = Float(nr)
+          values[offset + 1] = Float(ng)
+          values[offset + 2] = Float(nb)
+          values[offset + 3] = 1
+        }
+      }
+    }
+
+    let data = values.withUnsafeBytes { Data($0) }
+    gradingLock.lock()
+    defringeCache[bucket] = data
+    gradingLock.unlock()
+    return data
+  }
+
+  // MARK: Histogram & 1-Tap Auto Tone
+
+  private static func samplePixels128(from image: CIImage) -> [UInt8]? {
+    let ext = image.extent
+    guard ext.width > 1, ext.height > 1 else { return nil }
+    let side = 128
+    let sx = CGFloat(side) / ext.width
+    let sy = CGFloat(side) / ext.height
+    let scaled = reorigin(image).transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+    guard let srgb = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+    var pixels = [UInt8](repeating: 0, count: side * side * 4)
+    AppDelegate.gradingContext.render(
+      scaled,
+      toBitmap: &pixels,
+      rowBytes: side * 4,
+      bounds: CGRect(x: 0, y: 0, width: side, height: side),
+      format: .RGBA8,
+      colorSpace: srgb
+    )
+    return pixels
+  }
+
+  static func computeHistogram(for image: CIImage) -> [String: [Double]] {
+    guard let pixels = samplePixels128(from: image) else { return [:] }
+    let bins = 64
+    var rBins = [Double](repeating: 0, count: bins)
+    var gBins = [Double](repeating: 0, count: bins)
+    var bBins = [Double](repeating: 0, count: bins)
+    var lBins = [Double](repeating: 0, count: bins)
+
+    let count = pixels.count / 4
+    for i in 0..<count {
+      let base = i * 4
+      let r = Int(pixels[base])
+      let g = Int(pixels[base + 1])
+      let b = Int(pixels[base + 2])
+      let l = (r * 54 + g * 183 + b * 19) >> 8
+      rBins[min(r >> 2, bins - 1)] += 1
+      gBins[min(g >> 2, bins - 1)] += 1
+      bBins[min(b >> 2, bins - 1)] += 1
+      lBins[min(l >> 2, bins - 1)] += 1
+    }
+
+    // Normalize against 98th-percentile peak so a single pure-black border doesn't
+    // squash the whole curve flat.
+    func normalize(_ arr: [Double]) -> [Double] {
+      let sorted = arr.sorted()
+      let peak = max(sorted[Int(Double(bins - 1) * 0.94)], 1.0)
+      return arr.map { min($0 / peak, 1.0) }
+    }
+
+    return [
+      "r": normalize(rBins),
+      "g": normalize(gBins),
+      "b": normalize(bBins),
+      "luma": normalize(lBins)
+    ]
+  }
+
+  /// Computes balanced Lightroom-style Auto Tone settings directly from pixel
+  /// luma percentiles and grey-world channel averages.
+  static func computeAutoTone(for image: CIImage) -> [String: Double] {
+    guard let pixels = samplePixels128(from: image) else { return [:] }
+    let count = pixels.count / 4
+    guard count > 0 else { return [:] }
+
+    var lumHist = [Int](repeating: 0, count: 256)
+    var sumR = 0.0
+    var sumG = 0.0
+    var sumB = 0.0
+    var sumSat = 0.0
+
+    for i in 0..<count {
+      let base = i * 4
+      let r = Double(pixels[base]) / 255.0
+      let g = Double(pixels[base + 1]) / 255.0
+      let b = Double(pixels[base + 2]) / 255.0
+      let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+      lumHist[min(max(Int((y * 255.0).rounded()), 0), 255)] += 1
+      sumR += r
+      sumG += g
+      sumB += b
+      let mx = max(r, max(g, b))
+      let mn = min(r, min(g, b))
+      sumSat += mx > 0.01 ? (mx - mn) / mx : 0.0
+    }
+
+    func percentile(_ p: Double) -> Double {
+      let target = Int(Double(count) * p)
+      var acc = 0
+      for bin in 0..<256 {
+        acc += lumHist[bin]
+        if acc >= target { return Double(bin) / 255.0 }
+      }
+      return 1.0
+    }
+
+    let p02 = percentile(0.02)
+    let p15 = percentile(0.15)
+    let p50 = percentile(0.50)
+    let p85 = percentile(0.85)
+    let p98 = percentile(0.98)
+
+    // Exposure targets balanced midtone (~0.46) gently without blowing highlights.
+    var exposure = (0.46 - p50) * 1.45
+    if p98 > 0.94 && exposure > 0 { exposure *= 0.4 }
+    exposure = min(max(exposure, -0.75), 0.85)
+
+    // Highlights & shadows recover clipped extremes & open crushed darks gently.
+    let highlights = p98 > 0.90 ? -min((p98 - 0.86) * 2.2, 0.45) : (p85 < 0.65 ? 0.14 : 0.0)
+    let shadows = p15 < 0.18 ? min((0.20 - p15) * 1.8, 0.35) : (p15 > 0.32 ? -0.14 : 0.0)
+
+    // Whites & blacks expand dynamic range cleanly to endpoints.
+    let whites = p98 < 0.88 ? min((0.92 - p98) * 1.6, 0.32) : -0.06
+    let blacks = p02 > 0.07 ? -min((p02 - 0.04) * 2.2, 0.30) : (p02 < 0.015 ? 0.08 : 0.0)
+
+    // Contrast adds crisp punch when tonal spread is narrow.
+    let spread = p98 - p02
+    let contrast = spread < 0.72 ? min((0.78 - spread) * 0.65, 0.24) : 0.06
+
+    // Gentle grey-world white balance correction (clamped to avoid killing golden hour).
+    let avgR = sumR / Double(count)
+    let avgG = sumG / Double(count)
+    let avgB = sumB / Double(count)
+    let temperature = min(max((avgB - avgR) * 0.55, -0.18), 0.18)
+    let tint = min(max((avgG - (avgR + avgB) * 0.5) * 0.45, -0.12), 0.12)
+
+    // Mild vibrance boost for flat shots.
+    let avgSat = sumSat / Double(count)
+    let vibrance = avgSat < 0.32 ? min((0.36 - avgSat) * 0.95, 0.24) : 0.08
+
+    return [
+      "exposure": (exposure * 20).rounded() / 20,
+      "contrast": (contrast * 100).rounded() / 100,
+      "highlights": (highlights * 100).rounded() / 100,
+      "shadows": (shadows * 100).rounded() / 100,
+      "whites": (whites * 100).rounded() / 100,
+      "blacks": (blacks * 100).rounded() / 100,
+      "temperature": (temperature * 100).rounded() / 100,
+      "tint": (tint * 100).rounded() / 100,
+      "vibrance": (vibrance * 100).rounded() / 100
+    ]
   }
 
   // MARK: Curve LUT

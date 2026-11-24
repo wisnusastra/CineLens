@@ -137,6 +137,59 @@ class PhotoEditorRepository {
     return exported;
   }
 
+  /// Computes a Lightroom-style 1-tap Auto Tone recommendation natively from
+  /// the image histogram (exposure, contrast, highlights, shadows, whites,
+  /// blacks, temperature, tint, vibrance).
+  Future<Map<String, double>> autoTone({
+    required String path,
+    required bool isVideo,
+  }) async {
+    try {
+      final raw = await _channel.invokeMapMethod<Object?, Object?>(
+        'editorAutoTone',
+        <String, dynamic>{
+          'path': path,
+          'isVideo': isVideo,
+        },
+      ).timeout(const Duration(seconds: 30));
+      if (raw == null) return const <String, double>{};
+      final out = <String, double>{};
+      raw.forEach((key, value) {
+        if (key is String && value is num) {
+          out[key] = value.toDouble();
+        }
+      });
+      return out;
+    } on MissingPluginException {
+      return const <String, double>{};
+    }
+  }
+
+  /// Computes a 64-bin RGB + Luminance histogram from the given rendered JPEG
+  /// bytes natively via Core Image (`CIAreaHistogram`).
+  Future<Map<String, List<double>>> computeHistogram(Uint8List jpegBytes) async {
+    try {
+      final raw = await _channel.invokeMapMethod<Object?, Object?>(
+        'editorHistogram',
+        <String, dynamic>{'bytes': jpegBytes},
+      ).timeout(const Duration(seconds: 15));
+      if (raw == null) return const <String, List<double>>{};
+      final out = <String, List<double>>{};
+      for (final channel in const <String>['r', 'g', 'b', 'luma']) {
+        final list = raw[channel];
+        if (list is List) {
+          out[channel] = list
+              .whereType<num>()
+              .map((v) => v.toDouble().clamp(0.0, 1.0))
+              .toList();
+        }
+      }
+      return out;
+    } on MissingPluginException {
+      return const <String, List<double>>{};
+    }
+  }
+
   /// Opens the system Photos picker (no permission prompt: PHPicker runs out
   /// of process) and copies the chosen photos/videos into the app.
   Future<List<ImportedMediaFile>> importFromPhotoLibrary({

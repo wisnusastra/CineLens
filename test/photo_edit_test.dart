@@ -133,6 +133,107 @@ void main() {
       expect(EditValueFormat.signed(-0.15), '-15');
       expect(EditValueFormat.percent(0.42), '42');
       expect(EditValueFormat.degrees(-0.5), '-30°');
+      expect(EditValueFormat.straighten(3.5), '+3.5°');
+      expect(EditValueFormat.straighten(-2.0), '-2.0°');
+    });
+  });
+
+  group('Lightroom Pro Editor features (v2.1)', () {
+    test('3-way ColorGrading, Optics, Crop/Geometry, Blur & B&W round-trip JSON', () {
+      const grading = ColorGrading(
+        shadows: ColorWheelGrade(hue: 215, saturation: 0.45, luminance: -0.15),
+        midtones: ColorWheelGrade(hue: 40, saturation: 0.2, luminance: 0.05),
+        highlights: ColorWheelGrade(hue: 35, saturation: 0.35, luminance: 0.1),
+        blending: 0.65,
+        balance: -0.2,
+      );
+      const mask = SelectiveMask(
+        id: 'mask_1',
+        name: 'Langit',
+        type: 'linear',
+        startX: 0.5,
+        startY: 0.1,
+        endX: 0.5,
+        endY: 0.5,
+        feather: 0.6,
+        inverted: true,
+        exposure: -0.6,
+        temperature: -0.2,
+        clarity: 0.25,
+      );
+      final edit = PhotoEdit.neutral.copyWith(
+        blackAndWhite: true,
+        colorGrading: grading,
+        vignette: 0.4,
+        vignetteMidpoint: 0.35,
+        vignetteFeather: 0.7,
+        vignetteRoundness: -0.3,
+        grain: 0.25,
+        grainSize: 0.4,
+        grainRoughness: 0.65,
+        sharpen: 0.3,
+        sharpenRadius: 0.5,
+        colorNoiseReduction: 0.35,
+        lensDistortion: -0.25,
+        opticsVignette: 0.3,
+        defringe: 0.45,
+        cropAspect: '4:5',
+        rotateQuarterTurns: 1,
+        flipHorizontal: true,
+        straightenDegrees: 2.5,
+        verticalPerspective: -0.3,
+        horizontalPerspective: 0.15,
+        blurAmount: 0.55,
+        blurStyle: 'linear',
+        blurCenterX: 0.4,
+        blurCenterY: 0.6,
+        blurRadius: 0.35,
+        blurFeather: 0.5,
+        blurBokehBoost: 0.6,
+        masks: const <SelectiveMask>[mask],
+      );
+
+      expect(edit.isNeutral, isFalse);
+      expect(edit.hasGeometryChanges, isTrue);
+
+      final restored = PhotoEdit.fromJson(edit.toJson());
+      expect(restored.blackAndWhite, isTrue);
+      expect(restored.colorGrading.shadows.hue, closeTo(215, 0.01));
+      expect(restored.colorGrading.shadows.saturation, closeTo(0.45, 0.01));
+      expect(restored.colorGrading.balance, closeTo(-0.2, 0.01));
+      expect(restored.vignetteMidpoint, closeTo(0.35, 0.01));
+      expect(restored.colorNoiseReduction, closeTo(0.35, 0.01));
+      expect(restored.lensDistortion, closeTo(-0.25, 0.01));
+      expect(restored.defringe, closeTo(0.45, 0.01));
+      expect(restored.cropAspect, '4:5');
+      expect(restored.rotateQuarterTurns, 1);
+      expect(restored.flipHorizontal, isTrue);
+      expect(restored.straightenDegrees, closeTo(2.5, 0.01));
+      expect(restored.verticalPerspective, closeTo(-0.3, 0.01));
+      expect(restored.blurAmount, closeTo(0.55, 0.01));
+      expect(restored.blurStyle, 'linear');
+      expect(restored.masks, hasLength(1));
+      expect(restored.masks.first.isLinear, isTrue);
+      expect(restored.masks.first.inverted, isTrue);
+      expect(restored.masks.first.exposure, closeTo(-0.6, 0.01));
+    });
+
+    test('SavedEditPreset serialises and parses cleanly', () {
+      final preset = SavedEditPreset(
+        id: 'p_1',
+        name: 'Leica Street',
+        edit: PhotoEdit.neutral.copyWith(contrast: 0.25, blacks: -0.2),
+        toneId: 'leica_chiaroscuro',
+        toneIntensity: 0.85,
+        stockEffects: false,
+      );
+      final restored = SavedEditPreset.tryParse(preset.toJson());
+      expect(restored, isNotNull);
+      expect(restored!.name, 'Leica Street');
+      expect(restored.toneId, 'leica_chiaroscuro');
+      expect(restored.toneIntensity, closeTo(0.85, 0.01));
+      expect(restored.stockEffects, isFalse);
+      expect(restored.edit.contrast, closeTo(0.25, 0.01));
     });
   });
 }
