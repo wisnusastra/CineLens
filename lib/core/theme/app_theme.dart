@@ -13,10 +13,20 @@ class AppTheme {
   static const Color textSecondary = Color(0xFF8E8E93);
   static const Color hairline = Color(0x18FFFFFF);
 
-  static const TextStyle monoStyle = TextStyle(
-    fontFamily: 'Menlo',
-    fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
-  );
+  static TextStyle monoStyle({
+    Color? color,
+    double? fontSize,
+    FontWeight? fontWeight,
+    double? letterSpacing,
+  }) =>
+      TextStyle(
+        fontFamily: 'Menlo',
+        fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
+        color: color,
+        fontSize: fontSize,
+        fontWeight: fontWeight,
+        letterSpacing: letterSpacing,
+      );
 
   static ThemeData get darkCinemaTheme {
     return ThemeData(
