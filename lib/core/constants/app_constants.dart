@@ -18,6 +18,10 @@ class AppConstants {
   static const String prefAnamorphicCrop = 'anamorphic_true_crop';
   static const String prefAnamorphicDesqueeze = 'anamorphic_desqueeze_factor';
   static const String prefHighlightMetering = 'highlight_weighted_metering';
+  static const String prefFrameFormat = 'camera_frame_format_v1';
+  static const String prefSaveDngRaw = 'save_dng_raw_v1';
+  static const String prefDirectLutRecording = 'direct_lut_recording_v1';
+  static const String prefLiveMetalPreview = 'live_metal_preview_v1';
 
   /// Set once the first-install opening clip has been shown. Keeping this as a
   /// versioned key means a future opening can be shown again if needed.

@@ -5,13 +5,35 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../../core/l10n/app_strings.dart';
+import '../../../../core/theme/app_theme.dart';
 import '../../../about/presentation/screens/about_screen.dart';
-import '../../../cinema_camera/domain/entities/pro_capture_capabilities.dart';
+import '../../../cinema_camera/domain/entities/film_look.dart';
+import '../../../cinema_camera/domain/entities/frame_format.dart';
 import '../../../cinema_camera/presentation/providers/cinema_camera_provider.dart';
 import '../../../cinema_camera/presentation/providers/cinema_camera_state.dart';
-import '../../../cinema_camera/presentation/widgets/film_look_section.dart';
+import '../../../cinema_camera/presentation/widgets/dop_overlays.dart';
+import '../../../cinema_camera/presentation/widgets/preset_library_io_sheet.dart';
 import '../../domain/entities/camera_options_state.dart';
 import '../providers/camera_options_provider.dart';
+
+/// Opens the 4-Tab Tactile Control Drawer directly to a specific tab:
+/// `0 = EXPOSURE`, `1 = LOOK`, `2 = OPTICS`, `3 = CAMERA`.
+Future<void> showCinemaControlDrawer(
+  BuildContext context, {
+  int initialTab = 0,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: AppTheme.surfaceDark,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+    ),
+    builder: (_) => CameraOptionsSheet(initialTab: initialTab),
+  );
+}
 
 class CameraOptionsButton extends ConsumerWidget {
   const CameraOptionsButton({super.key});
@@ -22,31 +44,31 @@ class CameraOptionsButton extends ConsumerWidget {
       cameraOptionsProvider.select((s) => s.hapticFeedback),
     );
 
-    return Material(
-      color: Colors.black.withOpacity(0.55),
-      shape: const CircleBorder(
-        side: BorderSide(color: Colors.white24, width: 1),
-      ),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: () {
-          if (hapticEnabled) HapticFeedback.lightImpact();
-          showModalBottomSheet<void>(
-            context: context,
-            isScrollControlled: true,
-            backgroundColor: const Color(0xFF141416),
-            shape: const RoundedRectangleBorder(
-              borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+    return GestureDetector(
+      onTap: () {
+        if (hapticEnabled) HapticFeedback.lightImpact();
+        showCinemaControlDrawer(context);
+      },
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: AppTheme.cardDark.withValues(alpha: 0.9),
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: AppTheme.cinemaAmber.withValues(alpha: 0.6),
+            width: 1.1,
+          ),
+        ),
+        child: const Center(
+          child: Text(
+            'M',
+            style: TextStyle(
+              color: AppTheme.cinemaAmber,
+              fontSize: 14,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.4,
             ),
-            builder: (_) => const CameraOptionsSheet(),
-          );
-        },
-        child: const Padding(
-          padding: EdgeInsets.all(11),
-          child: Icon(
-            Icons.tune_rounded,
-            color: Colors.amberAccent,
-            size: 22,
           ),
         ),
       ),
@@ -54,373 +76,702 @@ class CameraOptionsButton extends ConsumerWidget {
   }
 }
 
-class CameraOptionsSheet extends ConsumerWidget {
-  const CameraOptionsSheet({super.key});
+/// Modular 4-Tab Pro Control Drawer (`EXPOSURE | LOOK | OPTICS | CAMERA`).
+/// Zero verbose paragraphs; tactile rulers + 2×2 switch cards + vintage frame grid.
+class CameraOptionsSheet extends ConsumerStatefulWidget {
+  final int initialTab;
+
+  const CameraOptionsSheet({super.key, this.initialTab = 0});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CameraOptionsSheet> createState() => _CameraOptionsSheetState();
+}
+
+class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
+  late int _activeTab = widget.initialTab.clamp(0, 3);
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppStrings.of(context);
     final options = ref.watch(cameraOptionsProvider);
-    final notifier = ref.read(cameraOptionsProvider.notifier);
+    final optionsNotifier = ref.read(cameraOptionsProvider.notifier);
     final cameraState = ref.watch(cinemaCameraProvider).valueOrNull;
     final cameraNotifier = ref.read(cinemaCameraProvider.notifier);
-    final isBusy = cameraState?.isRecordingVideo ?? false;
+    final haptics = options.hapticFeedback;
+
+    final tabs = [s.tabExposure, s.tabLook, s.tabOptics, s.tabCamera];
 
     return SafeArea(
-      child: DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.68,
-        minChildSize: 0.45,
-        maxChildSize: 0.9,
-        builder: (context, scrollController) {
-          return ListView(
-            controller: scrollController,
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
+      top: false,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.78,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 10),
+            Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
               ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'CineLens Options',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 19,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  TextButton.icon(
-                    onPressed: () {
-                      if (options.hapticFeedback)
-                        HapticFeedback.selectionClick();
-                      notifier.resetDefaults();
-                    },
-                    icon: const Icon(Icons.refresh,
-                        size: 16, color: Colors.amber),
-                    label: const Text(
-                      'Reset',
-                      style: TextStyle(color: Colors.amber),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              if (cameraState != null) ...[
-                const Text(
-                  'RESOLUSI & FRAME RATE',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.0,
-                  ),
+            ),
+            const SizedBox(height: 12),
+            // 4-Tab Segmented Bar
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  color: AppTheme.backgroundBlack,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppTheme.hairline),
                 ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: CaptureResolution.values.map((value) {
-                    final selected = cameraState.resolution == value;
-                    return ChoiceChip(
-                      label: Text(value.label),
-                      selected: selected,
-                      selectedColor: Colors.amber,
-                      backgroundColor: const Color(0xFF222226),
-                      labelStyle: TextStyle(
-                        color: selected ? Colors.black : Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                      ),
-                      onSelected: isBusy
-                          ? null
-                          : (_) {
-                              if (options.hapticFeedback) {
-                                HapticFeedback.selectionClick();
-                              }
-                              _applyProfile(
-                                context,
-                                () => cameraNotifier.setResolution(value),
-                                'resolusi ${value.label}',
-                              );
-                            },
-                    );
-                  }).toList(),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  isBusy
-                      ? 'Resolusi tidak dapat diubah saat merekam.'
-                      : 'MAX memakai sensor penuh untuk foto. Video dibatasi 4K '
-                          'agar encoder iOS tetap stabil.',
-                  style: const TextStyle(color: Colors.white38, fontSize: 10),
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: CaptureFrameRate.values.map((value) {
-                    final selected = cameraState.frameRate == value;
-                    return ChoiceChip(
-                      label: Text('${value.label} FPS'),
-                      selected: selected,
-                      selectedColor: Colors.amber,
-                      backgroundColor: const Color(0xFF222226),
-                      labelStyle: TextStyle(
-                        color: selected ? Colors.black : Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                      ),
-                      onSelected: isBusy
-                          ? null
-                          : (_) {
-                              if (options.hapticFeedback) {
-                                HapticFeedback.selectionClick();
-                              }
-                              _applyProfile(
-                                context,
-                                () => cameraNotifier.setFrameRate(value),
-                                'frame rate ${value.label} fps',
-                              );
-                            },
-                    );
-                  }).toList(),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1E1E22),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: cameraState.videoStabilizationActive
-                          ? Colors.amber.withValues(alpha: 0.5)
-                          : Colors.white12,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.video_stable_rounded,
-                        size: 18,
-                        color: cameraState.videoStabilizationActive
-                            ? Colors.amber
-                            : Colors.white38,
-                      ),
-                      const SizedBox(width: 8),
+                child: Row(
+                  children: [
+                    for (var i = 0; i < tabs.length; i++)
                       Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'STABILISASI VIDEO · '
-                              '${cameraState.stabilizationLabel}',
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.4,
+                        child: GestureDetector(
+                          onTap: () {
+                            if (haptics) HapticFeedback.selectionClick();
+                            setState(() => _activeTab = i);
+                          },
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 140),
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            decoration: BoxDecoration(
+                              color: _activeTab == i
+                                  ? AppTheme.cinemaAmber
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                            child: Text(
+                              tabs[i],
+                              textAlign: TextAlign.center,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: _activeTab == i
+                                    ? Colors.black
+                                    : AppTheme.textSecondary,
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.7,
                               ),
                             ),
-                            const SizedBox(height: 2),
-                            Text(
-                              cameraState.videoStabilizationActive
-                                  ? 'Aktif otomatis. iOS memilih mode terbaik '
-                                      'yang didukung format aktif (Cinematic '
-                                      'untuk 1080p, Standard untuk 4K).'
-                                  : 'Belum aktif. Format aktif menolak '
-                                      'stabilisasi, biasanya karena 4K/60. '
-                                      'Turunkan ke 1080p untuk hasil '
-                                      'selengkapnya.',
-                              style: const TextStyle(
-                                color: Colors.white38,
-                                fontSize: 9,
-                                height: 1.35,
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
                       ),
-                    ],
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                child: cameraState == null
+                    ? const SizedBox(height: 120)
+                    : switch (_activeTab) {
+                        0 => _buildExposureTab(
+                            context, s, cameraState, cameraNotifier, haptics),
+                        1 => _buildLookTab(
+                            context, s, cameraState, cameraNotifier, haptics),
+                        2 => _buildOpticsTab(context, s, cameraState,
+                            cameraNotifier, options, optionsNotifier, haptics),
+                        _ => _buildCameraTab(context, s, cameraState,
+                            cameraNotifier, options, optionsNotifier, haptics),
+                      },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ----------------------------------------------------------- TAB 0: EXPOSURE
+
+  Widget _buildExposureTab(
+    BuildContext context,
+    AppStrings s,
+    CinemaCameraState state,
+    CinemaCameraNotifier notifier,
+    bool haptics,
+  ) {
+    final caps = state.proCapabilities;
+    final available = caps.available;
+    final minLogShutter =
+        math.log(caps.minShutterSeconds.clamp(1 / 16000, 1.0));
+    final maxLogShutter = math.log(caps.maxShutterSeconds.clamp(1 / 1000, 1.0));
+    final curLogShutter = math.log(
+      state.shutterSeconds
+          .clamp(caps.minShutterSeconds, caps.maxShutterSeconds),
+    );
+    final minLogIso = math.log(caps.minIso.clamp(16.0, 100000.0));
+    final maxLogIso = math.log(caps.maxIso.clamp(100.0, 100000.0));
+    final curLogIso = math.log(state.iso.clamp(caps.minIso, caps.maxIso));
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (state.proControlError != null) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            margin: const EdgeInsets.only(bottom: 10),
+            decoration: BoxDecoration(
+              color: AppTheme.cinemaRed.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: AppTheme.cinemaRed.withValues(alpha: 0.5),
+              ),
+            ),
+            child: Text(
+              state.proControlError!,
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+            ),
+          ),
+        ],
+        TactileRulerSlider(
+          label: s.shutterSpeed,
+          valueText: state.manualExposureEnabled ? state.shutterLabel : 'AUTO',
+          value: curLogShutter,
+          min: minLogShutter,
+          max: maxLogShutter,
+          enabled: available,
+          autoActive: !state.manualExposureEnabled,
+          haptics: haptics,
+          onToggleAuto: () =>
+              notifier.setManualExposureEnabled(!state.manualExposureEnabled),
+          onChanged: (v) =>
+              notifier.previewManualExposure(shutterSeconds: math.exp(v)),
+          onChangeEnd: notifier.commitManualExposure,
+        ),
+        const SizedBox(height: 8),
+        TactileRulerSlider(
+          label: s.isoSensitivity,
+          valueText:
+              state.manualExposureEnabled ? '${state.iso.round()}' : 'AUTO',
+          value: curLogIso,
+          min: minLogIso,
+          max: maxLogIso,
+          enabled: available,
+          autoActive: !state.manualExposureEnabled,
+          haptics: haptics,
+          onToggleAuto: () =>
+              notifier.setManualExposureEnabled(!state.manualExposureEnabled),
+          onChanged: (v) => notifier.previewManualExposure(iso: math.exp(v)),
+          onChangeEnd: notifier.commitManualExposure,
+        ),
+        const SizedBox(height: 8),
+        TactileRulerSlider(
+          label: s.whiteBalance,
+          valueText: state.manualWhiteBalanceEnabled
+              ? '${state.whiteBalanceKelvin}K'
+              : 'AUTO',
+          value: state.whiteBalanceKelvin.toDouble(),
+          min: 2200,
+          max: 9500,
+          enabled: available,
+          autoActive: !state.manualWhiteBalanceEnabled,
+          haptics: haptics,
+          onToggleAuto: () => notifier
+              .setManualWhiteBalanceEnabled(!state.manualWhiteBalanceEnabled),
+          onChanged: (v) =>
+              notifier.previewManualWhiteBalance(kelvin: (v / 50).round() * 50),
+          onChangeEnd: notifier.commitManualWhiteBalance,
+        ),
+        const SizedBox(height: 8),
+        TactileRulerSlider(
+          label: s.manualFocus,
+          valueText: state.manualFocusEnabled
+              ? '${(state.focusPosition * 100).round()}%'
+              : 'AF',
+          value: state.focusPosition,
+          min: 0.0,
+          max: 1.0,
+          enabled: available,
+          autoActive: !state.manualFocusEnabled,
+          haptics: haptics,
+          onToggleAuto: () =>
+              notifier.setManualFocusEnabled(!state.manualFocusEnabled),
+          onChanged: notifier.previewManualFocus,
+        ),
+        const SizedBox(height: 12),
+        _ToggleGrid(
+          cards: [
+            _SwitchCardData(
+              title: s.processZero,
+              subtitle: s.processZeroSub,
+              active: state.processZeroEnabled,
+              onTap: () =>
+                  notifier.setProcessZeroEnabled(!state.processZeroEnabled),
+            ),
+            _SwitchCardData(
+              title: s.saveDngRaw,
+              subtitle: s.saveDngRawSub,
+              active: state.saveDngRaw,
+              enabled: state.processZeroEnabled,
+              onTap: () => notifier.setSaveDngRaw(!state.saveDngRaw),
+            ),
+            _SwitchCardData(
+              title: s.hlMetering,
+              subtitle: s.hlMeteringSub,
+              active: state.highlightMeteringEnabled,
+              onTap: () => notifier
+                  .setHighlightMeteringEnabled(!state.highlightMeteringEnabled),
+            ),
+            _SwitchCardData(
+              title: s.rule180,
+              subtitle: '1/${state.frameRate.value * 2}s',
+              active: state.is180ShutterLocked,
+              enabled: available,
+              onTap: notifier.toggle180DegreeShutter,
+            ),
+            if (caps.supportsAppleLog)
+              _SwitchCardData(
+                title: s.appleLog,
+                subtitle: s.appleLogSub,
+                active: state.appleLogEnabled,
+                onTap: () => notifier.setAppleLog(!state.appleLogEnabled),
+              ),
+            if (caps.supportsProRes)
+              _SwitchCardData(
+                title: s.proRes422,
+                subtitle: s.proRes422Sub,
+                active: state.proResEnabled,
+                enabled: !state.isRecordingVideo,
+                onTap: () => notifier.setProResEnabled(!state.proResEnabled),
+              ),
+          ],
+          haptics: haptics,
+        ),
+      ],
+    );
+  }
+
+  // --------------------------------------------------------------- TAB 1: LOOK
+
+  Widget _buildLookTab(
+    BuildContext context,
+    AppStrings s,
+    CinemaCameraState state,
+    CinemaCameraNotifier notifier,
+    bool haptics,
+  ) {
+    final look = state.filmLook;
+    void update(FilmLook next) => notifier.setFilmLook(next);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Import .cube action
+        GestureDetector(
+          onTap: () async {
+            if (haptics) HapticFeedback.selectionClick();
+            final added = await notifier.importCubeLuts();
+            if (!context.mounted || added == 0) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('$added .cube LUT imported'),
+                backgroundColor: AppTheme.cardDark,
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            decoration: BoxDecoration(
+              color: AppTheme.cinemaAmber.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: AppTheme.cinemaAmber.withValues(alpha: 0.65),
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(
+                  Icons.file_upload_outlined,
+                  color: AppTheme.cinemaAmber,
+                  size: 16,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  s.importCube,
+                  style: const TextStyle(
+                    color: AppTheme.cinemaAmber,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.8,
                   ),
                 ),
-                const SizedBox(height: 20),
-                _buildProSection(
-                  state: cameraState,
-                  notifier: cameraNotifier,
-                  haptics: options.hapticFeedback,
-                ),
-                const SizedBox(height: 20),
-                FilmLookSection(
-                  state: cameraState,
-                  notifier: cameraNotifier,
-                  haptics: options.hapticFeedback,
-                ),
-                const SizedBox(height: 20),
               ],
-              const Text(
-                'PANDUAN GRID KOMPOSISI',
-                style: TextStyle(
-                  color: Colors.white54,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.0,
-                ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        _ToggleGrid(
+          haptics: haptics,
+          cards: [
+            _SwitchCardData(
+              title: s.stockEffects,
+              subtitle: s.stockEffectsSub,
+              active: look.useStockEffects,
+              onTap: () => update(
+                look.copyWith(useStockEffects: !look.useStockEffects),
               ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: GridOverlayType.values.map((type) {
-                  final selected = options.gridType == type;
-                  return ChoiceChip(
-                    label: Text(type.label),
-                    selected: selected,
-                    selectedColor: Colors.amber,
-                    backgroundColor: const Color(0xFF222226),
-                    labelStyle: TextStyle(
-                      color: selected ? Colors.black : Colors.white,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12,
-                    ),
-                    onSelected: (_) {
-                      if (options.hapticFeedback)
-                        HapticFeedback.selectionClick();
-                      notifier.setGridType(type);
+            ),
+            if (state.proCapabilities.supportsProRes)
+              _SwitchCardData(
+                title: s.bakeProRes,
+                subtitle: s.bakeProResSub,
+                active: state.bakeLookIntoProRes,
+                enabled: !state.isRecordingVideo,
+                onTap: () =>
+                    notifier.setBakeLookIntoProRes(!state.bakeLookIntoProRes),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _CompactSliderRow(
+          label: s.deepShadow,
+          value: look.shadowDepth,
+          onChanged: (v) => update(look.copyWith(shadowDepth: v)),
+        ),
+        _CompactSliderRow(
+          label: s.acutance,
+          value: look.acutance,
+          onChanged: (v) => update(look.copyWith(acutance: v)),
+        ),
+        if (!look.useStockEffects) ...[
+          const SizedBox(height: 4),
+          _CompactSliderRow(
+            label: s.grain,
+            value: look.grain,
+            onChanged: (v) => update(look.copyWith(grain: v)),
+          ),
+          _CompactSliderRow(
+            label: s.grainSize,
+            value: look.grainSize,
+            onChanged: (v) => update(look.copyWith(grainSize: v)),
+          ),
+          _CompactSliderRow(
+            label: s.halation,
+            value: look.halation,
+            onChanged: (v) => update(look.copyWith(halation: v)),
+          ),
+          _CompactSliderRow(
+            label: s.bloom,
+            value: look.bloom,
+            onChanged: (v) => update(look.copyWith(bloom: v)),
+          ),
+          _CompactSliderRow(
+            label: s.vignette,
+            value: look.vignette,
+            onChanged: (v) => update(look.copyWith(vignette: v)),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ------------------------------------------------------------- TAB 2: OPTICS
+
+  Widget _buildOpticsTab(
+    BuildContext context,
+    AppStrings s,
+    CinemaCameraState state,
+    CinemaCameraNotifier notifier,
+    CameraOptionsState options,
+    CameraOptionsNotifier optionsNotifier,
+    bool haptics,
+  ) {
+    final isBusy = state.isRecordingVideo;
+    const desqueezeChoices = [1.0, 1.33, 1.55];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _SectionLabel(s.frameFormat),
+        const SizedBox(height: 8),
+        GridView.count(
+          crossAxisCount: 4,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: 8,
+          crossAxisSpacing: 8,
+          childAspectRatio: 1.28,
+          children: CameraFrameFormat.values.map((fmt) {
+            final selected = state.frameFormat == fmt;
+            return GestureDetector(
+              onTap: isBusy
+                  ? null
+                  : () {
+                      if (haptics) HapticFeedback.selectionClick();
+                      notifier.setFrameFormat(fmt);
                     },
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'FRAME GUIDE RASIO SINEMATIK',
-                style: TextStyle(
-                  color: Colors.white54,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.0,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: CinemaAspectRatio.values.map((ratio) {
-                  final selected = options.aspectRatio == ratio;
-                  return ChoiceChip(
-                    label: Text(ratio.label),
-                    selected: selected,
-                    selectedColor: Colors.amber,
-                    backgroundColor: const Color(0xFF222226),
-                    labelStyle: TextStyle(
-                      color: selected ? Colors.black : Colors.white,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12,
-                    ),
-                    onSelected: (_) {
-                      if (options.hapticFeedback)
-                        HapticFeedback.selectionClick();
-                      notifier.setAspectRatio(ratio);
-                    },
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'PREFERENSI KAMERA & HUD',
-                style: TextStyle(
-                  color: Colors.white54,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.0,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Container(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 140),
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1E1E22),
-                  borderRadius: BorderRadius.circular(14),
+                  color: selected
+                      ? AppTheme.cinemaAmber.withValues(alpha: 0.16)
+                      : AppTheme.cardDark,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: selected ? AppTheme.cinemaAmber : AppTheme.hairline,
+                    width: selected ? 1.3 : 0.9,
+                  ),
                 ),
                 child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    SwitchListTile(
-                      activeThumbColor: Colors.amber,
-                      title: const Text(
-                        'Tampilkan Telemetry HUD',
-                        style: TextStyle(color: Colors.white, fontSize: 14),
+                    Text(
+                      fmt.label,
+                      style: AppTheme.monoStyle(
+                        color: selected
+                            ? AppTheme.cinemaAmber
+                            : AppTheme.textPrimary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
                       ),
-                      subtitle: const Text(
-                        'Info orientasi, rasio frame, dan LUT aktif di layar',
-                        style: TextStyle(color: Colors.white54, fontSize: 12),
-                      ),
-                      value: options.showTelemetryHud,
-                      onChanged: notifier.toggleTelemetryHud,
                     ),
-                    const Divider(height: 1, color: Colors.white12),
-                    SwitchListTile(
-                      activeThumbColor: Colors.amber,
-                      title: const Text(
-                        'Haptic Feedback (Getar Halus)',
-                        style: TextStyle(color: Colors.white, fontSize: 14),
+                    const SizedBox(height: 2),
+                    Text(
+                      fmt.subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 8.5,
                       ),
-                      subtitle: const Text(
-                        'Respons getar saat tombol shutter & preset ditekan',
-                        style: TextStyle(color: Colors.white54, fontSize: 12),
-                      ),
-                      value: options.hapticFeedback,
-                      onChanged: notifier.toggleHapticFeedback,
-                    ),
-                    const Divider(height: 1, color: Colors.white12),
-                    SwitchListTile(
-                      activeThumbColor: Colors.amber,
-                      title: const Text(
-                        'Mirror Kamera Depan',
-                        style: TextStyle(color: Colors.white, fontSize: 14),
-                      ),
-                      subtitle: const Text(
-                        'Simpan hasil foto selfie sesuai tampilan pratinjau',
-                        style: TextStyle(color: Colors.white54, fontSize: 12),
-                      ),
-                      value: options.mirrorFrontCamera,
-                      onChanged: notifier.toggleMirrorFrontCamera,
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 20),
-              ListTile(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  side: BorderSide(color: Colors.amber.withOpacity(0.4)),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 12),
+        _ToggleGrid(
+          haptics: haptics,
+          cards: [
+            _SwitchCardData(
+              title: s.trueCrop,
+              subtitle: s.trueCropSub,
+              active: state.anamorphicCrop,
+              enabled: !isBusy && state.effectiveFrameAspectRatio > 0.1,
+              onTap: () => notifier.setAnamorphicCrop(!state.anamorphicCrop),
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        _SectionLabel(s.desqueeze),
+        const SizedBox(height: 8),
+        Row(
+          children: desqueezeChoices.map((factor) {
+            final selected = (state.anamorphicDesqueeze - factor).abs() < 0.02;
+            final label =
+                factor == 1.0 ? s.off : '${factor.toStringAsFixed(2)}×';
+            return Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                child: _PillChoice(
+                  label: label,
+                  selected: selected,
+                  enabled: !isBusy,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    notifier.setAnamorphicDesqueeze(factor);
+                  },
                 ),
-                tileColor: const Color(0xFF1E1E22),
-                leading: const Icon(
-                  Icons.info_outline_rounded,
-                  color: Colors.amberAccent,
+              ),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 14),
+        _SectionLabel(s.grid),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: GridOverlayType.values.map((type) {
+            final selected = options.gridType == type;
+            return _PillChoice(
+              label: type.label,
+              selected: selected,
+              onTap: () {
+                if (haptics) HapticFeedback.selectionClick();
+                optionsNotifier.setGridType(type);
+              },
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
+
+  // ------------------------------------------------------------- TAB 3: CAMERA
+
+  Widget _buildCameraTab(
+    BuildContext context,
+    AppStrings s,
+    CinemaCameraState state,
+    CinemaCameraNotifier notifier,
+    CameraOptionsState options,
+    CameraOptionsNotifier optionsNotifier,
+    bool haptics,
+  ) {
+    final isBusy = state.isRecordingVideo;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _SectionLabel(s.resolution),
+        const SizedBox(height: 8),
+        Row(
+          children: CaptureResolution.values.map((res) {
+            final selected = state.resolution == res;
+            return Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                child: _PillChoice(
+                  label: res.label,
+                  selected: selected,
+                  enabled: !isBusy,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    notifier.setResolution(res);
+                  },
                 ),
-                title: const Text(
-                  'About CineLens iOS',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
-                  ),
+              ),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 12),
+        _SectionLabel(s.frameRate),
+        const SizedBox(height: 8),
+        Row(
+          children: CaptureFrameRate.values.map((fps) {
+            final selected = state.frameRate == fps;
+            return Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                child: _PillChoice(
+                  label: '${fps.label} FPS',
+                  selected: selected,
+                  enabled: !isBusy,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    notifier.setFrameRate(fps);
+                  },
                 ),
-                subtitle: const Text(
-                  'Developer: Wisnu Sastra Wijaya • Support & Masukan',
-                  style: TextStyle(color: Colors.white60, fontSize: 12),
-                ),
-                trailing: const Icon(
-                  Icons.chevron_right_rounded,
-                  color: Colors.white54,
-                ),
+              ),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 14),
+        // Tahap 2 Metal Preview & Direct LUT Recording
+        _ToggleGrid(
+          haptics: haptics,
+          cards: [
+            _SwitchCardData(
+              title: s.liveMetalLut,
+              subtitle: s.liveMetalLutSub,
+              active: state.liveMetalEnabled,
+              enabled: !isBusy,
+              onTap: () => notifier.setLiveMetalEnabled(!state.liveMetalEnabled),
+            ),
+            _SwitchCardData(
+              title: s.directLutRec,
+              subtitle: s.directLutRecSub,
+              active: state.directLutRecordingEnabled,
+              enabled: !isBusy,
+              onTap: () => notifier
+                  .setDirectLutRecordingEnabled(!state.directLutRecordingEnabled),
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        _SectionLabel(s.dopMonitors),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            _PillChoice(
+              label: s.focusPeaking,
+              selected: state.focusPeakingEnabled,
+              onTap: () =>
+                  notifier.setDopOverlay(focusPeaking: !state.focusPeakingEnabled),
+            ),
+            _PillChoice(
+              label: s.zebraStripes,
+              selected: state.zebraEnabled,
+              onTap: () => notifier.setDopOverlay(zebra: !state.zebraEnabled),
+            ),
+            _PillChoice(
+              label: s.falseColor,
+              selected: state.falseColorEnabled,
+              onTap: () =>
+                  notifier.setDopOverlay(falseColor: !state.falseColorEnabled),
+            ),
+            _PillChoice(
+              label: s.horizonLevel,
+              selected: state.horizonLevelEnabled,
+              onTap: () =>
+                  notifier.setDopOverlay(horizon: !state.horizonLevelEnabled),
+            ),
+            _PillChoice(
+              label: s.audioMeter,
+              selected: state.audioMeterEnabled,
+              onTap: () =>
+                  notifier.setDopOverlay(audioMeter: !state.audioMeterEnabled),
+            ),
+            _PillChoice(
+              label: s.liveScope,
+              selected: state.liveScopeEnabled,
+              onTap: () =>
+                  notifier.setDopOverlay(liveScope: !state.liveScopeEnabled),
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            Expanded(
+              child: _PillChoice(
+                label: '${s.haptics}: ${options.hapticFeedback ? s.on : s.off}',
+                selected: options.hapticFeedback,
+                onTap: () =>
+                    optionsNotifier.toggleHapticFeedback(!options.hapticFeedback),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _PillChoice(
+                label: s.presetLibrary,
+                selected: false,
+                onTap: () {
+                  Navigator.pop(context);
+                  showModalBottomSheet<void>(
+                    context: context,
+                    backgroundColor: Colors.transparent,
+                    isScrollControlled: true,
+                    builder: (_) => const PresetLibraryIoSheet(),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _PillChoice(
+                label: s.aboutApp,
+                selected: false,
                 onTap: () {
                   Navigator.pop(context);
                   Navigator.push(
@@ -431,520 +782,257 @@ class CameraOptionsSheet extends ConsumerWidget {
                   );
                 },
               ),
-            ],
-          );
-        },
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final String text;
+  const _SectionLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: const TextStyle(
+        color: AppTheme.textSecondary,
+        fontSize: 10,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 1.1,
       ),
     );
   }
+}
 
-  /// Manual exposure / white balance / focus / Apple Log.
-  ///
-  /// Everything is gated on [ProCaptureCapabilities] because the hardware
-  /// differs per iPhone: Apple Log needs an iPhone 15 Pro or newer, ProRes an
-  /// iPhone 13 Pro or newer, and the ISO/shutter ranges come from the format the
-  /// `camera` plugin currently runs.
-  Widget _buildProSection({
-    required CinemaCameraState state,
-    required CinemaCameraNotifier notifier,
-    required bool haptics,
-  }) {
-    final caps = state.proCapabilities;
-    final isRecording = state.isRecordingVideo;
+class _PillChoice extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
 
-    void tap() {
-      if (haptics) HapticFeedback.selectionClick();
-    }
+  const _PillChoice({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.enabled = true,
+  });
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'KONTROL PRO (MANUAL)',
-          style: TextStyle(
-            color: Colors.white54,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.0,
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppTheme.cinemaAmber.withValues(alpha: 0.16)
+              : AppTheme.cardDark,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: selected ? AppTheme.cinemaAmber : AppTheme.hairline,
+            width: selected ? 1.2 : 0.9,
           ),
         ),
-        const SizedBox(height: 8),
-        if (!caps.available)
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1E1E22),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.white12),
-            ),
-            child: const Text(
-              'Menunggu kamera siap. Shutter, ISO, white balance, focus, '
-              'Apple Log, dan ProRes muncul setelah pratinjau hidup — batas '
-              'tiap kontrol dibaca langsung dari sensor.',
-              style: TextStyle(
-                color: Colors.white54,
-                fontSize: 10,
-                height: 1.35,
-              ),
-            ),
-          )
-        else ...[
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1E1E22),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: caps.supportsAppleLog || caps.supportsProRes
-                    ? Colors.amber.withValues(alpha: 0.45)
-                    : Colors.white12,
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.camera_rounded,
-                  size: 18,
-                  color: caps.supportsAppleLog || caps.supportsProRes
-                      ? Colors.amber
-                      : Colors.white38,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        caps.deviceName.toUpperCase(),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.4,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        caps.supportsProRes
-                            ? 'ProRes 422 didukung. Master .mov 10-bit '
-                                'direkam tanpa LUT agar tetap fleksibel saat '
-                                'grading.'
-                            : 'ProRes 422 tidak didukung perangkat ini (butuh '
-                                'iPhone 13 Pro atau lebih baru).',
-                        style: const TextStyle(
-                          color: Colors.white38,
-                          fontSize: 9,
-                          height: 1.35,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: !enabled
+                ? Colors.white24
+                : selected
+                    ? AppTheme.cinemaAmber
+                    : AppTheme.textPrimary,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.4,
           ),
-          if (caps.supportsProRes) ...[
-            const SizedBox(height: 8),
-            Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E1E22),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: SwitchListTile(
-                activeThumbColor: Colors.amber,
-                title: const Text(
-                  'ProRes 422',
-                  style: TextStyle(color: Colors.white, fontSize: 14),
-                ),
-                subtitle: Text(
-                  state.proResEnabled
-                      ? 'Rekaman memakai 10-bit 4:2:2 ke .mov. LUT hanya '
-                          'tampil di pratinjau, tidak dibakar ke file.'
-                      : 'Master 10-bit untuk grading serius. Sensor dipindah '
-                          'ke format 4:2:2 hanya selama merekam.',
-                  style: const TextStyle(color: Colors.white54, fontSize: 12),
-                ),
-                value: state.proResEnabled,
-                onChanged: isRecording
-                    ? null
-                    : (value) {
-                        tap();
-                        notifier.setProResEnabled(value);
-                      },
-              ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SwitchCardData {
+  final String title;
+  final String subtitle;
+  final bool active;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _SwitchCardData({
+    required this.title,
+    required this.subtitle,
+    required this.active,
+    required this.onTap,
+    this.enabled = true,
+  });
+}
+
+class _ToggleGrid extends StatelessWidget {
+  final List<_SwitchCardData> cards;
+  final bool haptics;
+
+  const _ToggleGrid({required this.cards, required this.haptics});
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = <Widget>[];
+    for (var i = 0; i < cards.length; i += 2) {
+      final left = cards[i];
+      final right = i + 1 < cards.length ? cards[i + 1] : null;
+      rows.add(
+        Row(
+          children: [
+            Expanded(child: _buildCard(left)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: right != null ? _buildCard(right) : const SizedBox.shrink(),
             ),
           ],
-          if (caps.supportsAppleLog) ...[
-            const SizedBox(height: 8),
-            Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E1E22),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: SwitchListTile(
-                activeThumbColor: Colors.amber,
-                title: const Text(
-                  'Apple Log',
-                  style: TextStyle(color: Colors.white, fontSize: 14),
-                ),
-                subtitle: Text(
-                  state.appleLogEnabled
-                      ? 'Sensor mengirim Log datar. Grading tone/LUT dipakai '
-                          'untuk melihat hasil akhir.'
-                      : 'Gamma Log 10-bit sebelum grading, untuk highlight '
-                          'yang tidak mudah pecah.',
-                  style: const TextStyle(color: Colors.white54, fontSize: 12),
-                ),
-                value: state.appleLogEnabled,
-                onChanged: isRecording
-                    ? null
-                    : (value) {
-                        tap();
-                        notifier.setAppleLog(value);
-                      },
-              ),
-            ),
-          ] else ...[
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1A1A1E),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.white12),
-              ),
-              child: Row(
+        ),
+      );
+      if (i + 2 < cards.length) rows.add(const SizedBox(height: 8));
+    }
+    return Column(children: rows);
+  }
+
+  Widget _buildCard(_SwitchCardData card) {
+    return GestureDetector(
+      onTap: card.enabled
+          ? () {
+              if (haptics) HapticFeedback.selectionClick();
+              card.onTap();
+            }
+          : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: card.active
+              ? AppTheme.cinemaAmber.withValues(alpha: 0.14)
+              : AppTheme.cardDark,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: card.active ? AppTheme.cinemaAmber : AppTheme.hairline,
+            width: card.active ? 1.2 : 0.9,
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Icon(
-                    Icons.lock_outline_rounded,
-                    size: 16,
-                    color: Colors.white38,
+                  Text(
+                    card.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: !card.enabled
+                          ? Colors.white24
+                          : card.active
+                              ? AppTheme.cinemaAmber
+                              : AppTheme.textPrimary,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.5,
+                    ),
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Apple Log tidak tersedia di ${caps.deviceName}. Gamma '
-                      'Log 10-bit butuh chip A17 Pro atau lebih baru '
-                      '(iPhone 15 Pro ke atas) — batas ini ada di hardware, '
-                      'bukan di aplikasi. Jalur kualitas terbaik di perangkat '
-                      'ini: aktifkan ProRes 422 untuk master 10-bit.',
-                      style: const TextStyle(
-                        color: Colors.white54,
-                        fontSize: 10,
-                        height: 1.4,
-                      ),
+                  const SizedBox(height: 2),
+                  Text(
+                    card.subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 9.5,
                     ),
                   ),
                 ],
               ),
             ),
-          ],
-          const SizedBox(height: 8),
-          Container(
-            decoration: BoxDecoration(
-              color: const Color(0xFF1E1E22),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Column(
-              children: [
-                SwitchListTile(
-                  activeThumbColor: Colors.amber,
-                  title: Text(
-                    'Exposure · ${state.manualExposureEnabled ? 'MANUAL' : 'AUTO'}',
-                    style: const TextStyle(color: Colors.white, fontSize: 14),
-                  ),
-                  subtitle: Text(
-                    state.manualExposureEnabled
-                        ? 'Shutter ${state.shutterLabel} · ISO '
-                            '${state.iso.round()} terkunci di sensor.'
-                        : 'iOS memilih shutter dan ISO otomatis.',
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 12,
-                    ),
-                  ),
-                  value: state.manualExposureEnabled,
-                  onChanged: (value) {
-                    tap();
-                    notifier.setManualExposureEnabled(value);
-                  },
-                ),
-                _ProSlider(
-                  label: 'SHUTTER',
-                  value: state.shutterLabel,
-                  sliderValue: _logToSlider(
-                    state.shutterSeconds,
-                    caps.minShutterSeconds,
-                    caps.maxShutterSeconds,
-                  ),
-                  onChanged: (t) => notifier.previewManualExposure(
-                    shutterSeconds: _logFromSlider(
-                      t,
-                      caps.minShutterSeconds,
-                      caps.maxShutterSeconds,
-                    ),
-                  ),
-                  onChangeEnd: (_) => notifier.commitManualExposure(),
-                ),
-                _ProSlider(
-                  label: 'ISO',
-                  value: state.iso.round().toString(),
-                  sliderValue: _logToSlider(
-                    state.iso,
-                    caps.minIso,
-                    caps.maxIso,
-                  ),
-                  onChanged: (t) => notifier.previewManualExposure(
-                    iso: _logFromSlider(t, caps.minIso, caps.maxIso),
-                  ),
-                  onChangeEnd: (_) => notifier.commitManualExposure(),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: state.is180ShutterLocked
-                            ? Colors.black
-                            : Colors.amber,
-                        backgroundColor: state.is180ShutterLocked
-                            ? Colors.amber
-                            : Colors.transparent,
-                        side: const BorderSide(color: Colors.amber),
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                      ),
-                      onPressed: () {
-                        tap();
-                        notifier.toggle180DegreeShutter();
-                      },
-                      icon: const Icon(Icons.shutter_speed_rounded, size: 16),
-                      label: Text(
-                        state.is180ShutterLocked
-                            ? '180° SHUTTER TERKUNCI (1/${state.frameRate.value * 2}s)'
-                            : 'KUNCI 180° SHUTTER RULE (1/${state.frameRate.value * 2}s @ ${state.frameRate.value}FPS)',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const Divider(height: 1, color: Colors.white12),
-                SwitchListTile(
-                  activeThumbColor: Colors.amber,
-                  title: Text(
-                    'White Balance · '
-                    '${state.manualWhiteBalanceEnabled ? 'MANUAL' : 'AUTO'}',
-                    style: const TextStyle(color: Colors.white, fontSize: 14),
-                  ),
-                  subtitle: Text(
-                    state.manualWhiteBalanceEnabled
-                        ? '${state.whiteBalanceKelvin} K · tint '
-                            '${state.whiteBalanceTint} terkunci.'
-                        : 'iOS mengikuti warna cahaya sekitar.',
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 12,
-                    ),
-                  ),
-                  value: state.manualWhiteBalanceEnabled,
-                  onChanged: (value) {
-                    tap();
-                    notifier.setManualWhiteBalanceEnabled(value);
-                  },
-                ),
-                _ProSlider(
-                  label: 'SUHU',
-                  value: '${state.whiteBalanceKelvin} K',
-                  sliderValue: (state.whiteBalanceKelvin - 1000) / 13000,
-                  onChanged: (t) => notifier.previewManualWhiteBalance(
-                    kelvin: (1000 + t * 13000).round(),
-                  ),
-                  onChangeEnd: (_) => notifier.commitManualWhiteBalance(),
-                ),
-                _ProSlider(
-                  label: 'TINT',
-                  value: '${state.whiteBalanceTint}',
-                  sliderValue: (state.whiteBalanceTint + 150) / 300,
-                  onChanged: (t) => notifier.previewManualWhiteBalance(
-                    tint: (t * 300 - 150).round(),
-                  ),
-                  onChangeEnd: (_) => notifier.commitManualWhiteBalance(),
-                ),
-                const Divider(height: 1, color: Colors.white12),
-                SwitchListTile(
-                  activeThumbColor: Colors.amber,
-                  title: Text(
-                    'Focus · ${state.manualFocusEnabled ? 'MANUAL' : 'AUTO'}',
-                    style: const TextStyle(color: Colors.white, fontSize: 14),
-                  ),
-                  subtitle: Text(
-                    state.manualFocusEnabled
-                        ? 'Posisi lensa ${(state.focusPosition * 100).round()}% '
-                            '(0% jauh, 100% dekat).'
-                        : 'Ketuk pratinjau atau pakai slider untuk fokus manual.',
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 12,
-                    ),
-                  ),
-                  value: state.manualFocusEnabled,
-                  onChanged: (value) {
-                    tap();
-                    notifier.setManualFocusEnabled(value);
-                  },
-                ),
-                _ProSlider(
-                  label: 'FOKUS',
-                  value: '${(state.focusPosition * 100).round()}%',
-                  sliderValue: state.focusPosition,
-                  onChanged: notifier.previewManualFocus,
-                ),
-              ],
-            ),
-          ),
-        ],
-        if (state.proControlError != null) ...[
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF3A1B1B),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: Colors.redAccent.withValues(alpha: 0.6),
+            const SizedBox(width: 6),
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: card.active
+                    ? AppTheme.cinemaAmber
+                    : Colors.white.withValues(alpha: 0.16),
               ),
             ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Icon(
-                  Icons.error_outline_rounded,
-                  size: 16,
-                  color: Colors.redAccent,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    state.proControlError!,
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontSize: 10,
-                      height: 1.35,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-
-  /// Slider positions travel on a log scale, matching how photographers think
-  /// about shutter speed and ISO (each stop doubles the light).
-  double _logToSlider(double value, double min, double max) {
-    if (min <= 0 || max <= 0 || max <= min) return 0;
-    final clamped = value.clamp(min, max).toDouble();
-    return (math.log(clamped) - math.log(min)) /
-        (math.log(max) - math.log(min));
-  }
-
-  double _logFromSlider(double t, double min, double max) {
-    if (min <= 0 || max <= 0 || max <= min) return min;
-    return math.exp(
-        math.log(min) + t.clamp(0.0, 1.0) * (math.log(max) - math.log(min)));
-  }
-
-  /// Keeps a failed session rebuild visible instead of silently doing nothing.
-  Future<void> _applyProfile(
-    BuildContext context,
-    Future<void> Function() action,
-    String label,
-  ) async {
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    try {
-      await action();
-    } catch (error) {
-      messenger?.showSnackBar(
-        SnackBar(
-          content: Text('Gagal mengganti $label: ${_describe(error)}'),
-          backgroundColor: const Color(0xFFB3261E),
-          behavior: SnackBarBehavior.floating,
+          ],
         ),
-      );
-    }
-  }
-
-  String _describe(Object error) {
-    final text = error.toString();
-    return text.startsWith('Exception: ') ? text.substring(11) : text;
+      ),
+    );
   }
 }
 
-/// One labelled slider row in the manual control panel.
-class _ProSlider extends StatelessWidget {
+class _CompactSliderRow extends StatelessWidget {
   final String label;
-  final String value;
-  final double sliderValue;
+  final double value;
   final ValueChanged<double> onChanged;
-  final ValueChanged<double>? onChangeEnd;
 
-  const _ProSlider({
+  const _CompactSliderRow({
     required this.label,
     required this.value,
-    required this.sliderValue,
     required this.onChanged,
-    this.onChangeEnd,
   });
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                label,
-                style: const TextStyle(
-                  color: Colors.white38,
-                  fontSize: 9,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.8,
-                ),
+          SizedBox(
+            width: 96,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
               ),
-              Text(
-                value,
-                style: const TextStyle(
-                  color: Colors.amber,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 2,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
             ),
-            child: Slider(
-              value: sliderValue.clamp(0.0, 1.0),
-              activeColor: Colors.amber,
-              inactiveColor: Colors.white24,
-              onChanged: onChanged,
-              onChangeEnd: onChangeEnd,
+          ),
+          Expanded(
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 2,
+                activeTrackColor: AppTheme.cinemaAmber,
+                inactiveTrackColor: Colors.white12,
+                thumbColor: AppTheme.cinemaAmber,
+                thumbShape:
+                    const RoundSliderThumbShape(enabledThumbRadius: 6.5),
+                overlayShape:
+                    const RoundSliderOverlayShape(overlayRadius: 13),
+              ),
+              child: Slider(
+                value: value.clamp(0.0, 1.0),
+                onChanged: onChanged,
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 34,
+            child: Text(
+              '${(value * 100).round()}',
+              textAlign: TextAlign.right,
+              style: AppTheme.monoStyle(
+                color: AppTheme.textPrimary,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ],

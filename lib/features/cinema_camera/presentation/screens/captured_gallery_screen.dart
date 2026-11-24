@@ -4,20 +4,20 @@ import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/l10n/app_strings.dart';
 import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../providers/cinema_camera_provider.dart';
 
-/// Local gallery of everything captured on this device plus everything imported
-/// from the iPhone camera roll.
-///
-/// It reads the index kept by [CinemaCameraRepository] instead of Apple Photos,
-/// so it opens instantly and works without library permission.
+enum _GalleryFilter { all, photo, video, imported }
+
+/// Editorial Pro Gallery with Filter Pills and Multi-Select Batch Delete / Save.
 class CapturedGalleryScreen extends ConsumerStatefulWidget {
   const CapturedGalleryScreen({super.key});
 
@@ -27,19 +27,82 @@ class CapturedGalleryScreen extends ConsumerStatefulWidget {
 }
 
 class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
-  late Future<List<CapturedMedia>> _mediaFuture;
+  List<CapturedMedia> _items = const <CapturedMedia>[];
+  bool _loading = true;
   bool _importing = false;
+  bool _batchBusy = false;
+
+  _GalleryFilter _filter = _GalleryFilter.all;
+  bool _selectionMode = false;
+  final Set<String> _selectedIds = <String>{};
 
   @override
   void initState() {
     super.initState();
-    _mediaFuture = ref.read(cinemaCameraProvider.notifier).loadCapturedMedia();
+    _loadMedia();
   }
 
-  void _reload() {
+  Future<void> _loadMedia() async {
+    setState(() => _loading = true);
+    final items =
+        await ref.read(cinemaCameraProvider.notifier).loadCapturedMedia();
+    if (!mounted) return;
     setState(() {
-      _mediaFuture =
-          ref.read(cinemaCameraProvider.notifier).loadCapturedMedia();
+      _items = items;
+      _loading = false;
+      final existingIds = items.map((e) => e.id).toSet();
+      _selectedIds.removeWhere((id) => !existingIds.contains(id));
+      if (_selectedIds.isEmpty && _items.isEmpty) {
+        _selectionMode = false;
+      }
+    });
+  }
+
+  List<CapturedMedia> get _filteredItems {
+    return switch (_filter) {
+      _GalleryFilter.all => _items,
+      _GalleryFilter.photo => _items.where((m) => !m.isVideo).toList(),
+      _GalleryFilter.video => _items.where((m) => m.isVideo).toList(),
+      _GalleryFilter.imported => _items.where((m) => m.isImported).toList(),
+    };
+  }
+
+  List<CapturedMedia> get _selectedItems =>
+      _items.where((m) => _selectedIds.contains(m.id)).toList();
+
+  void _toggleSelectionMode() {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _selectionMode = !_selectionMode;
+      if (!_selectionMode) _selectedIds.clear();
+    });
+  }
+
+  void _toggleItemSelection(CapturedMedia media) {
+    HapticFeedback.selectionClick();
+    setState(() {
+      if (_selectedIds.contains(media.id)) {
+        _selectedIds.remove(media.id);
+      } else {
+        _selectedIds.add(media.id);
+      }
+    });
+  }
+
+  void _toggleSelectAll(List<CapturedMedia> visible) {
+    HapticFeedback.selectionClick();
+    setState(() {
+      final allVisibleSelected = visible.isNotEmpty &&
+          visible.every((m) => _selectedIds.contains(m.id));
+      if (allVisibleSelected) {
+        for (final m in visible) {
+          _selectedIds.remove(m.id);
+        }
+      } else {
+        for (final m in visible) {
+          _selectedIds.add(m.id);
+        }
+      }
     });
   }
 
@@ -52,14 +115,18 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
     return CinemaTone(
       id: media.toneId,
       name: media.toneName,
-      filmReference: 'CineLens LUT',
-      description: 'Preset tersimpan',
-      accentColorHex: 0xFFFFC145,
+      filmReference: 'CineLens',
+      description: '',
+      accentColorHex: 0xFFE5A93B,
       matrix: CinemaTone.identityMatrix,
     );
   }
 
   Future<void> _openMedia(CapturedMedia media) async {
+    if (_selectionMode) {
+      _toggleItemSelection(media);
+      return;
+    }
     final tone = _resolveTone(media);
     final result = media.isVideo
         ? await context.push<bool>(
@@ -80,181 +147,97 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
               isAnamorphic: media.isAnamorphic,
             ),
           );
-    if (result == true && mounted) _reload();
-  }
-
-  Future<void> _openEditor(CapturedMedia media) async {
-    final edited = await context.push<bool>(
-      '/editor',
-      extra: PhotoEditorArgs(
-        path: media.path,
-        isVideo: media.isVideo,
-        bakedToneName: media.isImported ? '' : media.toneName,
-      ),
-    );
-    if (edited == true && mounted) {
-      _reload();
-      _snack('Hasil edit ditambahkan ke galeri.');
-    }
+    if (result == true && mounted) await _loadMedia();
   }
 
   Future<void> _importFromPhotos() async {
     if (_importing) return;
     setState(() => _importing = true);
-
     try {
       final imported = await ref
           .read(cinemaCameraProvider.notifier)
           .importFromPhotoLibrary();
       if (!mounted) return;
       setState(() => _importing = false);
-      if (imported.isEmpty) {
-        _snack('Tidak ada foto atau video yang dipilih.');
-        return;
+      if (imported.isEmpty) return;
+      await _loadMedia();
+      if (mounted) {
+        _snack('+${imported.length} ${AppStrings.of(context).importedMedia}');
       }
-      _reload();
-      _snack('${imported.length} media dari Photos ditambahkan ke galeri.');
     } catch (error) {
       if (!mounted) return;
       setState(() => _importing = false);
-      _snack('Gagal mengimpor: ${_describe(error)}');
+      _snack(_describe(error));
     }
   }
 
-  Future<void> _saveToPhotos(CapturedMedia media) async {
-    try {
-      await ref.read(cinemaCameraProvider.notifier).saveMediaToPhotos(media);
-      if (!mounted) return;
-      _snack('Disimpan ke Apple Photos.');
-    } catch (error) {
-      if (!mounted) return;
-      _snack('Gagal menyimpan ke Photos: ${_describe(error)}');
+  Future<void> _batchSaveToPhotos() async {
+    final selected = _selectedItems;
+    if (selected.isEmpty || _batchBusy) return;
+    setState(() => _batchBusy = true);
+    var saved = 0;
+    final notifier = ref.read(cinemaCameraProvider.notifier);
+    for (final item in selected) {
+      try {
+        await notifier.saveMediaToPhotos(item);
+        saved++;
+      } catch (_) {}
     }
-  }
-
-  Future<void> _showActions(CapturedMedia media) async {
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: AppTheme.surfaceDark,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 6),
-              child: Row(
-                children: [
-                  Icon(
-                    media.isVideo
-                        ? Icons.movie_outlined
-                        : Icons.image_outlined,
-                    color: AppTheme.cinemaAmber,
-                    size: 18,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      media.toneName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppTheme.textPrimary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            ListTile(
-              leading: const Icon(
-                Icons.tune_rounded,
-                color: AppTheme.cinemaAmber,
-              ),
-              title: const Text(
-                'Edit (Cahaya, Warna, Kurva, Film)',
-                style: TextStyle(color: AppTheme.textPrimary, fontSize: 13),
-              ),
-              onTap: () => Navigator.of(sheetContext).pop('edit'),
-            ),
-            ListTile(
-              leading: const Icon(
-                Icons.photo_camera_outlined,
-                color: AppTheme.textPrimary,
-              ),
-              title: const Text(
-                'Simpan ke Apple Photos',
-                style: TextStyle(color: AppTheme.textPrimary, fontSize: 13),
-              ),
-              onTap: () => Navigator.of(sheetContext).pop('photos'),
-            ),
-            ListTile(
-              leading: const Icon(
-                Icons.delete_outline_rounded,
-                color: Colors.redAccent,
-              ),
-              title: const Text(
-                'Hapus dari galeri',
-                style: TextStyle(color: Colors.redAccent, fontSize: 13),
-              ),
-              onTap: () => Navigator.of(sheetContext).pop('delete'),
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-
     if (!mounted) return;
-    switch (action) {
-      case 'edit':
-        await _openEditor(media);
-      case 'photos':
-        await _saveToPhotos(media);
-      case 'delete':
-        await _confirmDelete(media);
-    }
+    final s = AppStrings.of(context);
+    setState(() {
+      _batchBusy = false;
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+    _snack(s.savedToPhotosCount(saved));
   }
 
-  Future<void> _confirmDelete(CapturedMedia media) async {
+  Future<void> _confirmBatchDelete() async {
+    final selected = _selectedItems;
+    if (selected.isEmpty || _batchBusy) return;
+    final s = AppStrings.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         backgroundColor: AppTheme.surfaceDark,
-        title: const Text(
-          'Hapus hasil?',
-          style: TextStyle(color: AppTheme.textPrimary, fontSize: 16),
+        title: Text(
+          s.deleteItemsTitle(selected.length),
+          style: const TextStyle(color: AppTheme.textPrimary, fontSize: 15),
         ),
         content: Text(
-          media.isVideo
-              ? 'Video ini akan dihapus dari galeri dan penyimpanan aplikasi.'
-              : 'Foto ini akan dihapus dari galeri dan penyimpanan aplikasi.',
-          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+          s.deleteItemsBody(selected.length),
+          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12.5),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Batal'),
+            child: Text(s.cancel),
           ),
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Hapus', style: TextStyle(color: Colors.redAccent)),
+            child: Text(
+              s.delete,
+              style: const TextStyle(color: AppTheme.cinemaRed),
+            ),
           ),
         ],
       ),
     );
+    if (confirmed != true || !mounted) return;
 
-    if (confirmed != true) return;
-
+    setState(() => _batchBusy = true);
     await ref
         .read(cinemaCameraProvider.notifier)
-        .deleteCapturedMedia(media);
+        .deleteCapturedMediaBatch(selected);
     if (!mounted) return;
-    _reload();
+    setState(() {
+      _batchBusy = false;
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+    await _loadMedia();
+    if (mounted) _snack(s.deletedCount(selected.length));
   }
 
   void _snack(String message) {
@@ -263,9 +246,9 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
       ..showSnackBar(
         SnackBar(
           content: Text(message, style: const TextStyle(fontSize: 12)),
-          backgroundColor: AppTheme.surfaceDark,
+          backgroundColor: AppTheme.cardDark,
           behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 3),
+          duration: const Duration(seconds: 2),
         ),
       );
   }
@@ -277,75 +260,265 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final s = AppStrings.of(context);
+    final visible = _filteredItems;
+
     return Scaffold(
       backgroundColor: AppTheme.backgroundBlack,
       appBar: AppBar(
-        title: const Text('GALERI CINELENS'),
+        backgroundColor: AppTheme.backgroundBlack,
+        title: Text(
+          _selectionMode && _selectedIds.isNotEmpty
+              ? s.selectedCount(_selectedIds.length).toUpperCase()
+              : s.gallery,
+        ),
         actions: [
-          if (_importing)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: AppTheme.cinemaAmber,
-                  ),
+          if (_items.isNotEmpty)
+            TextButton(
+              onPressed: _batchBusy ? null : _toggleSelectionMode,
+              child: Text(
+                _selectionMode ? s.done : s.select,
+                style: TextStyle(
+                  color: _selectionMode
+                      ? AppTheme.cinemaAmber
+                      : AppTheme.textPrimary,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
-            )
-          else
-            IconButton(
-              tooltip: 'Impor dari Photos',
-              icon: const Icon(Icons.add_photo_alternate_outlined),
-              onPressed: _importFromPhotos,
             ),
-          IconButton(
-            tooltip: 'Muat ulang',
-            icon: const Icon(Icons.refresh_rounded),
-            onPressed: _reload,
-          ),
+          if (!_selectionMode)
+            Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: _importing
+                  ? const Center(
+                      child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppTheme.cinemaAmber,
+                        ),
+                      ),
+                    )
+                  : GestureDetector(
+                      onTap: _importFromPhotos,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(vertical: 11),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 11,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppTheme.cinemaAmber,
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Text(
+                          '+ ${s.importLabel}',
+                          style: const TextStyle(
+                            color: Colors.black,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
         ],
       ),
       body: SafeArea(
-        child: FutureBuilder<List<CapturedMedia>>(
-          future: _mediaFuture,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              return const Center(
-                child: CupertinoActivityIndicator(color: AppTheme.cinemaAmber),
-              );
-            }
-
-            final media = snapshot.data ?? const <CapturedMedia>[];
-            if (media.isEmpty) return _buildEmptyState();
-
-            return LayoutBuilder(
-              builder: (context, constraints) {
-                final columns =
-                    (constraints.maxWidth / 130).floor().clamp(2, 6);
-                return GridView.builder(
-                  padding: const EdgeInsets.all(4),
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: columns,
-                    mainAxisSpacing: 4,
-                    crossAxisSpacing: 4,
-                    childAspectRatio: 0.74,
-                  ),
-                  itemCount: media.length,
-                  itemBuilder: (context, index) => _buildTile(media[index]),
-                );
-              },
-            );
-          },
+        child: Column(
+          children: [
+            _buildFilterBar(s),
+            Expanded(
+              child: _loading
+                  ? const Center(
+                      child: CupertinoActivityIndicator(
+                        color: AppTheme.cinemaAmber,
+                      ),
+                    )
+                  : visible.isEmpty
+                      ? _buildEmptyState(s)
+                      : LayoutBuilder(
+                          builder: (context, constraints) {
+                            final cols =
+                                (constraints.maxWidth / 124).floor().clamp(3, 6);
+                            return GridView.builder(
+                              padding: const EdgeInsets.fromLTRB(3, 6, 3, 16),
+                              gridDelegate:
+                                  SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: cols,
+                                mainAxisSpacing: 3,
+                                crossAxisSpacing: 3,
+                                childAspectRatio: 0.75,
+                              ),
+                              itemCount: visible.length,
+                              itemBuilder: (context, i) =>
+                                  _buildTile(visible[i], s),
+                            );
+                          },
+                        ),
+            ),
+            if (_selectionMode) _buildBatchActionBar(s, visible),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildEmptyState() {
+  Widget _buildFilterBar(AppStrings s) {
+    final filters = [
+      (_GalleryFilter.all, s.allMedia),
+      (_GalleryFilter.photo, s.photo),
+      (_GalleryFilter.video, s.video),
+      (_GalleryFilter.imported, s.importedMedia),
+    ];
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppTheme.hairline, width: 0.7)),
+      ),
+      child: Row(
+        children: [
+          for (final (filter, label) in filters) ...[
+            GestureDetector(
+              onTap: () {
+                HapticFeedback.selectionClick();
+                setState(() => _filter = filter);
+              },
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 140),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 11,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: _filter == filter
+                      ? AppTheme.cinemaAmber.withValues(alpha: 0.16)
+                      : AppTheme.cardDark,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: _filter == filter
+                        ? AppTheme.cinemaAmber
+                        : AppTheme.hairline,
+                    width: 0.9,
+                  ),
+                ),
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: _filter == filter
+                        ? AppTheme.cinemaAmber
+                        : AppTheme.textSecondary,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBatchActionBar(AppStrings s, List<CapturedMedia> visible) {
+    final count = _selectedIds.length;
+    final allSelected =
+        visible.isNotEmpty && visible.every((m) => _selectedIds.contains(m.id));
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      decoration: const BoxDecoration(
+        color: AppTheme.surfaceDark,
+        border: Border(top: BorderSide(color: AppTheme.hairline, width: 0.8)),
+      ),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: _batchBusy ? null : () => _toggleSelectAll(visible),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: allSelected
+                    ? AppTheme.cinemaAmber.withValues(alpha: 0.16)
+                    : AppTheme.cardDark,
+                borderRadius: BorderRadius.circular(9),
+                border: Border.all(
+                  color: allSelected ? AppTheme.cinemaAmber : AppTheme.hairline,
+                ),
+              ),
+              child: Text(
+                s.selectAll,
+                style: TextStyle(
+                  color: allSelected
+                      ? AppTheme.cinemaAmber
+                      : AppTheme.textPrimary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+          const Spacer(),
+          if (_batchBusy)
+            const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: AppTheme.cinemaAmber,
+              ),
+            )
+          else ...[
+            OutlinedButton.icon(
+              onPressed: count == 0 ? null : _batchSaveToPhotos,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppTheme.textPrimary,
+                side: const BorderSide(color: AppTheme.hairline),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+              icon: const Icon(Icons.ios_share_rounded, size: 15),
+              label: Text(
+                s.save,
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: count == 0 ? null : _confirmBatchDelete,
+              style: FilledButton.styleFrom(
+                backgroundColor: AppTheme.cinemaRed,
+                disabledBackgroundColor:
+                    AppTheme.cinemaRed.withValues(alpha: 0.25),
+                foregroundColor: Colors.white,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              ),
+              icon: const Icon(Icons.delete_outline_rounded, size: 16),
+              label: Text(
+                count > 0 ? '${s.delete} ($count)' : s.delete,
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyState(AppStrings s) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(28),
@@ -354,45 +527,38 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
           children: [
             const Icon(
               Icons.photo_library_outlined,
-              color: Colors.white38,
-              size: 54,
+              color: Colors.white24,
+              size: 46,
             ),
-            const SizedBox(height: 14),
-            const Text(
-              'Belum ada hasil',
-              style: TextStyle(
+            const SizedBox(height: 12),
+            Text(
+              s.emptyGalleryTitle,
+              style: const TextStyle(
                 color: AppTheme.textPrimary,
-                fontSize: 15,
+                fontSize: 14,
                 fontWeight: FontWeight.w700,
               ),
             ),
-            const SizedBox(height: 6),
-            const Text(
-              'Foto dan video yang kamu ambil atau impor dari Photos akan muncul di sini.',
+            const SizedBox(height: 5),
+            Text(
+              s.emptyGallerySub,
               textAlign: TextAlign.center,
-              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+              style: const TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 12,
+              ),
             ),
             const SizedBox(height: 18),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: _importFromPhotos,
-                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
-                  label: const Text('Impor dari Photos'),
-                ),
-                const SizedBox(width: 10),
-                FilledButton(
-                  onPressed: () => context.pop(),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppTheme.cinemaAmber,
-                  ),
-                  child: const Text(
-                    'Kamera',
-                    style: TextStyle(color: Colors.black),
-                  ),
-                ),
-              ],
+            FilledButton(
+              onPressed: _importFromPhotos,
+              style: FilledButton.styleFrom(
+                backgroundColor: AppTheme.cinemaAmber,
+                foregroundColor: Colors.black,
+              ),
+              child: Text(
+                '+ ${s.importLabel}',
+                style: const TextStyle(fontWeight: FontWeight.w800),
+              ),
             ),
           ],
         ),
@@ -400,124 +566,155 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
     );
   }
 
-  Widget _buildTile(CapturedMedia media) {
+  Widget _buildTile(CapturedMedia media, AppStrings s) {
+    final isSelected = _selectedIds.contains(media.id);
+
     return GestureDetector(
       onTap: () => _openMedia(media),
-      onLongPress: () => _showActions(media),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          color: AppTheme.surfaceDark,
-          child: Column(
-            children: [
-              Expanded(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (media.isVideo)
-                      _buildVideoTile(media)
-                    else
-                      Image.file(
-                        File(media.path),
-                        fit: BoxFit.cover,
-                        cacheWidth: 360,
-                        errorBuilder: (context, error, stackTrace) =>
-                            const ColoredBox(
-                          color: Color(0xFF151518),
-                          child: Center(
-                            child: Icon(
-                              Icons.broken_image_outlined,
-                              color: Colors.white38,
-                              size: 28,
-                            ),
-                          ),
-                        ),
-                      ),
-                    Positioned(
-                      top: 4,
-                      right: 4,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 5,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.65),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          media.isImported
-                              ? 'IMPOR'
-                              : media.isVideo
-                                  ? 'VIDEO'
-                                  : 'FOTO',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 8,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 0.5,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(6, 4, 6, 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      media.toneName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppTheme.textPrimary,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 1),
-                    Text(
-                      _formatTimestamp(media.createdAt),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppTheme.textSecondary,
-                        fontSize: 8,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+      onLongPress: () {
+        HapticFeedback.mediumImpact();
+        setState(() {
+          _selectionMode = true;
+          _selectedIds.add(media.id);
+        });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        decoration: BoxDecoration(
+          color: AppTheme.cardDark,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(
+            color: isSelected ? AppTheme.cinemaAmber : Colors.transparent,
+            width: isSelected ? 2.0 : 0.0,
           ),
         ),
-      ),
-    );
-  }
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (media.isVideo)
+              const ColoredBox(
+                color: Color(0xFF141418),
+                child: Center(
+                  child: Icon(
+                    Icons.play_circle_fill_rounded,
+                    color: Colors.white70,
+                    size: 32,
+                  ),
+                ),
+              )
+            else
+              Image.file(
+                File(media.path),
+                fit: BoxFit.cover,
+                cacheWidth: 340,
+                errorBuilder: (_, __, ___) => const ColoredBox(
+                  color: Color(0xFF141418),
+                  child: Icon(
+                    Icons.broken_image_outlined,
+                    color: Colors.white24,
+                    size: 24,
+                  ),
+                ),
+              ),
 
-  /// Imported clips have no poster frame on disk yet, so the first frame is
-  /// shown by the preview screen; the tile keeps the old play glyph.
-  Widget _buildVideoTile(CapturedMedia media) {
-    return const ColoredBox(
-      color: Color(0xFF151518),
-      child: Center(
-        child: Icon(
-          Icons.play_circle_fill_rounded,
-          color: Colors.white70,
-          size: 34,
+            if (isSelected)
+              ColoredBox(color: AppTheme.cinemaAmber.withValues(alpha: 0.16)),
+
+            // Bottom editorial caption scrim
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(6, 14, 6, 5),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.78),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        media.toneName.toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                    ),
+                    if (media.isVideo)
+                      const Icon(
+                        Icons.videocam_rounded,
+                        color: AppTheme.cinemaAmber,
+                        size: 11,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+
+            // Top-right Selection Checkbox OR Media Type Badge
+            if (_selectionMode)
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isSelected
+                        ? AppTheme.cinemaAmber
+                        : Colors.black.withValues(alpha: 0.55),
+                    border: Border.all(
+                      color: isSelected ? AppTheme.cinemaAmber : Colors.white70,
+                      width: 1.5,
+                    ),
+                  ),
+                  child: isSelected
+                      ? const Icon(
+                          Icons.check_rounded,
+                          color: Colors.black,
+                          size: 14,
+                        )
+                      : null,
+                ),
+              )
+            else if (media.isImported || media.isVideo)
+              Positioned(
+                top: 5,
+                right: 5,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.62),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    media.isImported ? s.importedMedia : s.video,
+                    style: AppTheme.monoStyle(
+                      color: Colors.white,
+                      fontSize: 7.5,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
-  }
-
-  String _formatTimestamp(DateTime value) {
-    final day = value.day.toString().padLeft(2, '0');
-    final month = value.month.toString().padLeft(2, '0');
-    final hour = value.hour.toString().padLeft(2, '0');
-    final minute = value.minute.toString().padLeft(2, '0');
-    return '$day/$month ${value.year % 100} • $hour:$minute';
   }
 }

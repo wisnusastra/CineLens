@@ -10,6 +10,7 @@ import '../../data/repositories/cinema_camera_repository_impl.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/film_look.dart';
+import '../../domain/entities/frame_format.dart';
 import '../../domain/entities/pro_capture_capabilities.dart';
 import '../../domain/services/color_matrix_builder.dart';
 import 'cinema_camera_state.dart';
@@ -65,6 +66,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   /// Kept off the UI state because it must survive the state being replaced
   /// while the native recorder is still writing.
   bool _proResRecording = false;
+  bool _directLutRecording = false;
 
   /// Manual sliders emit dozens of values per second; the native call is
   /// coalesced so the device is not locked for configuration on every tick.
@@ -100,7 +102,15 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       _handleStabilizationChanged,
       onProResFinished: _handleProResFinished,
       onExportProgress: _handleExportProgress,
+      onDopTelemetry: _handleDopTelemetry,
+      onLiveScope: _handleLiveScope,
     );
+
+    final mediaLibrary = await repository.loadCapturedMedia();
+    final latestThumb = mediaLibrary
+        .where((m) => !m.isVideo)
+        .map((m) => m.path)
+        .firstOrNull;
 
     final selectedTone = tones.firstWhere(
       (t) => t.id == savedPrefs.toneId,
@@ -150,6 +160,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     // shutter range, Apple Log/ProRes support) are read from the running
     // session. This is retried because the session starts asynchronously.
     final capabilities = await _probeProCapabilities();
+    final frameFormat = CameraFrameFormat.fromName(proImaging.frameFormat);
+    unawaited(repository.setDopTelemetry(horizon: true, audio: false));
 
     return CinemaCameraState(
       tones: tones,
@@ -170,9 +182,15 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       filmLook: filmLook,
       bakeLookIntoProRes: bakeLook,
       processZeroEnabled: proImaging.processZero,
+      saveDngRaw: proImaging.saveDngRaw,
       highlightMeteringEnabled: proImaging.highlightMetering,
       anamorphicCrop: proImaging.anamorphicCrop,
       anamorphicDesqueeze: proImaging.desqueeze,
+      frameFormat: frameFormat,
+      isAnamorphicRatio: frameFormat == CameraFrameFormat.scope239,
+      directLutRecordingEnabled: proImaging.directLutRecording,
+      liveMetalEnabled: proImaging.liveMetalPreview,
+      latestGalleryThumbPath: latestThumb,
       backLenses: backLenses,
       activeBackLensIndex: initialLensIdx,
       iso: 400.0.clamp(capabilities.minIso, capabilities.maxIso).toDouble(),
@@ -264,6 +282,53 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         videoStabilizationActive: active,
         videoStabilizationMode: mode,
       ),
+    );
+  }
+
+  void _handleDopTelemetry(double? horizonDegrees, double? audioPeakDb) {
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final nextH = horizonDegrees ?? current.horizonDegrees;
+    final nextA = audioPeakDb ?? current.audioPeakDb;
+    if ((nextH - current.horizonDegrees).abs() < 0.2 &&
+        (nextA - current.audioPeakDb).abs() < 0.8) {
+      return;
+    }
+    state = AsyncData(
+      current.copyWith(horizonDegrees: nextH, audioPeakDb: nextA),
+    );
+  }
+
+  void _handleLiveScope(Map<String, dynamic> scope) {
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null || !current.liveScopeEnabled) return;
+    state = AsyncData(current.copyWith(liveScopeData: scope));
+  }
+
+  Map<String, dynamic> _liveMetalConfigFor(CinemaCameraState s) {
+    return <String, dynamic>{
+      'matrix': s.captureColorMatrix,
+      'toneId': s.selectedTone.isCustom ? null : s.selectedTone.id,
+      'intensity': s.intensity,
+      'look': s.nativeLook,
+      'appleLogInput': s.appleLogEnabled,
+      'focusPeaking': s.focusPeakingEnabled,
+      'zebraStripes': s.zebraEnabled,
+      'falseColor': s.falseColorEnabled,
+      'liveScope': s.liveScopeEnabled,
+      'frameAspectRatio': s.effectiveFrameAspectRatio,
+      'anamorphicCrop': s.anamorphicCrop,
+    };
+  }
+
+  void _syncLiveMetalIfActive(CinemaCameraState next) {
+    if (next.liveMetalTextureId == null) return;
+    unawaited(
+      ref
+          .read(cinemaCameraRepositoryProvider)
+          .updateLiveMetalConfig(_liveMetalConfigFor(next)),
     );
   }
 
@@ -609,9 +674,118 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   void setFilmLook(FilmLook look) {
     final current = state.valueOrNull;
     if (current == null) return;
-    state = AsyncData(current.copyWith(filmLook: look));
+    final next = current.copyWith(filmLook: look);
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
     unawaited(
       ref.read(cinemaCameraRepositoryProvider).saveFilmLook(look),
+    );
+  }
+
+  void setFrameFormat(CameraFrameFormat format) {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo) return;
+    final next = current.copyWith(
+      frameFormat: format,
+      isAnamorphicRatio: format == CameraFrameFormat.scope239,
+    );
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveFrameFormat(format.name),
+    );
+  }
+
+  void setSaveDngRaw(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(saveDngRaw: enabled));
+    unawaited(ref.read(cinemaCameraRepositoryProvider).saveSaveDngRaw(enabled));
+  }
+
+  void setDirectLutRecordingEnabled(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo) return;
+    state = AsyncData(current.copyWith(directLutRecordingEnabled: enabled));
+    unawaited(
+      ref
+          .read(cinemaCameraRepositoryProvider)
+          .saveDirectLutRecording(enabled),
+    );
+  }
+
+  Future<void> setLiveMetalEnabled(bool enabled) async {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo) return;
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    unawaited(repo.saveLiveMetalPreview(enabled));
+
+    if (!enabled) {
+      await repo.disableLiveMetalPreview();
+      if (_disposed) return;
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(
+        latest.copyWith(liveMetalEnabled: false, clearLiveMetalTexture: true),
+      );
+      return;
+    }
+
+    final tid = await repo.enableLiveMetalPreview(_liveMetalConfigFor(current));
+    if (_disposed) return;
+    final latest = state.valueOrNull ?? current;
+    state = AsyncData(
+      latest.copyWith(
+        liveMetalEnabled: tid != null,
+        liveMetalTextureId: tid,
+        clearLiveMetalTexture: tid == null,
+      ),
+    );
+  }
+
+  Future<void> setDopOverlay({
+    bool? focusPeaking,
+    bool? zebra,
+    bool? falseColor,
+    bool? horizon,
+    bool? audioMeter,
+    bool? liveScope,
+  }) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final next = current.copyWith(
+      focusPeakingEnabled: focusPeaking ?? current.focusPeakingEnabled,
+      zebraEnabled: zebra ?? current.zebraEnabled,
+      falseColorEnabled: falseColor ?? current.falseColorEnabled,
+      horizonLevelEnabled: horizon ?? current.horizonLevelEnabled,
+      audioMeterEnabled: audioMeter ?? current.audioMeterEnabled,
+      liveScopeEnabled: liveScope ?? current.liveScopeEnabled,
+    );
+    state = AsyncData(next);
+
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    final wantsGpuOverlay = next.focusPeakingEnabled ||
+        next.zebraEnabled ||
+        next.falseColorEnabled ||
+        next.liveScopeEnabled;
+
+    if (wantsGpuOverlay && next.liveMetalTextureId == null) {
+      final tid = await repo.enableLiveMetalPreview(_liveMetalConfigFor(next));
+      if (!_disposed && tid != null) {
+        final latest = state.valueOrNull ?? next;
+        state = AsyncData(
+          latest.copyWith(liveMetalEnabled: true, liveMetalTextureId: tid),
+        );
+      }
+    } else if (next.liveMetalTextureId != null) {
+      unawaited(repo.updateLiveMetalConfig(_liveMetalConfigFor(next)));
+    }
+
+    unawaited(
+      repo.setDopTelemetry(
+        horizon: next.horizonLevelEnabled,
+        audio: next.audioMeterEnabled &&
+            next.captureMode == CinemaCaptureMode.video24fps,
+      ),
     );
   }
 
@@ -1008,6 +1182,26 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       // Apple Log (it needs a specific 4K/1080p format), so the pro panel has to
       // re-read the device before the operator touches a slider.
       await _refreshProCapabilities();
+
+      final synced = state.valueOrNull;
+      if (synced != null) {
+        final repo = ref.read(cinemaCameraRepositoryProvider);
+        unawaited(
+          repo.setDopTelemetry(
+            horizon: synced.horizonLevelEnabled,
+            audio: synced.audioMeterEnabled &&
+                synced.captureMode == CinemaCaptureMode.video24fps,
+          ),
+        );
+        if (synced.liveMetalEnabled) {
+          final tid =
+              await repo.enableLiveMetalPreview(_liveMetalConfigFor(synced));
+          if (!_disposed && tid != null) {
+            final now = state.valueOrNull ?? synced;
+            state = AsyncData(now.copyWith(liveMetalTextureId: tid));
+          }
+        }
+      }
     } catch (error) {
       final latest = state.valueOrNull ?? current;
       state = AsyncData(
@@ -1078,9 +1272,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final current = state.valueOrNull;
     if (current == null) return;
 
-    state = AsyncData(
-      current.copyWith(selectedTone: tone, clearLiveDraft: true),
-    );
+    final next = current.copyWith(selectedTone: tone, clearLiveDraft: true);
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
     ref.read(cinemaCameraRepositoryProvider).savePreferences(
           toneId: tone.id,
           intensity: current.intensity,
@@ -1094,9 +1288,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final clamped = value.clamp(0.0, 1.0);
     // A leftover custom-tone draft would otherwise keep the viewfinder on the
     // draft matrix, making the intensity slider look dead.
-    state = AsyncData(
-      current.copyWith(intensity: clamped, clearLiveDraft: true),
-    );
+    final next = current.copyWith(intensity: clamped, clearLiveDraft: true);
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
     ref.read(cinemaCameraRepositoryProvider).savePreferences(
           toneId: current.selectedTone.id,
           intensity: clamped,
@@ -1381,6 +1575,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           colorMatrix: current.captureColorMatrix,
           applyAnamorphicBars: current.isAnamorphicRatio,
           anamorphicCrop: current.anamorphicCrop,
+          frameAspectRatio: current.effectiveFrameAspectRatio,
+          saveDngRaw: current.saveDngRaw,
           desqueeze: current.anamorphicDesqueeze,
           look: current.nativeLook,
           toneId: toneId,
@@ -1396,6 +1592,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           colorMatrix: current.captureColorMatrix,
           applyAnamorphicBars: current.isAnamorphicRatio,
           anamorphicCrop: current.anamorphicCrop,
+          frameAspectRatio: current.effectiveFrameAspectRatio,
           desqueeze: current.anamorphicDesqueeze,
           appleLogInput: current.appleLogEnabled,
           look: current.nativeLook,
@@ -1405,14 +1602,16 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       }
 
       String? warning;
+      String? storedPath;
       try {
-        await repository.storePhoto(
+        final stored = await repository.storePhoto(
           jpegBytes: gradedBytes,
           toneId: current.selectedTone.id,
           toneName: current.selectedTone.name,
           intensity: current.intensity,
           isAnamorphic: current.isAnamorphicRatio,
         );
+        storedPath = stored.path;
       } catch (error) {
         warning = 'Foto tidak masuk galeri CineLens: ${_describeError(error)}';
       }
@@ -1426,7 +1625,12 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       }
 
       final latest = state.valueOrNull ?? current;
-      state = AsyncData(latest.copyWith(isCapturing: false));
+      state = AsyncData(
+        latest.copyWith(
+          isCapturing: false,
+          latestGalleryThumbPath: storedPath ?? latest.latestGalleryThumbPath,
+        ),
+      );
       return PhotoCaptureResult(bytes: gradedBytes, warning: warning);
     } catch (e) {
       final latest = state.valueOrNull ?? current;
@@ -1487,6 +1691,32 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (current.proResEnabled && current.proCapabilities.supportsProRes) {
       await _startProResTake(current);
       return;
+    }
+
+    // Tahap 2 Direct-to-Disk HEVC LUT Recording (zero post-stop wait!).
+    if (current.directLutRecordingEnabled) {
+      try {
+        final repo = ref.read(cinemaCameraRepositoryProvider);
+        _directLutRecording = true;
+        await repo.startDirectLutRecording(<String, dynamic>{
+          ..._liveMetalConfigFor(current),
+          'fps': current.frameRate.value,
+          'bitrate': _videoBitrateFor(current.resolution, current.frameRate),
+        });
+        if (_disposed) return;
+        state = AsyncData(
+          current.copyWith(
+            isRecordingVideo: true,
+            isProcessingVideo: false,
+            recordingDuration: Duration.zero,
+          ),
+        );
+        _startRecordingClock();
+        return;
+      } catch (_) {
+        _directLutRecording = false;
+        // Fall back seamlessly to standard plugin recording.
+      }
     }
 
     final cam = await _ensureControllerIdle();
@@ -1583,8 +1813,12 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (current == null) return null;
 
     final isProResTake = _proResRecording;
+    final isDirectLutTake = _directLutRecording;
     final pluginRecording = cam?.value.isRecordingVideo ?? false;
-    if (!current.isRecordingVideo && !isProResTake && !pluginRecording) {
+    if (!current.isRecordingVideo &&
+        !isProResTake &&
+        !isDirectLutTake &&
+        !pluginRecording) {
       return null;
     }
 
@@ -1597,16 +1831,19 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           isProcessingVideo: true,
           recordingDuration: Duration.zero,
           videoProcessingLabel: bakingProRes
-              ? 'Membakar look ke ProRes...'
-              : isProResTake
-                  ? 'Menyelesaikan ProRes...'
-                  : 'Memproses video 24fps...',
+              ? 'Baking ProRes...'
+              : isDirectLutTake
+                  ? 'Saving HEVC...'
+                  : isProResTake
+                      ? 'Finalizing ProRes...'
+                      : 'Grading video...',
           clearVideoProcessingProgress: true,
         ),
       );
     }
 
     if (isProResTake) return _finishProResTake(current);
+    if (isDirectLutTake) return _finishDirectLutTake(current);
 
     String? rawPath;
     try {
@@ -1633,6 +1870,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         colorMatrix: current.captureColorMatrix,
         applyAnamorphicBars: current.isAnamorphicRatio,
         anamorphicCrop: current.anamorphicCrop,
+        frameAspectRatio: current.effectiveFrameAspectRatio,
         desqueeze: current.anamorphicDesqueeze,
         appleLogInput: current.appleLogEnabled,
         fps: current.frameRate.value,
@@ -1793,6 +2031,19 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       return;
     }
 
+    if (_directLutRecording) {
+      _directLutRecording = false;
+      try {
+        final path = await ref
+            .read(cinemaCameraRepositoryProvider)
+            .stopDirectLutRecording();
+        if (path != null && path.isNotEmpty) {
+          await _persistProResTake(path);
+        }
+      } catch (_) {}
+      return;
+    }
+
     final cam = _controller;
     if (cam == null || !cam.value.isInitialized) return;
 
@@ -1816,13 +2067,71 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     }
   }
 
+  Future<VideoStopResult?> _finishDirectLutTake(
+    CinemaCameraState current,
+  ) async {
+    _directLutRecording = false;
+    final repository = ref.read(cinemaCameraRepositoryProvider);
+    String? path;
+    try {
+      path = await repository.stopDirectLutRecording();
+    } catch (error) {
+      _writeRecordingStopped();
+      _setProError(_describeError(error));
+      return null;
+    }
+    if (path == null || path.isEmpty) {
+      _writeRecordingStopped();
+      return null;
+    }
+
+    String? warning;
+    try {
+      await repository.storeVideo(
+        sourcePath: path,
+        toneId: current.selectedTone.id,
+        toneName: current.selectedTone.name,
+        intensity: current.intensity,
+        isAnamorphic: current.isAnamorphicRatio,
+      );
+    } catch (error) {
+      warning = 'Gallery save failed: ${_describeError(error)}';
+    }
+    try {
+      await repository.saveVideoToGallery(path);
+    } catch (error) {
+      warning = warning == null
+          ? 'Apple Photos save failed: ${_describeError(error)}'
+          : '$warning · Apple Photos failed';
+    }
+    _writeRecordingStopped();
+    return VideoStopResult(path: path, warning: warning);
+  }
+
   /// Loads the local gallery index. Used by the gallery screen.
   Future<List<CapturedMedia>> loadCapturedMedia() {
     return ref.read(cinemaCameraRepositoryProvider).loadCapturedMedia();
   }
 
-  Future<void> deleteCapturedMedia(CapturedMedia media) {
-    return ref.read(cinemaCameraRepositoryProvider).deleteCapturedMedia(media);
+  Future<void> deleteCapturedMedia(CapturedMedia media) async {
+    await ref.read(cinemaCameraRepositoryProvider).deleteCapturedMedia(media);
+    await refreshLatestThumb();
+  }
+
+  Future<void> deleteCapturedMediaBatch(List<CapturedMedia> items) async {
+    await ref
+        .read(cinemaCameraRepositoryProvider)
+        .deleteCapturedMediaBatch(items);
+    await refreshLatestThumb();
+  }
+
+  Future<void> refreshLatestThumb() async {
+    final items = await loadCapturedMedia();
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final thumb = items.where((m) => !m.isVideo).map((m) => m.path).firstOrNull;
+    state = AsyncData(current.copyWith(latestGalleryThumbPath: thumb ?? ''));
   }
 
   /// Opens the iOS photo picker and indexes everything the user selected.

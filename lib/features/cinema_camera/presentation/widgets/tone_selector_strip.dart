@@ -1,9 +1,11 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import '../../../../core/theme/app_theme.dart';
 import '../../domain/entities/cinema_tone.dart';
 
+/// Ultra-clean Leica / Kino style film-stock pill strip (38px height).
 class ToneSelectorStrip extends StatelessWidget {
   final List<CinemaTone> tones;
   final CinemaTone selectedTone;
@@ -11,10 +13,10 @@ class ToneSelectorStrip extends StatelessWidget {
   final VoidCallback onOpenCustomCreator;
   final ValueChanged<CinemaTone>? onDeleteCustomTone;
 
-  /// Shorter cards used in landscape, where the tray must stay out of the way.
+  /// Shorter pills used in landscape, keeping the viewfinder unobstructed.
   final bool compact;
 
-  /// The gallery editor has no custom-tone creator, so it hides that card.
+  /// The gallery editor has no custom-tone creator, so it hides that pill.
   final bool showCustomCard;
 
   const ToneSelectorStrip({
@@ -30,16 +32,15 @@ class ToneSelectorStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cardHeight = compact ? 52.0 : 76.0;
-    final cardPadding = compact ? 8.0 : 10.0;
+    final pillHeight = compact ? 34.0 : 38.0;
 
     return SizedBox(
-      height: cardHeight,
+      height: pillHeight,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
+        padding: const EdgeInsets.symmetric(horizontal: 14),
         itemCount: tones.length + (showCustomCard ? 1 : 0),
-        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        separatorBuilder: (_, __) => const SizedBox(width: 7),
         itemBuilder: (context, index) {
           if (showCustomCard && index == 0) {
             return GestureDetector(
@@ -48,35 +49,20 @@ class ToneSelectorStrip extends StatelessWidget {
                 onOpenCustomCreator();
               },
               child: Container(
-                width: compact ? 74 : 92,
-                padding: EdgeInsets.all(cardPadding),
+                width: pillHeight,
+                height: pillHeight,
                 decoration: BoxDecoration(
-                  color: AppTheme.surfaceDark,
-                  borderRadius: BorderRadius.circular(12),
+                  color: AppTheme.cardDark.withValues(alpha: 0.92),
+                  borderRadius: BorderRadius.circular(10),
                   border: Border.all(
-                    color: AppTheme.cinemaAmber.withValues(alpha: 0.7),
-                    width: 1.2,
+                    color: AppTheme.cinemaAmber.withValues(alpha: 0.6),
+                    width: 1.0,
                   ),
                 ),
-                child: const Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      CupertinoIcons.slider_horizontal_3,
-                      color: AppTheme.cinemaAmber,
-                      size: 20,
-                    ),
-                    SizedBox(height: 6),
-                    Text(
-                      '+ CUSTOM',
-                      style: TextStyle(
-                        color: AppTheme.cinemaAmber,
-                        fontSize: 10,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.6,
-                      ),
-                    ),
-                  ],
+                child: const Icon(
+                  CupertinoIcons.plus,
+                  color: AppTheme.cinemaAmber,
+                  size: 17,
                 ),
               ),
             );
@@ -97,57 +83,56 @@ class ToneSelectorStrip extends StatelessWidget {
                   }
                 : null,
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: compact ? 104 : 122,
-              padding: EdgeInsets.all(cardPadding),
+              duration: const Duration(milliseconds: 160),
+              padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 12),
               decoration: BoxDecoration(
                 color: isSelected
-                    ? AppTheme.cinemaAmber.withValues(alpha: 0.18)
-                    : AppTheme.surfaceDark.withValues(alpha: 0.9),
-                borderRadius: BorderRadius.circular(12),
+                    ? AppTheme.cinemaAmber.withValues(alpha: 0.16)
+                    : AppTheme.cardDark.withValues(alpha: 0.88),
+                borderRadius: BorderRadius.circular(10),
                 border: Border.all(
                   color: isSelected
                       ? AppTheme.cinemaAmber
-                      : Colors.white.withValues(alpha: 0.12),
-                  width: isSelected ? 1.5 : 1.0,
+                      : Colors.white.withValues(alpha: 0.1),
+                  width: isSelected ? 1.3 : 0.8,
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Row(
-                    children: [
-                      _ToneSwatch(tone: tone, size: compact ? 11 : 13),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          tone.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: isSelected
-                                ? AppTheme.cinemaAmber
-                                : AppTheme.textPrimary,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 0.4,
-                          ),
-                        ),
-                      ),
-                    ],
+                  _ToneSwatch(tone: tone, size: 10),
+                  const SizedBox(width: 7),
+                  Text(
+                    tone.name.toUpperCase(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isSelected
+                          ? AppTheme.cinemaAmber
+                          : AppTheme.textPrimary.withValues(alpha: 0.88),
+                      fontSize: 10.5,
+                      fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+                      letterSpacing: 0.6,
+                    ),
                   ),
-                  if (!compact) ...[
-                    const SizedBox(height: 6),
-                    Text(
-                      tone.isCustom
-                          ? '★ ${tone.filmReference}'
-                          : tone.filmReference,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppTheme.textSecondary,
-                        fontSize: 10,
+                  if (tone.isLutTone) ...[
+                    const SizedBox(width: 5),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppTheme.cinemaAmber.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                      child: const Text(
+                        '3D',
+                        style: TextStyle(
+                          color: AppTheme.cinemaAmber,
+                          fontSize: 7.5,
+                          fontWeight: FontWeight.w800,
+                        ),
                       ),
                     ),
                   ],
@@ -161,16 +146,12 @@ class ToneSelectorStrip extends StatelessWidget {
   }
 }
 
-/// Miniature of the tone applied to a neutral highlight/skin/shadow ramp.
-///
-/// It goes through the exact same matrix as the viewfinder, so a preset card
-/// now shows the colour response the capture will actually have instead of a
-/// decorative accent dot.
+/// Miniature color response dot passed through the tone's exact matrix.
 class _ToneSwatch extends StatelessWidget {
   final CinemaTone tone;
   final double size;
 
-  const _ToneSwatch({required this.tone, this.size = 12});
+  const _ToneSwatch({required this.tone, this.size = 10});
 
   @override
   Widget build(BuildContext context) {

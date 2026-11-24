@@ -235,5 +235,34 @@ void main() {
       expect(restored.stockEffects, isFalse);
       expect(restored.edit.contrast, closeTo(0.25, 0.01));
     });
+
+    test('v2.2 OpenFilm Multi-Log IDT, ASC CDL, Video Trim & -14 LUFS round-trip', () {
+      final edit = PhotoEdit.neutral.copyWith(
+        inputLogProfile: 'sony_slog3',
+        cdlSlope: const <double>[1.12, 1.0, 0.94],
+        cdlOffset: const <double>[0.02, 0.0, -0.03],
+        cdlPower: const <double>[1.05, 1.0, 0.96],
+        cdlSaturation: 1.15,
+        cropAspect: '65:24',
+        trimStart: 0.15,
+        trimEnd: 0.85,
+        normalizeAudio: true,
+      );
+
+      expect(edit.isNeutral, isFalse);
+      expect(edit.hasCdlChanges, isTrue);
+      expect(edit.hasTrimChanges, isTrue);
+
+      final restored = PhotoEdit.fromJson(edit.toJson());
+      expect(restored.inputLogProfile, 'sony_slog3');
+      expect(restored.cdlSlope[0], closeTo(1.12, 0.001));
+      expect(restored.cdlOffset[2], closeTo(-0.03, 0.001));
+      expect(restored.cdlPower[0], closeTo(1.05, 0.001));
+      expect(restored.cdlSaturation, closeTo(1.15, 0.001));
+      expect(restored.cropAspect, '65:24');
+      expect(restored.trimStart, closeTo(0.15, 0.001));
+      expect(restored.trimEnd, closeTo(0.85, 0.001));
+      expect(restored.normalizeAudio, isTrue);
+    });
   });
 }

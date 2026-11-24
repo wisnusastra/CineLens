@@ -2,6 +2,7 @@ import 'dart:ui';
 import 'package:camera/camera.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/film_look.dart';
+import '../../domain/entities/frame_format.dart';
 import '../../domain/entities/pro_capture_capabilities.dart';
 import '../../domain/services/color_matrix_builder.dart';
 
@@ -155,6 +156,28 @@ class CinemaCameraState {
   /// Index inside [backLenses] currently active when using the rear camera.
   final int activeBackLensIndex;
 
+  /// Vintage / cinema frame aspect ratio (FULL, 1:1, 4:5, 6:7, 3:2, 16:9, 2.39:1, 65:24).
+  final CameraFrameFormat frameFormat;
+
+  /// Also writes original 12-bit Bayer `.dng` negative when shooting Process Zero RAW.
+  final bool saveDngRaw;
+
+  /// Tahap 2 Cinema Pro: Live Metal 3D LUT Viewfinder (`FlutterTexture`),
+  /// Direct-to-Disk HEVC Video LUT Recording, and Real-Time DOP Overlays.
+  final bool liveMetalEnabled;
+  final int? liveMetalTextureId;
+  final bool directLutRecordingEnabled;
+  final bool focusPeakingEnabled;
+  final bool zebraEnabled;
+  final bool falseColorEnabled;
+  final bool horizonLevelEnabled;
+  final bool audioMeterEnabled;
+  final bool liveScopeEnabled;
+  final double horizonDegrees;
+  final double audioPeakDb;
+  final Map<String, dynamic>? liveScopeData;
+  final String? latestGalleryThumbPath;
+
   /// Text under the processing spinner, e.g. "Membakar look ke ProRes...".
   final String? videoProcessingLabel;
 
@@ -171,7 +194,7 @@ class CinemaCameraState {
     required this.selectedTone,
     this.intensity = 1.0,
     this.captureMode = CinemaCaptureMode.photo,
-    this.isAnamorphicRatio = true,
+    this.isAnamorphicRatio = false,
     this.showGrid = true,
     this.flashMode = FlashMode.off,
     this.exposureOffset = 0.0,
@@ -210,6 +233,21 @@ class CinemaCameraState {
     this.anamorphicDesqueeze = 1.0,
     this.backLenses = const <OpticalLensOption>[],
     this.activeBackLensIndex = 0,
+    this.frameFormat = CameraFrameFormat.full,
+    this.saveDngRaw = false,
+    this.liveMetalEnabled = false,
+    this.liveMetalTextureId,
+    this.directLutRecordingEnabled = false,
+    this.focusPeakingEnabled = false,
+    this.zebraEnabled = false,
+    this.falseColorEnabled = false,
+    this.horizonLevelEnabled = true,
+    this.audioMeterEnabled = true,
+    this.liveScopeEnabled = false,
+    this.horizonDegrees = 0.0,
+    this.audioPeakDb = -60.0,
+    this.liveScopeData,
+    this.latestGalleryThumbPath,
     this.videoProcessingLabel,
     this.videoProcessingProgress,
     this.proControlError,
@@ -237,6 +275,11 @@ class CinemaCameraState {
     }
     return selectedTone.blendedMatrix(intensity);
   }
+
+  /// Active framing aspect ratio (`0.0` = full native sensor).
+  double get effectiveFrameAspectRatio => frameFormat.isFramed
+      ? frameFormat.aspectRatio
+      : (isAnamorphicRatio ? 2.39 : 0.0);
 
   /// True when the shutter speed is locked to the 180° cinema rule (`1 / 2×fps`).
   bool get is180ShutterLocked {
@@ -339,6 +382,22 @@ class CinemaCameraState {
     double? anamorphicDesqueeze,
     List<OpticalLensOption>? backLenses,
     int? activeBackLensIndex,
+    CameraFrameFormat? frameFormat,
+    bool? saveDngRaw,
+    bool? liveMetalEnabled,
+    int? liveMetalTextureId,
+    bool clearLiveMetalTexture = false,
+    bool? directLutRecordingEnabled,
+    bool? focusPeakingEnabled,
+    bool? zebraEnabled,
+    bool? falseColorEnabled,
+    bool? horizonLevelEnabled,
+    bool? audioMeterEnabled,
+    bool? liveScopeEnabled,
+    double? horizonDegrees,
+    double? audioPeakDb,
+    Map<String, dynamic>? liveScopeData,
+    String? latestGalleryThumbPath,
     String? videoProcessingLabel,
     double? videoProcessingProgress,
     bool clearVideoProcessingProgress = false,
@@ -396,6 +455,25 @@ class CinemaCameraState {
       anamorphicDesqueeze: anamorphicDesqueeze ?? this.anamorphicDesqueeze,
       backLenses: backLenses ?? this.backLenses,
       activeBackLensIndex: activeBackLensIndex ?? this.activeBackLensIndex,
+      frameFormat: frameFormat ?? this.frameFormat,
+      saveDngRaw: saveDngRaw ?? this.saveDngRaw,
+      liveMetalEnabled: liveMetalEnabled ?? this.liveMetalEnabled,
+      liveMetalTextureId: clearLiveMetalTexture
+          ? null
+          : (liveMetalTextureId ?? this.liveMetalTextureId),
+      directLutRecordingEnabled:
+          directLutRecordingEnabled ?? this.directLutRecordingEnabled,
+      focusPeakingEnabled: focusPeakingEnabled ?? this.focusPeakingEnabled,
+      zebraEnabled: zebraEnabled ?? this.zebraEnabled,
+      falseColorEnabled: falseColorEnabled ?? this.falseColorEnabled,
+      horizonLevelEnabled: horizonLevelEnabled ?? this.horizonLevelEnabled,
+      audioMeterEnabled: audioMeterEnabled ?? this.audioMeterEnabled,
+      liveScopeEnabled: liveScopeEnabled ?? this.liveScopeEnabled,
+      horizonDegrees: horizonDegrees ?? this.horizonDegrees,
+      audioPeakDb: audioPeakDb ?? this.audioPeakDb,
+      liveScopeData: liveScopeData ?? this.liveScopeData,
+      latestGalleryThumbPath:
+          latestGalleryThumbPath ?? this.latestGalleryThumbPath,
       videoProcessingLabel: videoProcessingLabel ?? this.videoProcessingLabel,
       videoProcessingProgress: clearVideoProcessingProgress
           ? null

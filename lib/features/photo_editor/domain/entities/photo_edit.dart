@@ -467,6 +467,21 @@ class PhotoEdit {
   /// Layered selective adjustment masks (Linear & Radial gradients).
   final List<SelectiveMask> masks;
 
+  /// OpenFilm Cinema Color Science:
+  /// - Multi-Camera Log IDT (`rec709`, `apple_log`, `sony_slog3`, `dji_dlogm`,
+  ///   `canon_clog3`, `fuji_flog2`).
+  /// - ASC CDL (`Slope`, `Offset`, `Power`, `Saturation`) for film-grade &
+  ///   shot-to-shot Color Match.
+  /// - Video Trim (`0..1` normalized range) & `-14 LUFS` Audio Normalization.
+  final String inputLogProfile;
+  final List<double> cdlSlope;
+  final List<double> cdlOffset;
+  final List<double> cdlPower;
+  final double cdlSaturation;
+  final double trimStart;
+  final double trimEnd;
+  final bool normalizeAudio;
+
   const PhotoEdit({
     this.exposure = 0,
     this.contrast = 0,
@@ -518,6 +533,14 @@ class PhotoEdit {
     this.hsl = defaultHslBands,
     this.colorGrading = ColorGrading.neutral,
     this.masks = const <SelectiveMask>[],
+    this.inputLogProfile = 'rec709',
+    this.cdlSlope = const <double>[1.0, 1.0, 1.0],
+    this.cdlOffset = const <double>[0.0, 0.0, 0.0],
+    this.cdlPower = const <double>[1.0, 1.0, 1.0],
+    this.cdlSaturation = 1.0,
+    this.trimStart = 0.0,
+    this.trimEnd = 1.0,
+    this.normalizeAudio = false,
   });
 
   static const List<HslBand> defaultHslBands = <HslBand>[
@@ -584,8 +607,19 @@ class PhotoEdit {
     List<HslBand>? hsl,
     ColorGrading? colorGrading,
     List<SelectiveMask>? masks,
+    String? inputLogProfile,
+    List<double>? cdlSlope,
+    List<double>? cdlOffset,
+    List<double>? cdlPower,
+    double? cdlSaturation,
+    double? trimStart,
+    double? trimEnd,
+    bool? normalizeAudio,
   }) {
     final nextTurns = (rotateQuarterTurns ?? this.rotateQuarterTurns) % 4;
+    final nextTrimStart = (trimStart ?? this.trimStart).clamp(0.0, 0.98);
+    final nextTrimEnd =
+        (trimEnd ?? this.trimEnd).clamp(nextTrimStart + 0.02, 1.0);
     return PhotoEdit(
       exposure: (exposure ?? this.exposure).clamp(-2.0, 2.0),
       contrast: (contrast ?? this.contrast).clamp(-1.0, 1.0),
@@ -645,6 +679,14 @@ class PhotoEdit {
       hsl: hsl ?? this.hsl,
       colorGrading: colorGrading ?? this.colorGrading,
       masks: masks ?? this.masks,
+      inputLogProfile: inputLogProfile ?? this.inputLogProfile,
+      cdlSlope: cdlSlope ?? this.cdlSlope,
+      cdlOffset: cdlOffset ?? this.cdlOffset,
+      cdlPower: cdlPower ?? this.cdlPower,
+      cdlSaturation: (cdlSaturation ?? this.cdlSaturation).clamp(0.0, 2.0),
+      trimStart: nextTrimStart,
+      trimEnd: nextTrimEnd,
+      normalizeAudio: normalizeAudio ?? this.normalizeAudio,
     );
   }
 
@@ -686,6 +728,18 @@ class PhotoEdit {
       verticalPerspective.abs() > 0.001 ||
       horizontalPerspective.abs() > 0.001;
 
+  bool get hasCdlChanges {
+    if ((cdlSaturation - 1.0).abs() > 0.002) return true;
+    for (var i = 0; i < 3; i++) {
+      if (i < cdlSlope.length && (cdlSlope[i] - 1.0).abs() > 0.002) return true;
+      if (i < cdlOffset.length && cdlOffset[i].abs() > 0.002) return true;
+      if (i < cdlPower.length && (cdlPower[i] - 1.0).abs() > 0.002) return true;
+    }
+    return false;
+  }
+
+  bool get hasTrimChanges => trimStart > 0.002 || trimEnd < 0.998;
+
   /// True when nothing would change, so the editor can skip a render.
   bool get isNeutral {
     return exposure.abs() < 0.001 &&
@@ -719,7 +773,11 @@ class PhotoEdit {
         curveBlue.isEmpty &&
         hsl.every((band) => band.isNeutral) &&
         colorGrading.isNeutral &&
-        masks.every((m) => m.isNeutral);
+        masks.every((m) => m.isNeutral) &&
+        inputLogProfile == 'rec709' &&
+        !hasCdlChanges &&
+        !hasTrimChanges &&
+        !normalizeAudio;
   }
 
   /// Payload understood by the native Core Image editor.
@@ -780,6 +838,14 @@ class PhotoEdit {
           .toList(),
       'colorGrading': colorGrading.toJson(),
       'masks': masks.map((m) => m.toJson()).toList(),
+      'inputLogProfile': inputLogProfile,
+      'cdlSlope': cdlSlope,
+      'cdlOffset': cdlOffset,
+      'cdlPower': cdlPower,
+      'cdlSaturation': cdlSaturation,
+      'trimStart': trimStart,
+      'trimEnd': trimEnd,
+      'normalizeAudio': normalizeAudio,
     };
   }
 
@@ -829,6 +895,22 @@ class PhotoEdit {
 
     double numOr(Object? v, double fallback, double min, double max) =>
         v is num ? v.toDouble().clamp(min, max) : fallback;
+
+    List<double> triple(
+      Object? raw,
+      List<double> fallback,
+      double min,
+      double max,
+    ) {
+      if (raw is List && raw.length >= 3) {
+        return <double>[
+          numOr(raw[0], fallback[0], min, max),
+          numOr(raw[1], fallback[1], min, max),
+          numOr(raw[2], fallback[2], min, max),
+        ];
+      }
+      return fallback;
+    }
 
     return PhotoEdit(
       exposure: _exposure(json['exposure']),
@@ -888,6 +970,16 @@ class PhotoEdit {
           : defaultHslBands,
       colorGrading: ColorGrading.fromJson(json['colorGrading']),
       masks: parsedMasks,
+      inputLogProfile: json['inputLogProfile'] is String
+          ? json['inputLogProfile'] as String
+          : 'rec709',
+      cdlSlope: triple(json['cdlSlope'], const [1.0, 1.0, 1.0], 0.2, 2.5),
+      cdlOffset: triple(json['cdlOffset'], const [0.0, 0.0, 0.0], -0.5, 0.5),
+      cdlPower: triple(json['cdlPower'], const [1.0, 1.0, 1.0], 0.3, 2.5),
+      cdlSaturation: numOr(json['cdlSaturation'], 1.0, 0.0, 2.0),
+      trimStart: numOr(json['trimStart'], 0.0, 0.0, 0.98),
+      trimEnd: numOr(json['trimEnd'], 1.0, 0.02, 1.0),
+      normalizeAudio: json['normalizeAudio'] == true,
     );
   }
 

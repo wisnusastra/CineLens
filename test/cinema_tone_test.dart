@@ -1,6 +1,8 @@
+import 'package:cinelens_ios/core/l10n/app_strings.dart';
 import 'package:cinelens_ios/features/cinema_camera/data/datasources/cinema_tones_preset_source.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/cinema_tone.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/film_look.dart';
+import 'package:cinelens_ios/features/cinema_camera/domain/entities/frame_format.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -117,6 +119,30 @@ void main() {
         'cinestill_800t',
         'kodak_2383',
       ]));
+    });
+  });
+
+  group('Vintage Frame Formats & Auto-Localization (v2.2.0)', () {
+    test('CameraFrameFormat exposes vintage & cinema aspect ratios cleanly', () {
+      expect(CameraFrameFormat.full.isFramed, isFalse);
+      expect(CameraFrameFormat.square1x1.aspectRatio, closeTo(1.0, 1e-6));
+      expect(CameraFrameFormat.portrait4x5.aspectRatio, closeTo(0.8, 1e-6));
+      expect(CameraFrameFormat.medium6x7.aspectRatio, closeTo(6 / 7, 1e-6));
+      expect(CameraFrameFormat.classic35mm.aspectRatio, closeTo(1.5, 1e-6));
+      expect(CameraFrameFormat.scope239.aspectRatio, closeTo(2.39, 1e-6));
+      expect(CameraFrameFormat.xpan.aspectRatio, closeTo(65 / 24, 1e-6));
+      expect(CameraFrameFormat.fromName('square1x1'), CameraFrameFormat.square1x1);
+      expect(CameraFrameFormat.fromName('65:24'), CameraFrameFormat.xpan);
+      expect(CameraFrameFormat.fromName('unknown'), CameraFrameFormat.full);
+    });
+
+    test('AppStrings provides concise EN & ID labels', () {
+      expect(AppStrings.en.photo, 'PHOTO');
+      expect(AppStrings.id.photo, 'FOTO');
+      expect(AppStrings.en.gallery, 'GALLERY');
+      expect(AppStrings.id.gallery, 'GALERI');
+      expect(AppStrings.en.selectedCount(3), '3 selected');
+      expect(AppStrings.id.selectedCount(3), '3 dipilih');
     });
   });
 }

@@ -1,14 +1,17 @@
 // lib/features/photo_editor/presentation/screens/photo_editor_screen.dart
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/l10n/app_strings.dart';
 import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../cinema_camera/domain/entities/captured_media.dart';
 import '../../../cinema_camera/domain/entities/cinema_tone.dart';
 import '../../../cinema_camera/domain/entities/film_look.dart';
 import '../../../cinema_camera/presentation/providers/cinema_camera_provider.dart';
@@ -61,20 +64,6 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
     matrix: CinemaTone.identityMatrix,
   );
 
-  static const List<String> _tabLabels = <String>[
-    'Cahaya',
-    'Kurva',
-    'Warna',
-    'Campur',
-    'Grading',
-    'Film',
-    'Efek',
-    'Detail',
-    'Blur',
-    'Masking',
-    'Optik & Crop',
-  ];
-
   static const List<IconData> _tabIcons = <IconData>[
     Icons.wb_sunny_outlined,
     Icons.show_chart_rounded,
@@ -114,20 +103,33 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
     'original',
     '1:1',
     '4:5',
+    '6:7',
     '3:4',
     '2:3',
     '16:9',
     '2.39:1',
+    '65:24',
+  ];
+
+  static const List<({String id, String label})> _logProfiles =
+      <({String id, String label})>[
+    (id: 'rec709', label: 'Rec.709'),
+    (id: 'apple_log', label: 'Apple Log'),
+    (id: 'sony_slog3', label: 'S-Log3'),
+    (id: 'dji_dlogm', label: 'D-Log M'),
+    (id: 'canon_clog3', label: 'C-Log3'),
+    (id: 'fuji_flog2', label: 'F-Log2'),
   ];
 
   Uint8List? _original;
   Uint8List? _preview;
-  Map<String, List<double>> _histogram = const <String, List<double>>{};
+  Map<String, dynamic> _scopes = const <String, dynamic>{};
   List<SavedEditPreset> _savedPresets = const <SavedEditPreset>[];
 
   bool _loading = true;
   bool _rendering = false;
   bool _autoToning = false;
+  bool _matchingColor = false;
   bool _exporting = false;
   bool _showOriginal = false;
   bool _splitCompare = false;
@@ -158,6 +160,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
   EditCurveChannel _curveChannel = EditCurveChannel.rgb;
   int _hslBand = 0;
   int _gradingZone = 0; // 0 = Shadows, 1 = Midtones, 2 = Highlights
+  bool _cdlMode = false; // false = 3-Way Wheels, true = ASC CDL
   String? _selectedMaskId;
 
   Timer? _debounce;
@@ -306,13 +309,132 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
   Future<void> _refreshHistogram(Uint8List bytes) async {
     if (!_showHistogram) return;
     try {
-      final hist = await ref
+      final scopes = await ref
           .read(photoEditorRepositoryProvider)
-          .computeHistogram(bytes);
-      if (!mounted || hist.isEmpty) return;
-      setState(() => _histogram = hist);
+          .computeScopes(bytes);
+      if (!mounted || scopes.isEmpty) return;
+      setState(() => _scopes = scopes);
     } catch (_) {
-      // Best effort; histogram is auxiliary.
+      // Best effort; scopes are auxiliary.
+    }
+  }
+
+  Future<void> _pickAndMatchReference() async {
+    if (_matchingColor) return;
+    final s = AppStrings.of(context);
+    final media =
+        await ref.read(cinemaCameraProvider.notifier).loadCapturedMedia();
+    final photos =
+        media.where((m) => !m.isVideo && m.path != widget.args.path).toList();
+    if (!mounted) return;
+    if (photos.isEmpty) {
+      _toast(s.noReferencePhotos);
+      return;
+    }
+
+    final selected = await showModalBottomSheet<CapturedMedia>(
+      context: context,
+      backgroundColor: AppTheme.surfaceDark,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: SizedBox(
+          height: 360,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.colorize_rounded,
+                      color: AppTheme.cinemaAmber,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      s.pickReferenceTitle,
+                      style: const TextStyle(
+                        color: AppTheme.textPrimary,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: GridView.builder(
+                  padding: const EdgeInsets.all(6),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 3,
+                    crossAxisSpacing: 4,
+                    mainAxisSpacing: 4,
+                    childAspectRatio: 0.82,
+                  ),
+                  itemCount: photos.length,
+                  itemBuilder: (_, idx) {
+                    final item = photos[idx];
+                    return GestureDetector(
+                      onTap: () => Navigator.of(sheetCtx).pop(item),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: Image.file(
+                          File(item.path),
+                          fit: BoxFit.cover,
+                          cacheWidth: 260,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+
+    setState(() => _matchingColor = true);
+    try {
+      final result = await ref.read(photoEditorRepositoryProvider).matchColor(
+            sourcePath: widget.args.path,
+            isVideo: _isVideo,
+            referencePath: selected.path,
+          );
+      if (!mounted) return;
+      setState(() => _matchingColor = false);
+      if (result.isEmpty) return;
+
+      List<double> readTriple(String key, List<double> fallback) {
+        final raw = result[key];
+        if (raw is List && raw.length >= 3) {
+          return raw.take(3).map((e) => (e as num).toDouble()).toList();
+        }
+        return fallback;
+      }
+
+      final slope = readTriple('cdlSlope', _edit.cdlSlope);
+      final offset = readTriple('cdlOffset', _edit.cdlOffset);
+      final power = readTriple('cdlPower', _edit.cdlPower);
+      final sat = (result['cdlSaturation'] as num?)?.toDouble() ??
+          _edit.cdlSaturation;
+      _update(
+        _edit.copyWith(
+          cdlSlope: slope,
+          cdlOffset: offset,
+          cdlPower: power,
+          cdlSaturation: sat,
+        ),
+        immediateUndo: true,
+      );
+      _toast(s.colorMatched);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _matchingColor = false);
+      _toast(_describe(error));
     }
   }
 
@@ -550,6 +672,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
 
   Future<void> _openSaveSheet() async {
     if (_exporting) return;
+    final s = AppStrings.of(context);
     final choice = await showModalBottomSheet<bool>(
       context: context,
       backgroundColor: AppTheme.surfaceDark,
@@ -567,17 +690,16 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                   const Icon(
                     Icons.save_alt_rounded,
                     color: AppTheme.cinemaAmber,
-                    size: 20,
+                    size: 19,
                   ),
                   const SizedBox(width: 10),
                   Text(
-                    _isVideo
-                        ? 'Simpan video hasil edit'
-                        : 'Simpan foto hasil edit',
+                    s.save,
                     style: const TextStyle(
                       color: AppTheme.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.8,
                     ),
                   ),
                 ],
@@ -588,13 +710,10 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                 Icons.photo_library_outlined,
                 color: AppTheme.textPrimary,
               ),
-              title: const Text(
-                'Simpan ke Galeri CineLens',
-                style: TextStyle(color: AppTheme.textPrimary, fontSize: 13),
-              ),
-              subtitle: const Text(
-                'Hasil edit tersimpan di galeri aplikasi.',
-                style: TextStyle(color: AppTheme.textSecondary, fontSize: 11),
+              title: Text(
+                s.saveToGalleryOnly,
+                style:
+                    const TextStyle(color: AppTheme.textPrimary, fontSize: 13),
               ),
               onTap: () => Navigator.of(sheetContext).pop(false),
             ),
@@ -603,13 +722,10 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                 Icons.photo_camera_outlined,
                 color: AppTheme.cinemaAmber,
               ),
-              title: const Text(
-                'Galeri CineLens + Apple Photos',
-                style: TextStyle(color: AppTheme.textPrimary, fontSize: 13),
-              ),
-              subtitle: const Text(
-                'Juga menyalin hasil edit ke aplikasi Photos.',
-                style: TextStyle(color: AppTheme.textSecondary, fontSize: 11),
+              title: Text(
+                s.saveToGalleryAndPhotos,
+                style:
+                    const TextStyle(color: AppTheme.textPrimary, fontSize: 13),
               ),
               onTap: () => Navigator.of(sheetContext).pop(true),
             ),
@@ -709,9 +825,11 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final s = AppStrings.of(context);
     return Scaffold(
       backgroundColor: AppTheme.backgroundBlack,
       appBar: AppBar(
+        backgroundColor: AppTheme.backgroundBlack,
         leading: IconButton(
           icon: const Icon(Icons.close_rounded, color: Colors.white),
           onPressed: () {
@@ -720,30 +838,30 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
           },
         ),
         title: Text(
-          _isVideo ? 'EDIT VIDEO' : 'EDIT FOTO',
-          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
+          _isVideo ? s.editVideo : s.editPhoto,
+          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
         ),
         actions: [
           IconButton(
-            tooltip: 'Undo',
+            tooltip: s.undo,
             icon: Icon(
               Icons.undo_rounded,
-              size: 20,
+              size: 19,
               color: _undoStack.isNotEmpty ? Colors.white : Colors.white24,
             ),
             onPressed: _exporting || _undoStack.isEmpty ? null : _undo,
           ),
           IconButton(
-            tooltip: 'Redo',
+            tooltip: s.redo,
             icon: Icon(
               Icons.redo_rounded,
-              size: 20,
+              size: 19,
               color: _redoStack.isNotEmpty ? Colors.white : Colors.white24,
             ),
             onPressed: _exporting || _redoStack.isEmpty ? null : _redo,
           ),
           IconButton(
-            tooltip: 'Auto Tone',
+            tooltip: s.auto,
             icon: _autoToning
                 ? const SizedBox(
                     width: 16,
@@ -755,11 +873,12 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                   )
                 : const Icon(
                     Icons.auto_awesome_rounded,
-                    size: 20,
+                    size: 19,
                     color: AppTheme.cinemaAmber,
                   ),
-            onPressed:
-                _exporting || _autoToning || _original == null ? null : _applyAutoTone,
+            onPressed: _exporting || _autoToning || _original == null
+                ? null
+                : _applyAutoTone,
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_horiz_rounded, color: Colors.white),
@@ -784,18 +903,18 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
               }
             },
             itemBuilder: (_) => <PopupMenuEntry<String>>[
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'copy',
                 child: Text(
-                  'Copy Settings (Salin Edit)',
-                  style: TextStyle(color: Colors.white, fontSize: 12),
+                  s.copySettings,
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
                 ),
               ),
               PopupMenuItem(
                 value: 'paste',
                 enabled: EditClipboardStore.hasClipboard,
                 child: Text(
-                  'Paste Settings (Tempel Edit)',
+                  s.pasteSettings,
                   style: TextStyle(
                     color: EditClipboardStore.hasClipboard
                         ? Colors.white
@@ -804,42 +923,67 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                   ),
                 ),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'save_preset',
                 child: Text(
-                  'Simpan Sebagai Preset...',
-                  style: TextStyle(color: AppTheme.cinemaAmber, fontSize: 12),
+                  s.savePreset,
+                  style: const TextStyle(
+                    color: AppTheme.cinemaAmber,
+                    fontSize: 12,
+                  ),
                 ),
               ),
               const PopupMenuDivider(),
               PopupMenuItem(
                 value: 'histogram',
                 child: Text(
-                  _showHistogram ? 'Sembunyikan Histogram' : 'Tampilkan Histogram',
+                  '${s.cycleScope} (${_showHistogram ? s.on : s.off})',
                   style: const TextStyle(color: Colors.white, fontSize: 12),
                 ),
               ),
               PopupMenuItem(
                 value: 'split',
                 child: Text(
-                  _splitCompare ? 'Tutup Split Before/After' : 'Split Before / After',
+                  s.toggleSplit,
                   style: const TextStyle(color: Colors.white, fontSize: 12),
                 ),
               ),
               const PopupMenuDivider(),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'reset',
                 child: Text(
-                  'Reset Semua Edit',
-                  style: TextStyle(color: Colors.redAccent, fontSize: 12),
+                  s.resetAll,
+                  style: const TextStyle(
+                    color: AppTheme.cinemaRed,
+                    fontSize: 12,
+                  ),
                 ),
               ),
             ],
           ),
-          IconButton(
-            tooltip: 'Simpan',
-            icon: const Icon(Icons.check_rounded, color: AppTheme.cinemaAmber),
-            onPressed: _exporting || _original == null ? null : _openSaveSheet,
+          Padding(
+            padding: const EdgeInsets.only(right: 10),
+            child: GestureDetector(
+              onTap: _exporting || _original == null ? null : _openSaveSheet,
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 11),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+                decoration: BoxDecoration(
+                  color: AppTheme.cinemaAmber,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text(
+                  s.save,
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -957,18 +1101,18 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                   _update(_edit.copyWith(blurCenterX: cx, blurCenterY: cy)),
             ),
 
-          if (_showHistogram && _histogram.isNotEmpty && !_splitCompare)
+          if (_showHistogram && _scopes.isNotEmpty && !_splitCompare)
             Positioned(
               left: 8,
               top: 8,
-              child: HistogramOverlay(histogram: _histogram),
+              child: HistogramOverlay(histogram: _scopes),
             ),
 
           if (_isVideo && !_splitCompare)
             Positioned(
               left: 8,
-              top: _showHistogram && _histogram.isNotEmpty ? 68 : 8,
-              child: _chip('PRATINJAU FRAME PERTAMA'),
+              top: _showHistogram && _scopes.isNotEmpty ? 80 : 8,
+              child: _chip('VIDEO'),
             ),
 
           if (_rendering)
@@ -993,7 +1137,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                 onTapDown: (_) => setState(() => _showOriginal = true),
                 onTapUp: (_) => setState(() => _showOriginal = false),
                 onTapCancel: () => setState(() => _showOriginal = false),
-                child: _chip('TAHAN: LIHAT ASLI'),
+                child: _chip(AppStrings.of(context).holdOriginal),
               ),
             ),
 
@@ -1003,7 +1147,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
             child: GestureDetector(
               onTap: () => setState(() => _splitCompare = !_splitCompare),
               child: _chip(
-                _splitCompare ? 'TUTUP SPLIT' : 'SPLIT ASLI|EDIT',
+                AppStrings.of(context).splitCompare,
                 active: _splitCompare,
               ),
             ),
@@ -1013,7 +1157,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
             Positioned(
               right: 10,
               top: 10,
-              child: _chip('ASLI', active: true),
+              child: _chip(AppStrings.of(context).original, active: true),
             ),
         ],
       ),
@@ -1047,6 +1191,21 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
   }
 
   Widget _buildPanel() {
+    final s = AppStrings.of(context);
+    final localizedTabs = <String>[
+      s.tabLight,
+      s.tabCurve,
+      s.tabColor,
+      s.tabMix,
+      s.tabGrade,
+      s.tabFilm,
+      s.tabFx,
+      s.tabDetail,
+      s.tabBlur,
+      s.tabMask,
+      s.tabCrop,
+    ];
+
     return Container(
       height: 318,
       decoration: BoxDecoration(
@@ -1062,7 +1221,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: _tabLabels.length,
+              itemCount: localizedTabs.length,
               separatorBuilder: (_, __) => const SizedBox(width: 6),
               itemBuilder: (context, index) {
                 final selected = index == _tab;
@@ -1093,7 +1252,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          _tabLabels[index],
+                          localizedTabs[index],
                           style: TextStyle(
                             color: selected
                                 ? AppTheme.cinemaAmber
@@ -1568,6 +1727,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
 
   // ------------------------------------------------------------- 4. GRADING
   Widget _buildColorGradingTab() {
+    final s = AppStrings.of(context);
     final cg = _edit.colorGrading;
     final zoneNames = const <String>['Shadows', 'Midtones', 'Highlights'];
     final activeWheel = switch (_gradingZone) {
@@ -1585,9 +1745,211 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
       _update(_edit.copyWith(colorGrading: updated));
     }
 
+    Widget modeSwitcher = Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Row(
+        children: [
+          for (final entry in [(false, s.wheelsMode), (true, s.cdlMode)]) ...[
+            Expanded(
+              child: GestureDetector(
+                onTap: () => setState(() => _cdlMode = entry.$1),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: _cdlMode == entry.$1
+                        ? AppTheme.cinemaAmber
+                        : AppTheme.cardDark,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: _cdlMode == entry.$1
+                          ? AppTheme.cinemaAmber
+                          : AppTheme.hairline,
+                    ),
+                  ),
+                  child: Text(
+                    entry.$2,
+                    style: TextStyle(
+                      color:
+                          _cdlMode == entry.$1 ? Colors.black : Colors.white70,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.7,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            if (!entry.$1) const SizedBox(width: 8),
+          ],
+        ],
+      ),
+    );
+
+    if (_cdlMode) {
+      List<double> setChannel(List<double> src, int idx, double v) {
+        final copy = List<double>.from(src);
+        while (copy.length < 3) {
+          copy.add(0.0);
+        }
+        copy[idx] = v;
+        return copy;
+      }
+
+      String fmtCdl(double v) => v.toStringAsFixed(2);
+
+      return ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          modeSwitcher,
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'ASC CDL · SLOPE / OFFSET / POWER',
+                  style: TextStyle(
+                    color: AppTheme.textSecondary,
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.9,
+                  ),
+                ),
+                TextButton(
+                  style: TextButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: () => _update(
+                    _edit.copyWith(
+                      cdlSlope: const [1.0, 1.0, 1.0],
+                      cdlOffset: const [0.0, 0.0, 0.0],
+                      cdlPower: const [1.0, 1.0, 1.0],
+                      cdlSaturation: 1.0,
+                    ),
+                    immediateUndo: true,
+                  ),
+                  child: Text(
+                    s.reset,
+                    style: const TextStyle(
+                      color: AppTheme.cinemaAmber,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          EditSlider(
+            label: 'Slope R',
+            value: _edit.cdlSlope[0],
+            min: 0.4,
+            max: 1.8,
+            resetValue: 1.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlSlope: setChannel(_edit.cdlSlope, 0, v))),
+          ),
+          EditSlider(
+            label: 'Slope G',
+            value: _edit.cdlSlope[1],
+            min: 0.4,
+            max: 1.8,
+            resetValue: 1.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlSlope: setChannel(_edit.cdlSlope, 1, v))),
+          ),
+          EditSlider(
+            label: 'Slope B',
+            value: _edit.cdlSlope[2],
+            min: 0.4,
+            max: 1.8,
+            resetValue: 1.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlSlope: setChannel(_edit.cdlSlope, 2, v))),
+          ),
+          EditSlider(
+            label: 'Offset R',
+            value: _edit.cdlOffset[0],
+            min: -0.3,
+            max: 0.3,
+            resetValue: 0.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlOffset: setChannel(_edit.cdlOffset, 0, v))),
+          ),
+          EditSlider(
+            label: 'Offset G',
+            value: _edit.cdlOffset[1],
+            min: -0.3,
+            max: 0.3,
+            resetValue: 0.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlOffset: setChannel(_edit.cdlOffset, 1, v))),
+          ),
+          EditSlider(
+            label: 'Offset B',
+            value: _edit.cdlOffset[2],
+            min: -0.3,
+            max: 0.3,
+            resetValue: 0.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlOffset: setChannel(_edit.cdlOffset, 2, v))),
+          ),
+          EditSlider(
+            label: 'Power R',
+            value: _edit.cdlPower[0],
+            min: 0.5,
+            max: 1.8,
+            resetValue: 1.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlPower: setChannel(_edit.cdlPower, 0, v))),
+          ),
+          EditSlider(
+            label: 'Power G',
+            value: _edit.cdlPower[1],
+            min: 0.5,
+            max: 1.8,
+            resetValue: 1.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlPower: setChannel(_edit.cdlPower, 1, v))),
+          ),
+          EditSlider(
+            label: 'Power B',
+            value: _edit.cdlPower[2],
+            min: 0.5,
+            max: 1.8,
+            resetValue: 1.0,
+            format: fmtCdl,
+            onChanged: (v) =>
+                _update(_edit.copyWith(cdlPower: setChannel(_edit.cdlPower, 2, v))),
+          ),
+          EditSlider(
+            label: 'CDL Saturation',
+            value: _edit.cdlSaturation,
+            min: 0.0,
+            max: 2.0,
+            resetValue: 1.0,
+            format: fmtCdl,
+            onChanged: (v) => _update(_edit.copyWith(cdlSaturation: v)),
+          ),
+        ],
+      );
+    }
+
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
+        modeSwitcher,
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Row(
@@ -1716,6 +2078,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
 
   // ------------------------------------------------------------------ 5. FILM
   Widget _buildFilmTab() {
+    final s = AppStrings.of(context);
     final tone = _resolveTone();
     final manualEffects = !_stockEffects || tone.isLutTone;
     final tones = _tones();
@@ -1723,6 +2086,94 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
     return ListView(
       padding: const EdgeInsets.only(top: 8, bottom: 16),
       children: [
+        // OpenFilm Multi-Camera Log IDT + Shot-to-Shot Match Ref
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+          child: Row(
+            children: [
+              Text(
+                s.inputLogProfile,
+                style: const TextStyle(
+                  color: AppTheme.textSecondary,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.0,
+                ),
+              ),
+              const Spacer(),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.cinemaAmber,
+                  side: const BorderSide(color: AppTheme.cinemaAmber),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: _matchingColor ? null : _pickAndMatchReference,
+                icon: _matchingColor
+                    ? const SizedBox(
+                        width: 11,
+                        height: 11,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.8,
+                          color: AppTheme.cinemaAmber,
+                        ),
+                      )
+                    : const Icon(Icons.colorize_rounded, size: 13),
+                label: Text(
+                  s.matchReference,
+                  style: const TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: 32,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            itemCount: _logProfiles.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 6),
+            itemBuilder: (_, idx) {
+              final prof = _logProfiles[idx];
+              final selected = _edit.inputLogProfile == prof.id;
+              return GestureDetector(
+                onTap: () => _update(
+                  _edit.copyWith(inputLogProfile: prof.id),
+                  immediateUndo: true,
+                ),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? AppTheme.cinemaAmber.withValues(alpha: 0.18)
+                        : AppTheme.cardDark,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color:
+                          selected ? AppTheme.cinemaAmber : AppTheme.hairline,
+                    ),
+                  ),
+                  child: Text(
+                    prof.label,
+                    style: TextStyle(
+                      color: selected ? AppTheme.cinemaAmber : Colors.white70,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 10),
         if (_savedPresets.isNotEmpty) ...[
           _sectionLabel('PRESET EDIT TERSIMPAN'),
           SizedBox(
@@ -2304,8 +2755,60 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
 
   // --------------------------------------------------------- 10. OPTICS & CROP
   Widget _buildOpticsCropTab() {
+    final s = AppStrings.of(context);
     return _scroll([
-      _sectionLabel('CROP RASIO & TRANSFORMASI'),
+      if (_isVideo) ...[
+        _sectionLabel(s.videoTrim),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Text(
+                '${(_edit.trimStart * 100).round()}%',
+                style: AppTheme.monoStyle(
+                  color: AppTheme.cinemaAmber,
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              Expanded(
+                child: RangeSlider(
+                  values: RangeValues(_edit.trimStart, _edit.trimEnd),
+                  min: 0.0,
+                  max: 1.0,
+                  activeColor: AppTheme.cinemaAmber,
+                  inactiveColor: Colors.white12,
+                  onChanged: (range) => _update(
+                    _edit.copyWith(trimStart: range.start, trimEnd: range.end),
+                  ),
+                ),
+              ),
+              Text(
+                '${(_edit.trimEnd * 100).round()}%',
+                style: AppTheme.monoStyle(
+                  color: AppTheme.cinemaAmber,
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+        SwitchListTile(
+          dense: true,
+          value: _edit.normalizeAudio,
+          activeThumbColor: AppTheme.cinemaAmber,
+          title: Text(
+            s.normalizeAudio,
+            style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12),
+          ),
+          onChanged: (v) => _update(
+            _edit.copyWith(normalizeAudio: v),
+            immediateUndo: true,
+          ),
+        ),
+      ],
+      _sectionLabel(s.frameFormat),
       SizedBox(
         height: 36,
         child: ListView.separated(
@@ -2470,6 +2973,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
   }
 
   Widget _buildExportOverlay() {
+    final s = AppStrings.of(context);
     return Positioned.fill(
       child: ColoredBox(
         color: Colors.black.withValues(alpha: 0.72),
@@ -2480,9 +2984,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
               const CircularProgressIndicator(color: AppTheme.cinemaAmber),
               const SizedBox(height: 16),
               Text(
-                _isVideo
-                    ? 'Merender video hasil edit…\nJangan tutup aplikasi.'
-                    : 'Merender foto hasil edit…',
+                _isVideo ? s.renderingVideo : s.renderingPhoto,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   color: AppTheme.textPrimary,

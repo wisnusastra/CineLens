@@ -190,6 +190,56 @@ class PhotoEditorRepository {
     }
   }
 
+  /// Computes RGB+Luma Histogram, 2D Luma Waveform (0–100 IRE), Vectorscope
+  /// `(cb, cr)` points, and clipped/crushed percentages natively on iOS.
+  Future<Map<String, dynamic>> computeScopes(Uint8List jpegBytes) async {
+    try {
+      final raw = await _channel.invokeMapMethod<Object?, Object?>(
+        'editorScopes',
+        <String, dynamic>{'bytes': jpegBytes},
+      ).timeout(const Duration(seconds: 15));
+      if (raw == null || raw.isEmpty) {
+        final fallback = await computeHistogram(jpegBytes);
+        return fallback;
+      }
+      final out = <String, dynamic>{};
+      raw.forEach((k, v) {
+        if (k is String) out[k] = v;
+      });
+      return out;
+    } on MissingPluginException {
+      return const <String, dynamic>{};
+    }
+  }
+
+  /// Shot-to-Shot Color Match: analyses [sourcePath] vs [referencePath] and
+  /// returns an ASC CDL (`cdlSlope`, `cdlOffset`, `cdlPower`, `cdlSaturation`)
+  /// matching exposure, contrast, white balance and colour palette.
+  Future<Map<String, dynamic>> matchColor({
+    required String sourcePath,
+    required bool isVideo,
+    required String referencePath,
+  }) async {
+    try {
+      final raw = await _channel.invokeMapMethod<Object?, Object?>(
+        'editorMatchColor',
+        <String, dynamic>{
+          'sourcePath': sourcePath,
+          'isVideo': isVideo,
+          'referencePath': referencePath,
+        },
+      ).timeout(const Duration(seconds: 30));
+      if (raw == null) return const <String, dynamic>{};
+      final out = <String, dynamic>{};
+      raw.forEach((k, v) {
+        if (k is String) out[k] = v;
+      });
+      return out;
+    } on MissingPluginException {
+      return const <String, dynamic>{};
+    }
+  }
+
   /// Opens the system Photos picker (no permission prompt: PHPicker runs out
   /// of process) and copies the chosen photos/videos into the app.
   Future<List<ImportedMediaFile>> importFromPhotoLibrary({

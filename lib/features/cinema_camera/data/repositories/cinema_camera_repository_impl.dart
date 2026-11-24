@@ -259,16 +259,51 @@ class CinemaCameraRepository {
     await prefs.setBool(AppConstants.prefBakeLookIntoProRes, enabled);
   }
 
-  Future<({bool processZero, bool anamorphicCrop, double desqueeze, bool highlightMetering})>
-      loadProImagingSettings() async {
+  Future<
+      ({
+        bool processZero,
+        bool saveDngRaw,
+        bool anamorphicCrop,
+        double desqueeze,
+        bool highlightMetering,
+        String? frameFormat,
+        bool directLutRecording,
+        bool liveMetalPreview,
+      })> loadProImagingSettings() async {
     final prefs = await SharedPreferences.getInstance();
     return (
       processZero: prefs.getBool(AppConstants.prefProcessZeroRaw) ?? false,
+      saveDngRaw: prefs.getBool(AppConstants.prefSaveDngRaw) ?? false,
       anamorphicCrop: prefs.getBool(AppConstants.prefAnamorphicCrop) ?? false,
       desqueeze: prefs.getDouble(AppConstants.prefAnamorphicDesqueeze) ?? 1.0,
       highlightMetering:
           prefs.getBool(AppConstants.prefHighlightMetering) ?? false,
+      frameFormat: prefs.getString(AppConstants.prefFrameFormat),
+      directLutRecording:
+          prefs.getBool(AppConstants.prefDirectLutRecording) ?? false,
+      liveMetalPreview:
+          prefs.getBool(AppConstants.prefLiveMetalPreview) ?? false,
     );
+  }
+
+  Future<void> saveFrameFormat(String formatName) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(AppConstants.prefFrameFormat, formatName);
+  }
+
+  Future<void> saveSaveDngRaw(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefSaveDngRaw, enabled);
+  }
+
+  Future<void> saveDirectLutRecording(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefDirectLutRecording, enabled);
+  }
+
+  Future<void> saveLiveMetalPreview(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefLiveMetalPreview, enabled);
   }
 
   Future<void> saveProcessZero(bool enabled) async {
@@ -298,6 +333,8 @@ class CinemaCameraRepository {
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
     bool anamorphicCrop = false,
+    double frameAspectRatio = 0.0,
+    bool saveDngRaw = false,
     double desqueeze = 1.0,
     String? toneId,
     double intensity = 1.0,
@@ -312,6 +349,8 @@ class CinemaCameraRepository {
           'intensity': intensity,
           'anamorphic': applyAnamorphicBars,
           'anamorphicCrop': anamorphicCrop,
+          'frameAspectRatio': frameAspectRatio,
+          'saveDngRaw': saveDngRaw,
           'desqueeze': desqueeze,
           'quality': 0.98,
           if (look != null) 'look': look,
@@ -392,6 +431,7 @@ class CinemaCameraRepository {
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
     bool anamorphicCrop = false,
+    double frameAspectRatio = 0.0,
     double desqueeze = 1.0,
     bool appleLogInput = false,
     String? toneId,
@@ -408,6 +448,7 @@ class CinemaCameraRepository {
           'intensity': intensity,
           'anamorphic': applyAnamorphicBars,
           'anamorphicCrop': anamorphicCrop,
+          'frameAspectRatio': frameAspectRatio,
           'desqueeze': desqueeze,
           'appleLogInput': appleLogInput,
           'quality': 0.98,
@@ -495,6 +536,7 @@ class CinemaCameraRepository {
     required List<double> colorMatrix,
     required bool applyAnamorphicBars,
     bool anamorphicCrop = false,
+    double frameAspectRatio = 0.0,
     double desqueeze = 1.0,
     bool appleLogInput = false,
     required int fps,
@@ -512,6 +554,7 @@ class CinemaCameraRepository {
           'intensity': intensity,
           'anamorphic': applyAnamorphicBars,
           'anamorphicCrop': anamorphicCrop,
+          'frameAspectRatio': frameAspectRatio,
           'desqueeze': desqueeze,
           'appleLogInput': appleLogInput,
           'fps': fps,
@@ -580,8 +623,37 @@ class CinemaCameraRepository {
     void Function(bool active, int mode) onChanged, {
     void Function(String path)? onProResFinished,
     void Function(double progress)? onExportProgress,
+    void Function(double? horizonDegrees, double? audioPeakDb)? onDopTelemetry,
+    void Function(Map<String, dynamic> scope)? onLiveScope,
   }) {
     _videoChannel.setMethodCallHandler((call) async {
+      if (call.method == 'dopTelemetry') {
+        final map = call.arguments is Map
+            ? call.arguments as Map<Object?, Object?>
+            : const <Object?, Object?>{};
+        final h = map['horizonDegrees'];
+        final a = map['audioPeakDb'];
+        if (onDopTelemetry != null) {
+          onDopTelemetry(
+            h is num ? h.toDouble() : null,
+            a is num ? a.toDouble() : null,
+          );
+        }
+        return null;
+      }
+
+      if (call.method == 'liveCameraScope') {
+        final raw = call.arguments;
+        if (raw is Map && onLiveScope != null) {
+          final parsed = <String, dynamic>{};
+          raw.forEach((k, v) {
+            if (k is String) parsed[k] = v;
+          });
+          onLiveScope(parsed);
+        }
+        return null;
+      }
+
       // Native exports report how far they are so the spinner can show a real
       // percentage instead of looking stuck.
       if (call.method == 'exportProgress') {
@@ -714,6 +786,61 @@ class CinemaCameraRepository {
     } on MissingPluginException {
       return false;
     }
+  }
+
+  // ------------------------------------------------ Tahap 2 Metal & DOP
+
+  Future<int?> enableLiveMetalPreview(Map<String, dynamic> config) async {
+    try {
+      final id = await _videoChannel.invokeMethod<int>(
+        'enableLiveMetalPreview',
+        config,
+      );
+      return (id != null && id >= 0) ? id : null;
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  Future<void> updateLiveMetalConfig(Map<String, dynamic> config) async {
+    try {
+      await _videoChannel.invokeMethod<Object?>(
+        'updateLiveMetalConfig',
+        config,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> disableLiveMetalPreview() async {
+    try {
+      await _videoChannel.invokeMethod<Object?>('disableLiveMetalPreview');
+    } catch (_) {}
+  }
+
+  Future<void> startDirectLutRecording(Map<String, dynamic> args) {
+    return _invokeOrThrow('startDirectLutRecording', args);
+  }
+
+  Future<String?> stopDirectLutRecording() async {
+    try {
+      return await _videoChannel.invokeMethod<String>('stopDirectLutRecording');
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  Future<void> setDopTelemetry({
+    required bool horizon,
+    required bool audio,
+  }) async {
+    try {
+      await _videoChannel.invokeMethod<Object?>(
+        'setDopTelemetry',
+        <String, dynamic>{'horizon': horizon, 'audio': audio},
+      );
+    } catch (_) {}
   }
 
   /// Throws [PlatformException] (with the native message) so the UI can tell the
@@ -865,15 +992,24 @@ class CinemaCameraRepository {
   }
 
   Future<void> deleteCapturedMedia(CapturedMedia media) async {
+    await deleteCapturedMediaBatch(<CapturedMedia>[media]);
+  }
+
+  /// Removes multiple gallery items in one atomic preference write + file cleanup.
+  Future<void> deleteCapturedMediaBatch(List<CapturedMedia> items) async {
+    if (items.isEmpty) return;
+    final ids = items.map((e) => e.id).toSet();
     final entries = await loadCapturedMedia();
-    final remaining = entries.where((entry) => entry.id != media.id).toList();
+    final remaining = entries.where((entry) => !ids.contains(entry.id)).toList();
     await _writeLibrary(remaining);
 
-    try {
-      final file = File(media.path);
-      if (await file.exists()) await file.delete();
-    } catch (_) {
-      // The index is already updated; a stale file is harmless.
+    for (final media in items) {
+      try {
+        final file = File(media.path);
+        if (await file.exists()) await file.delete();
+      } catch (_) {
+        // Best effort cleanup.
+      }
     }
   }
 

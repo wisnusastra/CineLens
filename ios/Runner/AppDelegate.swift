@@ -1,9 +1,11 @@
 import AVFoundation
 import CoreImage
 import CoreMedia
+import CoreMotion
 import CoreVideo
 import Flutter
 import ImageIO
+import Metal
 import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
@@ -148,6 +150,17 @@ final class ExportProgressReporter {
   /// Active Process Zero RAW capture delegate held for the duration of one shot.
   private var rawPhotoDelegate: ProcessZeroPhotoDelegate?
 
+  /// Flutter texture registry + live Metal 3D LUT viewfinder & direct-to-disk
+  /// video LUT pipeline (Tahap 2 Cinema Pro).
+  private var textureRegistry: FlutterTextureRegistry?
+  private var liveMetalPipeline: LiveMetalViewfinderPipeline?
+  private var dopMotionManager: CMMotionManager?
+  private var dopTelemetryTimer: Timer?
+  private var dopAudioSessionActive = false
+  private var dopAudioRecorder: AVAudioRecorder?
+  private var dopHorizonEnabled = false
+  private var dopAudioEnabled = false
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -171,6 +184,7 @@ final class ExportProgressReporter {
       binaryMessenger: registrar.messenger()
     )
     nativeChannel = channel
+    textureRegistry = registrar.textures()
     observeVideoStabilization()
 
     channel.setMethodCallHandler { [weak self] call, result in
@@ -185,6 +199,7 @@ final class ExportProgressReporter {
 
         let anamorphic = (args["anamorphic"] as? Bool) ?? false
         let anamorphicCrop = (args["anamorphicCrop"] as? Bool) ?? false
+        let frameAspectRatio = (args["frameAspectRatio"] as? NSNumber)?.doubleValue ?? 0.0
         let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
         let appleLogInput = (args["appleLogInput"] as? Bool) ?? false
         let fps = (args["fps"] as? NSNumber)?.int32Value ?? 24
@@ -199,6 +214,7 @@ final class ExportProgressReporter {
           importedLut: ImportedLut.from(args),
           anamorphic: anamorphic,
           anamorphicCrop: anamorphicCrop,
+          frameAspectRatio: frameAspectRatio,
           desqueeze: desqueeze,
           appleLogInput: appleLogInput,
           fps: fps,
@@ -238,6 +254,7 @@ final class ExportProgressReporter {
 
         let anamorphic = (args["anamorphic"] as? Bool) ?? false
         let anamorphicCrop = (args["anamorphicCrop"] as? Bool) ?? false
+        let frameAspectRatio = (args["frameAspectRatio"] as? NSNumber)?.doubleValue ?? 0.0
         let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
         let appleLogInput = (args["appleLogInput"] as? Bool) ?? false
         let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.98
@@ -252,6 +269,7 @@ final class ExportProgressReporter {
           importedLut: ImportedLut.from(args),
           anamorphic: anamorphic,
           anamorphicCrop: anamorphicCrop,
+          frameAspectRatio: frameAspectRatio,
           desqueeze: desqueeze,
           appleLogInput: appleLogInput,
           quality: quality,
@@ -413,6 +431,56 @@ final class ExportProgressReporter {
         }
         self?.editorHistogram(bytes: bytes, result: result)
 
+      case "editorScopes":
+        guard let args = call.arguments as? [String: Any],
+              let bytes = (args["bytes"] as? FlutterStandardTypedData)?.data else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        self?.editorScopes(bytes: bytes, result: result)
+
+      case "editorMatchColor":
+        guard let args = call.arguments as? [String: Any],
+              let sourcePath = args["sourcePath"] as? String,
+              let referencePath = args["referencePath"] as? String else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        let isVideo = (args["isVideo"] as? Bool) ?? false
+        self?.editorMatchColor(
+          sourcePath: sourcePath,
+          isVideo: isVideo,
+          referencePath: referencePath,
+          result: result
+        )
+
+      case "enableLiveMetalPreview":
+        let args = call.arguments as? [String: Any] ?? [:]
+        self?.enableLiveMetalPreview(args: args, result: result)
+
+      case "updateLiveMetalConfig":
+        let args = call.arguments as? [String: Any] ?? [:]
+        self?.liveMetalPipeline?.updateConfig(args: args)
+        result(true)
+
+      case "disableLiveMetalPreview":
+        self?.disableLiveMetalPreview()
+        result(true)
+
+      case "startDirectLutRecording":
+        let args = call.arguments as? [String: Any] ?? [:]
+        self?.startDirectLutRecording(args: args, result: result)
+
+      case "stopDirectLutRecording":
+        self?.stopDirectLutRecording(result: result)
+
+      case "setDopTelemetry":
+        let args = call.arguments as? [String: Any] ?? [:]
+        let horizon = (args["horizon"] as? Bool) ?? false
+        let audio = (args["audio"] as? Bool) ?? false
+        self?.configureDopTelemetry(horizon: horizon, audio: audio)
+        result(true)
+
       case "importMediaFromPhotos":
         let args = call.arguments as? [String: Any] ?? [:]
         let limit = (args["limit"] as? NSNumber)?.intValue ?? 40
@@ -530,6 +598,8 @@ final class ExportProgressReporter {
     activeDevice = device
     disableAutomaticVideoHDRIfNeeded(on: device)
     if changed {
+      liveMetalPipeline?.detach()
+      liveMetalPipeline = nil
       reapplyManualControls()
     }
   }
@@ -1615,6 +1685,8 @@ final class ExportProgressReporter {
     ]
     let anamorphic = (args["anamorphic"] as? Bool) ?? false
     let anamorphicCrop = (args["anamorphicCrop"] as? Bool) ?? false
+    let frameAspectRatio = (args["frameAspectRatio"] as? NSNumber)?.doubleValue ?? 0.0
+    let saveDngRaw = (args["saveDngRaw"] as? Bool) ?? false
     let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
     let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.98
     let toneId = args["toneId"] as? String
@@ -1632,6 +1704,13 @@ final class ExportProgressReporter {
         return
       }
       DispatchQueue.global(qos: .userInitiated).async {
+        if saveDngRaw {
+          let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+          let rawDir = docs.appendingPathComponent("cinelens_raw", isDirectory: true)
+          try? FileManager.default.createDirectory(at: rawDir, withIntermediateDirectories: true)
+          let dngUrl = rawDir.appendingPathComponent("CINELENS_RAW_\(Int(Date().timeIntervalSince1970)).dng")
+          try? rawData.write(to: dngUrl, options: .atomic)
+        }
         let decoded: CIImage?
         if let rawFilter = CIRAWFilter(imageData: rawData, identifierHint: nil) {
           if rawFilter.isLocalToneMapSupported {
@@ -1671,6 +1750,7 @@ final class ExportProgressReporter {
           importedLut: importedLut,
           anamorphic: anamorphic,
           anamorphicCrop: anamorphicCrop,
+          frameAspectRatio: frameAspectRatio,
           desqueeze: desqueeze,
           appleLogInput: false,
           quality: quality
@@ -1708,6 +1788,7 @@ final class ExportProgressReporter {
     importedLut: ImportedLut?,
     anamorphic: Bool,
     anamorphicCrop: Bool = false,
+    frameAspectRatio: Double = 0.0,
     desqueeze: Double = 1.0,
     appleLogInput: Bool = false,
     quality: Double,
@@ -1752,6 +1833,7 @@ final class ExportProgressReporter {
         importedLut: importedLut,
         anamorphic: anamorphic,
         anamorphicCrop: anamorphicCrop,
+        frameAspectRatio: frameAspectRatio,
         desqueeze: desqueeze,
         appleLogInput: appleLogInput,
         quality: quality
@@ -1785,6 +1867,7 @@ final class ExportProgressReporter {
     importedLut: ImportedLut?,
     anamorphic: Bool,
     anamorphicCrop: Bool,
+    frameAspectRatio: Double = 0.0,
     desqueeze: Double,
     appleLogInput: Bool,
     quality: Double
@@ -1823,19 +1906,30 @@ final class ExportProgressReporter {
       output = output.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
     }
 
-    if anamorphic {
+    // Vintage & Cinema Frame Aspect Framing (1:1, 4:5, 6:7, 3:2, 16:9, 2.39:1, XPan 65:24).
+    let effectiveRatio = frameAspectRatio > 0.1
+      ? frameAspectRatio
+      : (anamorphic ? 2.39 : 0.0)
+    if effectiveRatio > 0.1 {
       let frame = output.extent
-      let targetHeight = frame.width / 2.39
-      if frame.height > targetHeight + 0.5 {
-        let barHeight = (frame.height - targetHeight) / 2.0
+      let targetW: CGFloat
+      let targetH: CGFloat
+      let currentRatio = Double(frame.width / max(frame.height, 1.0))
+      if currentRatio > effectiveRatio {
+        targetH = frame.height
+        targetW = (frame.height * CGFloat(effectiveRatio)).rounded()
+      } else {
+        targetW = frame.width
+        targetH = (frame.width / CGFloat(effectiveRatio)).rounded()
+      }
+      if abs(targetW - frame.width) > 1.0 || abs(targetH - frame.height) > 1.0 {
         let activeRect = CGRect(
-          x: frame.minX,
-          y: frame.minY + barHeight,
-          width: frame.width,
-          height: targetHeight
+          x: frame.midX - targetW / 2.0,
+          y: frame.midY - targetH / 2.0,
+          width: max(2, targetW),
+          height: max(2, targetH)
         )
         if anamorphicCrop {
-          // True 2.39:1 cinema crop without dead black bars.
           output = output.cropped(to: activeRect)
         } else {
           let blackBackground = CIImage(color: .black).cropped(to: frame)
@@ -1933,6 +2027,7 @@ final class ExportProgressReporter {
     effectLook: FilmLook?,
     anamorphic: Bool,
     anamorphicCrop: Bool = false,
+    frameAspectRatio: Double = 0.0,
     desqueeze: Double = 1.0,
     appleLogInput: Bool = false,
     frameRate: Int32,
@@ -1978,11 +2073,15 @@ final class ExportProgressReporter {
       finalRenderWidth = geoSize.width
       finalRenderHeight = geoSize.height
     }
-    if anamorphic && anamorphicCrop {
-      let targetH = (desqueezedWidth / 2.39).rounded()
-      if desqueezedHeight > targetH + 1.0 {
-        // Video encoders require even dimensions.
-        finalRenderHeight = max(2, floor(targetH / 2.0) * 2.0)
+    let effectiveFrameRatio = frameAspectRatio > 0.1
+      ? frameAspectRatio
+      : (anamorphic ? 2.39 : 0.0)
+    if effectiveFrameRatio > 0.1 && anamorphicCrop {
+      let currentR = Double(desqueezedWidth / max(desqueezedHeight, 1.0))
+      if currentR > effectiveFrameRatio {
+        finalRenderWidth = max(2, floor((desqueezedHeight * CGFloat(effectiveFrameRatio)) / 2.0) * 2.0)
+      } else {
+        finalRenderHeight = max(2, floor((desqueezedWidth / CGFloat(effectiveFrameRatio)) / 2.0) * 2.0)
       }
     }
     finalRenderWidth = max(2, floor(finalRenderWidth / 2.0) * 2.0)
@@ -2095,20 +2194,28 @@ final class ExportProgressReporter {
         )
       }
 
-      if anamorphic {
+      if effectiveFrameRatio > 0.1 {
         let frameExtent = output.extent
-        let targetHeight = anamorphicCrop ? finalRenderHeight : (frameExtent.width / 2.39)
-        if frameExtent.height > targetHeight + 0.5 {
-          let barHeight = (frameExtent.height - targetHeight) / 2.0
+        let currentR = Double(frameExtent.width / max(frameExtent.height, 1.0))
+        let targetW: CGFloat
+        let targetH: CGFloat
+        if currentR > effectiveFrameRatio {
+          targetH = frameExtent.height
+          targetW = anamorphicCrop ? finalRenderWidth : (frameExtent.height * CGFloat(effectiveFrameRatio)).rounded()
+        } else {
+          targetW = frameExtent.width
+          targetH = anamorphicCrop ? finalRenderHeight : (frameExtent.width / CGFloat(effectiveFrameRatio)).rounded()
+        }
+        if abs(targetW - frameExtent.width) > 1.0 || abs(targetH - frameExtent.height) > 1.0 {
           let activeRect = CGRect(
-            x: frameExtent.origin.x,
-            y: frameExtent.origin.y + barHeight,
-            width: frameExtent.width,
-            height: targetHeight
+            x: frameExtent.midX - targetW / 2.0,
+            y: frameExtent.midY - targetH / 2.0,
+            width: max(2, targetW),
+            height: max(2, targetH)
           )
           if anamorphicCrop {
             output = output.cropped(to: activeRect).transformed(
-              by: CGAffineTransform(translationX: 0, y: -activeRect.origin.y)
+              by: CGAffineTransform(translationX: -activeRect.origin.x, y: -activeRect.origin.y)
             )
           } else {
             let blackBackground = CIImage(color: .black).cropped(to: frameExtent)
@@ -2201,6 +2308,7 @@ final class ExportProgressReporter {
     importedLut: ImportedLut?,
     anamorphic: Bool,
     anamorphicCrop: Bool = false,
+    frameAspectRatio: Double = 0.0,
     desqueeze: Double = 1.0,
     appleLogInput: Bool = false,
     fps: Int32,
@@ -2240,6 +2348,7 @@ final class ExportProgressReporter {
         effectLook: effectLook,
         anamorphic: anamorphic,
         anamorphicCrop: anamorphicCrop,
+        frameAspectRatio: frameAspectRatio,
         desqueeze: desqueeze,
         appleLogInput: appleLogInput,
         frameRate: frameRate
@@ -2667,6 +2776,28 @@ final class ExportProgressReporter {
       exportSession.shouldOptimizeForNetworkUse = true
 
       let duration = (try? await asset.load(.duration))?.seconds ?? 0
+      // Optional video trim (normalised 0...1 range from Gallery Editor).
+      let trimStart = min(max(params.trimStart, 0.0), 0.98)
+      let trimEnd = min(max(params.trimEnd, trimStart + 0.02), 1.0)
+      if duration > 0.2 && (trimStart > 0.002 || trimEnd < 0.998) {
+        let startTime = CMTime(seconds: duration * trimStart, preferredTimescale: 600)
+        let clipDur = CMTime(seconds: duration * (trimEnd - trimStart), preferredTimescale: 600)
+        exportSession.timeRange = CMTimeRange(start: startTime, duration: clipDur)
+      }
+
+      // Optional -14 LUFS loudness normalization via AVMutableAudioMix.
+      if params.normalizeAudio,
+         let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first {
+        let gain = await PhotoEditor.loudnessNormalizationGain(for: asset, track: audioTrack)
+        if abs(gain - 1.0) > 0.02 {
+          let audioMix = AVMutableAudioMix()
+          let inputParams = AVMutableAudioMixInputParameters(track: audioTrack)
+          inputParams.setVolume(Float(gain), at: .zero)
+          audioMix.inputParameters = [inputParams]
+          exportSession.audioMix = audioMix
+        }
+      }
+
       let timeout = min(max(600.0, duration * 30.0), 2100.0)
       AppDelegate.finishExport(
         exportSession,
@@ -2707,6 +2838,211 @@ final class ExportProgressReporter {
       DispatchQueue.main.async {
         result(hist)
       }
+    }
+  }
+
+  private func editorScopes(
+    bytes: Data,
+    result: @escaping FlutterResult
+  ) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      let image = CIImage(data: bytes)
+      let scopes = image.map { PhotoEditor.computeScopes(for: $0) } ?? [:]
+      DispatchQueue.main.async {
+        result(scopes)
+      }
+    }
+  }
+
+  private func editorMatchColor(
+    sourcePath: String,
+    isVideo: Bool,
+    referencePath: String,
+    result: @escaping FlutterResult
+  ) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      guard let src = PhotoEditor.previewImage(path: sourcePath, isVideo: isVideo, maxDimension: 512),
+            let refImg = PhotoEditor.previewImage(path: referencePath, isVideo: false, maxDimension: 512) else {
+        DispatchQueue.main.async { result([:]) }
+        return
+      }
+      let matched = PhotoEditor.matchColor(source: src, reference: refImg)
+      DispatchQueue.main.async {
+        result(matched)
+      }
+    }
+  }
+
+  // MARK: - Tahap 2: Live Metal 3D LUT Viewfinder, Direct-to-Disk Video & DOP Telemetry
+
+  private func enableLiveMetalPreview(
+    args: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    guard let registry = textureRegistry,
+          let session = activeSession,
+          let dataOutput = session.outputs.compactMap({ $0 as? AVCaptureVideoDataOutput }).first,
+          let originalDelegate = dataOutput.sampleBufferDelegate,
+          let originalQueue = dataOutput.sampleBufferCallbackQueue else {
+      result(nil)
+      return
+    }
+
+    if let existing = liveMetalPipeline {
+      existing.updateConfig(args: args)
+      result(existing.textureId)
+      return
+    }
+
+    let pipeline = LiveMetalViewfinderPipeline(
+      registry: registry,
+      dataOutput: dataOutput,
+      originalDelegate: originalDelegate,
+      originalQueue: originalQueue,
+      channel: nativeChannel
+    )
+    pipeline.updateConfig(args: args)
+    pipeline.attach()
+    liveMetalPipeline = pipeline
+    result(pipeline.textureId)
+  }
+
+  private func disableLiveMetalPreview() {
+    liveMetalPipeline?.detach()
+    liveMetalPipeline = nil
+  }
+
+  private func startDirectLutRecording(
+    args: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    guard let registry = textureRegistry,
+          let session = activeSession,
+          let dataOutput = session.outputs.compactMap({ $0 as? AVCaptureVideoDataOutput }).first else {
+      result(FlutterError(code: "no_session", message: "Camera session unavailable.", details: nil))
+      return
+    }
+
+    if liveMetalPipeline == nil {
+      guard let originalDelegate = dataOutput.sampleBufferDelegate,
+            let originalQueue = dataOutput.sampleBufferCallbackQueue else {
+        result(FlutterError(code: "no_delegate", message: "Video output delegate unavailable.", details: nil))
+        return
+      }
+      let pipeline = LiveMetalViewfinderPipeline(
+        registry: registry,
+        dataOutput: dataOutput,
+        originalDelegate: originalDelegate,
+        originalQueue: originalQueue,
+        channel: nativeChannel
+      )
+      pipeline.updateConfig(args: args)
+      pipeline.attach()
+      liveMetalPipeline = pipeline
+    } else {
+      liveMetalPipeline?.updateConfig(args: args)
+    }
+
+    let fps = (args["fps"] as? NSNumber)?.intValue ?? 24
+    let bitrate = (args["bitrate"] as? NSNumber)?.intValue ?? 45_000_000
+    liveMetalPipeline?.startDirectRecording(fps: fps, bitrate: bitrate, result: result)
+  }
+
+  private func stopDirectLutRecording(result: @escaping FlutterResult) {
+    guard let pipeline = liveMetalPipeline else {
+      result(FlutterError(code: "not_recording", message: "No active direct LUT recording.", details: nil))
+      return
+    }
+    pipeline.stopDirectRecording(result: result)
+  }
+
+  private func configureDopTelemetry(horizon: Bool, audio: Bool) {
+    dopHorizonEnabled = horizon
+    dopAudioEnabled = audio
+
+    if horizon {
+      if dopMotionManager == nil {
+        dopMotionManager = CMMotionManager()
+      }
+      if let mm = dopMotionManager, mm.isDeviceMotionAvailable, !mm.isDeviceMotionActive {
+        mm.deviceMotionUpdateInterval = 1.0 / 20.0
+        mm.startDeviceMotionUpdates()
+      }
+    } else {
+      dopMotionManager?.stopDeviceMotionUpdates()
+    }
+
+    if audio {
+      startAudioMeterIfNeeded()
+    } else {
+      stopAudioMeter()
+    }
+
+    if horizon || audio {
+      if dopTelemetryTimer == nil {
+        dopTelemetryTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
+          self?.pushDopTelemetryTick()
+        }
+      }
+    } else {
+      dopTelemetryTimer?.invalidate()
+      dopTelemetryTimer = nil
+    }
+  }
+
+  private func startAudioMeterIfNeeded() {
+    guard dopAudioRecorder == nil else { return }
+    let session = AVAudioSession.sharedInstance()
+    do {
+      try session.setCategory(.playAndRecord, mode: .videoRecording, options: [.mixWithOthers, .defaultToSpeaker])
+      try session.setActive(true)
+      dopAudioSessionActive = true
+      let url = URL(fileURLWithPath: "/dev/null")
+      let settings: [String: Any] = [
+        AVFormatIDKey: Int(kAudioFormatAppleLossless),
+        AVSampleRateKey: 44100.0,
+        AVNumberOfChannelsKey: 1,
+        AVEncoderAudioQualityKey: AVAudioQuality.min.rawValue
+      ]
+      let recorder = try AVAudioRecorder(url: url, settings: settings)
+      recorder.isMeteringEnabled = true
+      recorder.record()
+      dopAudioRecorder = recorder
+    } catch {
+      // Mic permission denied or busy; leave meter silent gracefully.
+    }
+  }
+
+  private func stopAudioMeter() {
+    dopAudioRecorder?.stop()
+    dopAudioRecorder = nil
+    if dopAudioSessionActive {
+      dopAudioSessionActive = false
+    }
+  }
+
+  private func pushDopTelemetryTick() {
+    var payload: [String: Any] = [:]
+    if dopHorizonEnabled, let motion = dopMotionManager?.deviceMotion {
+      let gx = motion.gravity.x
+      let gy = motion.gravity.y
+      // Angle in degrees relative to upright gravity vector (-45...45 near level).
+      let angleRad = atan2(gx, -gy)
+      var deg = angleRad * 180.0 / Double.pi
+      // Wrap to nearest 90° cardinal orientation so both portrait & landscape level smoothly.
+      let nearest90 = (deg / 90.0).rounded() * 90.0
+      deg = deg - nearest90
+      payload["horizonDegrees"] = (deg * 10.0).rounded() / 10.0
+    }
+    if dopAudioEnabled, let rec = dopAudioRecorder {
+      rec.updateMeters()
+      let peak = Double(rec.peakPower(forChannel: 0))
+      let avg = Double(rec.averagePower(forChannel: 0))
+      payload["audioPeakDb"] = max(-60.0, min(0.0, peak))
+      payload["audioAvgDb"] = max(-60.0, min(0.0, avg))
+    }
+    if !payload.isEmpty {
+      nativeChannel?.invokeMethod("dopTelemetry", arguments: payload)
     }
   }
 }
@@ -4468,6 +4804,23 @@ enum PhotoEditor {
     var hsl: [[Double]] = Array(repeating: [0, 0, 0], count: 8)
     var colorGrading = ColorGradingParams()
     var masks: [MaskParams] = []
+    /// OpenFilm-inspired Cinema Color Science: Multi-Camera Log IDT, ASC CDL,
+    /// Video Trim & -14 LUFS Loudness Normalization.
+    var inputLogProfile: String = "rec709"
+    var cdlSlope: [Double] = [1.0, 1.0, 1.0]
+    var cdlOffset: [Double] = [0.0, 0.0, 0.0]
+    var cdlPower: [Double] = [1.0, 1.0, 1.0]
+    var cdlSaturation: Double = 1.0
+    var trimStart: Double = 0.0
+    var trimEnd: Double = 1.0
+    var normalizeAudio: Bool = false
+
+    var isCdlNeutral: Bool {
+      abs(cdlSlope[0] - 1) < 0.002 && abs(cdlSlope[1] - 1) < 0.002 && abs(cdlSlope[2] - 1) < 0.002
+        && abs(cdlOffset[0]) < 0.002 && abs(cdlOffset[1]) < 0.002 && abs(cdlOffset[2]) < 0.002
+        && abs(cdlPower[0] - 1) < 0.002 && abs(cdlPower[1] - 1) < 0.002 && abs(cdlPower[2] - 1) < 0.002
+        && abs(cdlSaturation - 1) < 0.002
+    }
 
     var hasGeometryChanges: Bool {
       cropAspect != "original"
@@ -4572,6 +4925,20 @@ enum PhotoEditor {
       if let rawMasks = raw["masks"] as? [Any] {
         params.masks = rawMasks.compactMap { MaskParams.from($0) }
       }
+      params.inputLogProfile = (raw["inputLogProfile"] as? String) ?? "rec709"
+      func triple(_ key: String, fallback: [Double], lo: Double, hi: Double) -> [Double] {
+        guard let arr = raw[key] as? [Any], arr.count >= 3 else { return fallback }
+        let nums = arr.prefix(3).compactMap { ($0 as? NSNumber)?.doubleValue }
+        guard nums.count == 3 else { return fallback }
+        return nums.map { min(max($0, lo), hi) }
+      }
+      params.cdlSlope = triple("cdlSlope", fallback: [1, 1, 1], lo: 0.4, hi: 2.0)
+      params.cdlOffset = triple("cdlOffset", fallback: [0, 0, 0], lo: -0.35, hi: 0.35)
+      params.cdlPower = triple("cdlPower", fallback: [1, 1, 1], lo: 0.5, hi: 2.0)
+      params.cdlSaturation = min(max(number("cdlSaturation", fallback: 1.0), 0.0), 2.0)
+      params.trimStart = min(max(number("trimStart", fallback: 0.0), 0.0), 0.98)
+      params.trimEnd = min(max(number("trimEnd", fallback: 1.0), params.trimStart + 0.02), 1.0)
+      params.normalizeAudio = (raw["normalizeAudio"] as? Bool) ?? false
       return params
     }
   }
@@ -4582,6 +4949,7 @@ enum PhotoEditor {
     switch key {
     case "1:1": return 1.0
     case "4:5": return 4.0 / 5.0
+    case "6:7": return 6.0 / 7.0
     case "3:4": return 3.0 / 4.0
     case "2:3": return 2.0 / 3.0
     case "4:3": return 4.0 / 3.0
@@ -4589,6 +4957,7 @@ enum PhotoEditor {
     case "16:9": return 16.0 / 9.0
     case "9:16": return 9.0 / 16.0
     case "2.39:1": return 2.39
+    case "65:24": return 65.0 / 24.0
     default: return nil
     }
   }
@@ -4797,6 +5166,18 @@ enum PhotoEditor {
     guard extent.width > 1, extent.height > 1 else { return image }
     let scale = Double(max(extent.width, extent.height)) / 1920.0
     var output = image
+
+    // 0. Multi-Camera Log Input Transform (OpenFilm IDT: Apple Log, S-Log3,
+    //    DJI D-Log M, Canon C-Log3, Fuji F-Log2 -> Rec.709 filmic working space).
+    if params.inputLogProfile != "rec709",
+       let idtCube = logIdtCube(profile: params.inputLogProfile) {
+      output = applyCube(idtCube, dimension: 33, to: output)
+    }
+
+    // 0b. ASC CDL (Slope / Offset / Power / Saturation — Hollywood standard).
+    if !params.isCdlNeutral, let cdl = cdlCube(params) {
+      output = applyCube(cdl, dimension: 33, to: output)
+    }
 
     // 1. White balance as channel gains, which keeps the slider predictable.
     if abs(params.temperature) > 0.001 || abs(params.tint) > 0.001 {
@@ -5518,6 +5899,341 @@ enum PhotoEditor {
     ]
   }
 
+  // MARK: OpenFilm Color Science (Multi-Log IDT, ASC CDL, Scopes, Color Match, -14 LUFS)
+
+  private static var logIdtCache: [String: Data] = [:]
+  private static var cdlCache: [String: Data] = [:]
+
+  private static func linToSrgb(_ l: Double) -> Double {
+    let v = max(l, 0.0)
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055
+  }
+
+  private static func decodeLogChannel(_ x: Double, profile: String) -> Double {
+    let lin: Double
+    switch profile {
+    case "apple_log":
+      let r0 = -0.05641088
+      let c = 47.28711236
+      let beta = 0.00964052
+      let gamma = 0.08550479
+      let delta = 0.69336945
+      let pt = c * pow(0.01 - r0, 2.0)
+      if x < 0.0 { lin = r0 }
+      else if x < pt { lin = sqrt(x / c) + r0 }
+      else { lin = pow(2.0, (x - delta) / gamma) - beta }
+    case "sony_slog3":
+      let code = x * 1023.0
+      if code >= 171.2102946929 {
+        lin = pow(10.0, (code - 420.0) / 261.5) * (0.18 + 0.01) - 0.01
+      } else {
+        lin = (code - 95.0) * 0.01125 / (171.2102946929 - 95.0)
+      }
+    case "dji_dlogm":
+      // DJI D-Log M smooth logarithmic transfer (middle grey ~0.39).
+      lin = max(0.0, (pow(10.0, (x - 0.39) / 0.275) - 0.018) * 0.18)
+    case "canon_clog3":
+      if x >= 0.12512219 {
+        lin = (pow(10.0, (x - 0.12783901) / 0.36726845) - 1.0) / 14.98325
+      } else {
+        lin = 0.0
+      }
+    case "fuji_flog2":
+      let cut = 0.1005377752
+      if x >= cut {
+        lin = (pow(10.0, (x - 0.384316) / 0.245281) - 0.064829) / 5.555556
+      } else {
+        lin = max(0.0, (x - 0.092864) / 8.799461)
+      }
+    default:
+      return min(max(x, 0.0), 1.0)
+    }
+    // Filmic ACEScct-inspired shoulder roll-off into display Rec.709/sRGB.
+    let exposed = max(0.0, lin * 2.15)
+    let mapped = exposed / (1.0 + exposed * 0.72) * 1.18
+    return min(max(linToSrgb(mapped), 0.0), 1.0)
+  }
+
+  private static func logIdtCube(profile: String) -> Data? {
+    guard profile != "rec709" else { return nil }
+    gradingLock.lock()
+    let cached = logIdtCache[profile]
+    gradingLock.unlock()
+    if let cached = cached { return cached }
+
+    let n = 33
+    let last = Double(n - 1)
+    var values = [Float]()
+    values.reserveCapacity(n * n * n * 4)
+    for bi in 0..<n {
+      let db = decodeLogChannel(Double(bi) / last, profile: profile)
+      for gi in 0..<n {
+        let dg = decodeLogChannel(Double(gi) / last, profile: profile)
+        for ri in 0..<n {
+          let dr = decodeLogChannel(Double(ri) / last, profile: profile)
+          // Gentle saturation restore for flat camera log gamuts.
+          let y = 0.2126 * dr + 0.7152 * dg + 0.0722 * db
+          let satBoost = 1.14
+          values.append(Float(min(max(y + (dr - y) * satBoost, 0.0), 1.0)))
+          values.append(Float(min(max(y + (dg - y) * satBoost, 0.0), 1.0)))
+          values.append(Float(min(max(y + (db - y) * satBoost, 0.0), 1.0)))
+          values.append(1.0)
+        }
+      }
+    }
+    let data = values.withUnsafeBufferPointer { Data(buffer: $0) }
+    gradingLock.lock()
+    logIdtCache[profile] = data
+    gradingLock.unlock()
+    return data
+  }
+
+  /// ASC CDL 33³ cube: `out = pow(max(0, in * slope + offset), power)` + sat.
+  private static func cdlCube(_ params: Params) -> Data? {
+    let key = String(
+      format: "%.3f,%.3f,%.3f|%.3f,%.3f,%.3f|%.3f,%.3f,%.3f|%.3f",
+      params.cdlSlope[0], params.cdlSlope[1], params.cdlSlope[2],
+      params.cdlOffset[0], params.cdlOffset[1], params.cdlOffset[2],
+      params.cdlPower[0], params.cdlPower[1], params.cdlPower[2],
+      params.cdlSaturation
+    )
+    gradingLock.lock()
+    let cached = cdlCache[key]
+    gradingLock.unlock()
+    if let cached = cached { return cached }
+
+    let s = params.cdlSlope
+    let o = params.cdlOffset
+    let p = params.cdlPower
+    let sat = params.cdlSaturation
+
+    let n = 33
+    let last = Double(n - 1)
+    var values = [Float]()
+    values.reserveCapacity(n * n * n * 4)
+    for bi in 0..<n {
+      let b0 = pow(max(0.0, (Double(bi) / last) * s[2] + o[2]), p[2])
+      for gi in 0..<n {
+        let g0 = pow(max(0.0, (Double(gi) / last) * s[1] + o[1]), p[1])
+        for ri in 0..<n {
+          let r0 = pow(max(0.0, (Double(ri) / last) * s[0] + o[0]), p[0])
+          let y = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0
+          values.append(Float(min(max(y + (r0 - y) * sat, 0.0), 1.0)))
+          values.append(Float(min(max(y + (g0 - y) * sat, 0.0), 1.0)))
+          values.append(Float(min(max(y + (b0 - y) * sat, 0.0), 1.0)))
+          values.append(1.0)
+        }
+      }
+    }
+    let data = values.withUnsafeBufferPointer { Data(buffer: $0) }
+    gradingLock.lock()
+    if cdlCache.count > 24 { cdlCache.removeAll() }
+    cdlCache[key] = data
+    gradingLock.unlock()
+    return data
+  }
+
+  /// Computes complete Pro Cinema Scopes in one fast 128×128 pass:
+  /// - 64-bin RGB + Luma Histogram
+  /// - 48×16 Luma Waveform (0–100 IRE per horizontal slice)
+  /// - Subsampled Vectorscope (Cb, Cr points in -0.5…+0.5)
+  /// - Clipped (> 97 IRE) & Crushed (< 3 IRE) percentages
+  static func computeScopes(for image: CIImage) -> [String: Any] {
+    guard let pixels = samplePixels128(from: image) else { return [:] }
+    let side = 128
+    let bins = 64
+    var rBins = [Double](repeating: 0, count: bins)
+    var gBins = [Double](repeating: 0, count: bins)
+    var bBins = [Double](repeating: 0, count: bins)
+    var lBins = [Double](repeating: 0, count: bins)
+
+    let wfCols = 48
+    let wfRows = 16
+    var wf = [Double](repeating: 0, count: wfCols * wfRows)
+    var vectorPoints: [[Double]] = []
+    vectorPoints.reserveCapacity(1024)
+
+    var clipped = 0
+    var crushed = 0
+    let total = side * side
+
+    for row in 0..<side {
+      for col in 0..<side {
+        let base = (row * side + col) * 4
+        let ri = Int(pixels[base])
+        let gi = Int(pixels[base + 1])
+        let bi = Int(pixels[base + 2])
+        let li = (ri * 54 + gi * 183 + bi * 19) >> 8
+
+        rBins[min(ri >> 2, bins - 1)] += 1
+        gBins[min(gi >> 2, bins - 1)] += 1
+        bBins[min(bi >> 2, bins - 1)] += 1
+        lBins[min(li >> 2, bins - 1)] += 1
+
+        if li >= 248 { clipped += 1 }
+        if li <= 7 { crushed += 1 }
+
+        let wCol = min((col * wfCols) / side, wfCols - 1)
+        let wRow = min((li * wfRows) / 256, wfRows - 1)
+        wf[wRow * wfCols + wCol] += 1
+
+        // Every 4th pixel in both axes -> 32×32 = 1024 clean vectorscope dots.
+        if (row & 3) == 0 && (col & 3) == 0 {
+          let r = Double(ri) / 255.0
+          let g = Double(gi) / 255.0
+          let b = Double(bi) / 255.0
+          let cb = -0.1146 * r - 0.3854 * g + 0.5000 * b
+          let cr =  0.5000 * r - 0.4542 * g - 0.0458 * b
+          vectorPoints.append([
+            (cb * 1000.0).rounded() / 1000.0,
+            (cr * 1000.0).rounded() / 1000.0
+          ])
+        }
+      }
+    }
+
+    func normHist(_ arr: [Double]) -> [Double] {
+      let sorted = arr.sorted()
+      let peak = max(sorted[Int(Double(bins - 1) * 0.94)], 1.0)
+      return arr.map { min($0 / peak, 1.0) }
+    }
+
+    let wfMax = max(wf.max() ?? 1.0, 1.0)
+    let normWf = wf.map { min(sqrt($0 / wfMax), 1.0) }
+
+    return [
+      "r": normHist(rBins),
+      "g": normHist(gBins),
+      "b": normHist(bBins),
+      "luma": normHist(lBins),
+      "waveform": normWf,
+      "waveformCols": wfCols,
+      "waveformRows": wfRows,
+      "vectorscope": vectorPoints,
+      "clippedPct": ((Double(clipped) / Double(total)) * 1000.0).rounded() / 10.0,
+      "crushedPct": ((Double(crushed) / Double(total)) * 1000.0).rounded() / 10.0
+    ]
+  }
+
+  /// OpenFilm-inspired Shot-to-Shot Color Match: computes an ASC CDL
+  /// (Slope/Offset/Power/Saturation) matching [source] to [reference].
+  static func matchColor(source: CIImage, reference: CIImage) -> [String: Any] {
+    guard let srcPx = samplePixels128(from: source),
+          let refPx = samplePixels128(from: reference) else {
+      return [:]
+    }
+
+    func stats(_ px: [UInt8]) -> (mean: [Double], std: [Double], sat: Double) {
+      let n = Double(px.count / 4)
+      guard n > 0 else { return ([0.5, 0.5, 0.5], [0.2, 0.2, 0.2], 0.3) }
+      var mean = [0.0, 0.0, 0.0]
+      var sumSat = 0.0
+      for i in 0..<Int(n) {
+        let b = i * 4
+        let r = Double(px[b]) / 255.0
+        let g = Double(px[b + 1]) / 255.0
+        let bl = Double(px[b + 2]) / 255.0
+        mean[0] += r; mean[1] += g; mean[2] += bl
+        let mx = max(r, max(g, bl))
+        let mn = min(r, min(g, bl))
+        sumSat += mx > 0.01 ? (mx - mn) / mx : 0.0
+      }
+      mean = mean.map { $0 / n }
+      var variance = [0.0, 0.0, 0.0]
+      for i in 0..<Int(n) {
+        let b = i * 4
+        let dr = Double(px[b]) / 255.0 - mean[0]
+        let dg = Double(px[b + 1]) / 255.0 - mean[1]
+        let db = Double(px[b + 2]) / 255.0 - mean[2]
+        variance[0] += dr * dr
+        variance[1] += dg * dg
+        variance[2] += db * db
+      }
+      let std = variance.map { max(sqrt($0 / n), 0.04) }
+      return (mean, std, max(sumSat / n, 0.05))
+    }
+
+    let s = stats(srcPx)
+    let r = stats(refPx)
+
+    var slopes: [Double] = []
+    var offsets: [Double] = []
+    var powers: [Double] = []
+    for c in 0..<3 {
+      // Blend 78% toward reference distribution so match stays cinematic & natural.
+      let rawSlope = r.std[c] / s.std[c]
+      let slope = min(max(1.0 + (rawSlope - 1.0) * 0.78, 0.65), 1.48)
+      let offset = min(max((r.mean[c] - s.mean[c] * slope) * 0.78, -0.22), 0.22)
+      let midRatio = log(max(r.mean[c], 0.08)) / log(max(s.mean[c], 0.08))
+      let power = min(max(1.0 + (midRatio - 1.0) * 0.35, 0.78), 1.28)
+      slopes.append((slope * 100.0).rounded() / 100.0)
+      offsets.append((offset * 100.0).rounded() / 100.0)
+      powers.append((power * 100.0).rounded() / 100.0)
+    }
+
+    let satRatio = min(max(1.0 + ((r.sat / s.sat) - 1.0) * 0.65, 0.45), 1.55)
+    return [
+      "cdlSlope": slopes,
+      "cdlOffset": offsets,
+      "cdlPower": powers,
+      "cdlSaturation": (satRatio * 100.0).rounded() / 100.0
+    ]
+  }
+
+  /// Estimates linear gain needed to bring an audio track near -14 LUFS
+  /// delivery loudness (bounded safely to avoid clipping or excessive boost).
+  static func loudnessNormalizationGain(
+    for asset: AVAsset,
+    track: AVAssetTrack
+  ) async -> Double {
+    guard let reader = try? AVAssetReader(asset: asset) else { return 1.0 }
+    let outputSettings: [String: Any] = [
+      AVFormatIDKey: kAudioFormatLinearPCM,
+      AVLinearPCMBitDepthKey: 16,
+      AVLinearPCMIsFloatKey: false,
+      AVLinearPCMIsBigEndianKey: false,
+      AVLinearPCMIsNonInterleaved: false
+    ]
+    let output = AVAssetReaderTrackOutput(track: track, outputSettings: outputSettings)
+    guard reader.canAdd(output) else { return 1.0 }
+    reader.add(output)
+    guard reader.startReading() else { return 1.0 }
+
+    var sumSq = 0.0
+    var sampleCount = 0
+    var peakAbs = 0.0001
+    let maxSamples = 44100 * 30 // Scan up to 30 seconds for fast export start.
+
+    while sampleCount < maxSamples, let sb = output.copyNextSampleBuffer() {
+      guard let block = CMSampleBufferGetDataBuffer(sb) else { continue }
+      let len = CMBlockBufferGetDataLength(block)
+      if len < 2 { continue }
+      let count = len / 2
+      var ints = [Int16](repeating: 0, count: count)
+      let status = ints.withUnsafeMutableBytes { ptr in
+        CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: len, destination: ptr.baseAddress!)
+      }
+      guard status == noErr else { continue }
+      for s in ints {
+        let v = Double(s) / 32768.0
+        sumSq += v * v
+        let a = abs(v)
+        if a > peakAbs { peakAbs = a }
+      }
+      sampleCount += count
+    }
+    reader.cancelReading()
+    guard sampleCount > 0 else { return 1.0 }
+
+    let rms = sqrt(sumSq / Double(sampleCount))
+    guard rms > 0.0005 else { return 1.0 }
+    // -14 dBFS RMS ≈ 0.20; cap by peak headroom (0.95) and max +12 dB gain.
+    let targetRms = 0.20
+    let desired = targetRms / rms
+    let peakSafe = 0.94 / peakAbs
+    return min(max(min(desired, peakSafe), 0.25), 3.5)
+  }
+
   // MARK: Curve LUT
 
   private static func needsCurve(_ params: Params) -> Bool {
@@ -6117,5 +6833,541 @@ final class ProcessZeroPhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
       return
     }
     deliver(photo.fileDataRepresentation())
+  }
+}
+
+// MARK: - Tahap 2: Live Metal 3D LUT Viewfinder & Direct-to-Disk HEVC Video LUT Recorder
+
+/// Taps the running camera session's `AVCaptureVideoDataOutput`, grades every
+/// live frame on the Metal GPU (`AppDelegate.gradingContext`) with the active
+/// 3D Film LUT / `.cube`, deep shadow toe, and real-time DOP overlays (Focus
+/// Peaking, Zebra 95 IRE, False Color), exposes a zero-copy `FlutterTexture`
+/// for 100% WYSIWYG viewfinder display, and optionally writes graded HEVC
+/// frames directly to disk via `AVAssetWriter` (zero post-stop wait!).
+final class LiveMetalViewfinderPipeline: NSObject,
+  FlutterTexture,
+  AVCaptureVideoDataOutputSampleBufferDelegate,
+  AVCaptureAudioDataOutputSampleBufferDelegate {
+
+  private weak var registry: FlutterTextureRegistry?
+  private weak var dataOutput: AVCaptureVideoDataOutput?
+  private weak var originalDelegate: AVCaptureVideoDataOutputSampleBufferDelegate?
+  private var originalQueue: DispatchQueue?
+  private weak var channel: FlutterMethodChannel?
+
+  private(set) var textureId: Int64 = -1
+
+  private let stateLock = NSLock()
+  private var latestPixelBuffer: CVPixelBuffer?
+  private var pool: CVPixelBufferPool?
+  private var poolSize: (Int, Int) = (0, 0)
+
+  // Live grading & DOP overlay config
+  private var activeLook: FilmLook?
+  private var activeMatrix: [Double] = [
+    1, 0, 0, 0, 0,
+    0, 1, 0, 0, 0,
+    0, 0, 1, 0, 0,
+    0, 0, 0, 1, 0,
+  ]
+  private var appleLogInput = false
+  private var focusPeaking = false
+  private var zebraStripes = false
+  private var falseColor = false
+  private var liveScopeEnabled = false
+  private var frameCounter = 0
+
+  // Direct-to-disk HEVC LUT recording state
+  private var isDirectRecording = false
+  private var directWriter: AVAssetWriter?
+  private var directVideoInput: AVAssetWriterInput?
+  private var directAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+  private var directAudioInput: AVAssetWriterInput?
+  private var directAudioSession: AVCaptureSession?
+  private var directURL: URL?
+  private var directStartPTS: CMTime?
+  private var directBitrate = 45_000_000
+  private var directFps = 24
+  private var directFrameAspect = 0.0
+  private var directTrueCrop = false
+  private var directSize: (Int, Int) = (0, 0)
+  private var directStartResult: FlutterResult?
+  private var directDidStart = false
+
+  private static var falseColorCubeCache: Data?
+
+  init(
+    registry: FlutterTextureRegistry,
+    dataOutput: AVCaptureVideoDataOutput,
+    originalDelegate: AVCaptureVideoDataOutputSampleBufferDelegate,
+    originalQueue: DispatchQueue,
+    channel: FlutterMethodChannel?
+  ) {
+    self.registry = registry
+    self.dataOutput = dataOutput
+    self.originalDelegate = originalDelegate
+    self.originalQueue = originalQueue
+    self.channel = channel
+    super.init()
+    self.textureId = registry.register(self)
+  }
+
+  func attach() {
+    guard let dataOutput = dataOutput, let queue = originalQueue else { return }
+    dataOutput.setSampleBufferDelegate(self, queue: queue)
+  }
+
+  func detach() {
+    if let dataOutput = dataOutput {
+      dataOutput.setSampleBufferDelegate(originalDelegate, queue: originalQueue)
+    }
+    stopAudioCapture()
+    if textureId >= 0 {
+      registry?.unregisterTexture(textureId)
+      textureId = -1
+    }
+    stateLock.lock()
+    latestPixelBuffer = nil
+    pool = nil
+    stateLock.unlock()
+  }
+
+  func updateConfig(args: [String: Any]) {
+    let toneId = args["toneId"] as? String
+    let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
+    let effects = FilmEffects.from(args)
+    let imported = ImportedLut.from(args)
+    let matrix = (args["matrix"] as? [Double]) ?? activeMatrix
+
+    let look = imported.flatMap {
+      FilmEngine.importedLook($0, effects: effects)
+    } ?? FilmEngine.look(
+      toneId: toneId,
+      intensity: intensity,
+      effects: effects
+    )
+
+    stateLock.lock()
+    activeLook = look
+    if matrix.count == 20 { activeMatrix = matrix }
+    if let v = args["appleLogInput"] as? Bool { appleLogInput = v }
+    if let v = args["focusPeaking"] as? Bool { focusPeaking = v }
+    if let v = args["zebraStripes"] as? Bool { zebraStripes = v }
+    if let v = args["falseColor"] as? Bool { falseColor = v }
+    if let v = args["liveScope"] as? Bool { liveScopeEnabled = v }
+    if let v = args["frameAspectRatio"] as? NSNumber { directFrameAspect = v.doubleValue }
+    if let v = args["anamorphicCrop"] as? Bool { directTrueCrop = v }
+    stateLock.unlock()
+  }
+
+  // MARK: FlutterTexture
+  func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
+    stateLock.lock()
+    let buf = latestPixelBuffer
+    stateLock.unlock()
+    guard let buffer = buf else { return nil }
+    return Unmanaged.passRetained(buffer)
+  }
+
+  // MARK: Direct-to-disk HEVC LUT recording
+  func startDirectRecording(fps: Int, bitrate: Int, result: @escaping FlutterResult) {
+    stateLock.lock()
+    if isDirectRecording {
+      stateLock.unlock()
+      result(FlutterError(code: "busy", message: "Direct recording already active.", details: nil))
+      return
+    }
+    directFps = max(fps, 1)
+    directBitrate = max(bitrate, 12_000_000)
+    directURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CINELENS_DIRECT_\(Int(Date().timeIntervalSince1970)).mov")
+    directWriter = nil
+    directVideoInput = nil
+    directAdaptor = nil
+    directAudioInput = nil
+    directStartPTS = nil
+    directDidStart = false
+    directStartResult = result
+    isDirectRecording = true
+    stateLock.unlock()
+
+    startAudioCapture()
+  }
+
+  func stopDirectRecording(result: @escaping FlutterResult) {
+    stateLock.lock()
+    let active = isDirectRecording
+    isDirectRecording = false
+    let writer = directWriter
+    let vIn = directVideoInput
+    let aIn = directAudioInput
+    let url = directURL
+    directWriter = nil
+    directVideoInput = nil
+    directAdaptor = nil
+    directAudioInput = nil
+    directStartResult = nil
+    stateLock.unlock()
+
+    stopAudioCapture()
+
+    guard active, let writer = writer, writer.status == .writing, let url = url else {
+      result(FlutterError(code: "not_recording", message: "No recorded frames.", details: nil))
+      return
+    }
+
+    vIn?.markAsFinished()
+    aIn?.markAsFinished()
+    writer.finishWriting {
+      DispatchQueue.main.async {
+        if writer.status == .completed {
+          result(url.path)
+        } else {
+          result(FlutterError(
+            code: "write_failed",
+            message: writer.error?.localizedDescription ?? "Direct LUT recording failed.",
+            details: nil
+          ))
+        }
+      }
+    }
+  }
+
+  private func startAudioCapture() {
+    guard directAudioSession == nil,
+          let audioDevice = AVCaptureDevice.default(for: .audio),
+          let input = try? AVCaptureDeviceInput(device: audioDevice) else { return }
+    let session = AVCaptureSession()
+    let output = AVCaptureAudioDataOutput()
+    if session.canAddInput(input), session.canAddOutput(output) {
+      session.addInput(input)
+      session.addOutput(output)
+      output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "cinelens.direct.audio"))
+      directAudioSession = session
+      DispatchQueue.global(qos: .userInitiated).async {
+        session.startRunning()
+      }
+    }
+  }
+
+  private func stopAudioCapture() {
+    if let s = directAudioSession {
+      DispatchQueue.global(qos: .userInitiated).async { s.stopRunning() }
+      directAudioSession = nil
+    }
+  }
+
+  // MARK: AVCapture SampleBufferDelegate
+  func captureOutput(
+    _ output: AVCaptureOutput,
+    didOutput sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
+    if output is AVCaptureVideoDataOutput {
+      originalDelegate?.captureOutput?(output, didOutput: sampleBuffer, from: connection)
+      processVideoFrame(sampleBuffer)
+    } else {
+      processAudioFrame(sampleBuffer)
+    }
+  }
+
+  func captureOutput(
+    _ output: AVCaptureOutput,
+    didDrop sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
+    originalDelegate?.captureOutput?(output, didDrop: sampleBuffer, from: connection)
+  }
+
+  private func processAudioFrame(_ sampleBuffer: CMSampleBuffer) {
+    guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    guard isDirectRecording,
+          let writer = directWriter,
+          writer.status == .writing,
+          let aIn = directAudioInput,
+          let start = directStartPTS else { return }
+    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    if CMTimeCompare(pts, start) < 0 { return }
+    if aIn.isReadyForMoreMediaData {
+      aIn.append(sampleBuffer)
+    }
+  }
+
+  private func processVideoFrame(_ sampleBuffer: CMSampleBuffer) {
+    guard CMSampleBufferDataIsReady(sampleBuffer),
+          let srcBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+    stateLock.lock()
+    let look = activeLook
+    let matrix = activeMatrix
+    let isLog = appleLogInput
+    let peaking = focusPeaking
+    let zebra = zebraStripes
+    let fColor = falseColor
+    let wantScope = liveScopeEnabled
+    let recording = isDirectRecording
+    frameCounter &+= 1
+    let fIdx = frameCounter
+    stateLock.unlock()
+
+    var ci = CIImage(cvPixelBuffer: srcBuffer)
+    let extent = ci.extent
+    guard extent.width > 1, extent.height > 1 else { return }
+
+    if isLog {
+      ci = FilmEngine.applyAppleLogIDT(to: ci)
+    }
+
+    // 1. Apply true 3D LUT / Film Stock color cube (skip heavy grain/glow in live preview for 60fps smoothness).
+    var graded: CIImage
+    if let look = look {
+      if look.usesCube,
+         let cube = CIFilter(name: "CIColorCubeWithColorSpace"),
+         let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+        cube.setValue(ci, forKey: kCIInputImageKey)
+        cube.setValue(look.cubeSize, forKey: "inputCubeDimension")
+        cube.setValue(look.cubeData, forKey: "inputCubeData")
+        cube.setValue(srgb, forKey: "inputColorSpace")
+        graded = cube.outputImage?.cropped(to: extent) ?? ci
+      } else {
+        graded = ci
+      }
+      if look.shadowDepth > 0.005 {
+        graded = FilmEngine.applyShadowDepth(to: graded, strength: look.shadowDepth)
+          .cropped(to: extent)
+      }
+    } else {
+      graded = AppDelegate.colorMatrixImage(matrix, to: ci)
+    }
+
+    // 2. If Direct-to-Disk Recording is active, write CLEAN graded frame (without DOP peaking/zebra!) to disk.
+    if recording {
+      let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+      appendDirectFrame(graded, pts: pts)
+    }
+
+    // 3. Apply live DOP Monitoring overlays ONLY to the viewfinder texture.
+    var displayImage = graded
+    if fColor, let fcCube = LiveMetalViewfinderPipeline.falseColorCube() {
+      if let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
+         let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+        filter.setValue(displayImage, forKey: kCIInputImageKey)
+        filter.setValue(33, forKey: "inputCubeDimension")
+        filter.setValue(fcCube, forKey: "inputCubeData")
+        filter.setValue(srgb, forKey: "inputColorSpace")
+        displayImage = filter.outputImage?.cropped(to: extent) ?? displayImage
+      }
+    }
+    if zebra {
+      // Highlight pixels > 94 IRE with crisp cinema amber warning overlay.
+      let hotMask = graded.applyingFilter(
+        "CIColorMatrix",
+        parameters: [
+          "inputRVector": CIVector(x: 4.5, y: 15.0, z: 1.5, w: 0),
+          "inputGVector": CIVector(x: 3.3, y: 11.0, z: 1.1, w: 0),
+          "inputBVector": CIVector(x: 0.9, y: 3.0, z: 0.3, w: 0),
+          "inputBiasVector": CIVector(x: -19.7, y: -14.5, z: -4.0, w: 0)
+        ]
+      ).applyingFilter(
+        "CIColorClamp",
+        parameters: [
+          "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputMaxComponents": CIVector(x: 0.9, y: 0.66, z: 0.22, w: 1)
+        ]
+      )
+      displayImage = hotMask.applyingFilter(
+        "CIScreenBlendMode",
+        parameters: [kCIInputBackgroundImageKey: displayImage]
+      ).cropped(to: extent)
+    }
+    if peaking {
+      let edges = graded.applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 3.5])
+        .applyingFilter(
+          "CIColorMatrix",
+          parameters: [
+            "inputRVector": CIVector(x: 0.95, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: 0.68, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: 0.20, w: 0)
+          ]
+        )
+      displayImage = edges.applyingFilter(
+        "CIAdditionCompositing",
+        parameters: [kCIInputBackgroundImageKey: displayImage]
+      ).cropped(to: extent)
+    }
+
+    // 4. Render to reusable IOSurface BGRA pixel buffer for FlutterTexture.
+    let w = Int(extent.width)
+    let h = Int(extent.height)
+    guard let outBuf = nextPixelBuffer(width: w, height: h) else { return }
+    AppDelegate.gradingContext.render(displayImage, to: outBuf)
+
+    stateLock.lock()
+    latestPixelBuffer = outBuf
+    let tid = textureId
+    stateLock.unlock()
+
+    if tid >= 0 {
+      registry?.textureFrameAvailable(tid)
+    }
+
+    // 5. Optional throttled Live Camera Scope (~6 Hz) pushed cleanly to Dart.
+    if wantScope && (fIdx % 5 == 0) {
+      let scopes = PhotoEditor.computeScopes(for: graded)
+      if !scopes.isEmpty {
+        DispatchQueue.main.async { [weak self] in
+          self?.channel?.invokeMethod("liveCameraScope", arguments: scopes)
+        }
+      }
+    }
+  }
+
+  private func appendDirectFrame(_ graded: CIImage, pts: CMTime) {
+    let ext = graded.extent
+    let w = max(2, Int(floor(ext.width / 2.0) * 2.0))
+    let h = max(2, Int(floor(ext.height / 2.0) * 2.0))
+
+    stateLock.lock()
+    if directWriter == nil, let url = directURL {
+      do {
+        try? FileManager.default.removeItem(at: url)
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let videoSettings: [String: Any] = [
+          AVVideoCodecKey: AVVideoCodecType.hevc.rawValue,
+          AVVideoWidthKey: w,
+          AVVideoHeightKey: h,
+          AVVideoCompressionPropertiesKey: [
+            AVVideoAverageBitRateKey: directBitrate,
+            AVVideoExpectedSourceFrameRateKey: directFps
+          ]
+        ]
+        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        vIn.expectsMediaDataInRealTime = true
+        if writer.canAdd(vIn) { writer.add(vIn) }
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+          assetWriterInput: vIn,
+          sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: w,
+            kCVPixelBufferHeightKey as String: h,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()
+          ]
+        )
+        let audioSettings: [String: Any] = [
+          AVFormatIDKey: kAudioFormatMPEG4AAC,
+          AVNumberOfChannelsKey: 1,
+          AVSampleRateKey: 44100,
+          AVEncoderBitRateKey: 192000
+        ]
+        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        aIn.expectsMediaDataInRealTime = true
+        if writer.canAdd(aIn) {
+          writer.add(aIn)
+          directAudioInput = aIn
+        }
+        if writer.startWriting() {
+          writer.startSession(atSourceTime: pts)
+          directWriter = writer
+          directVideoInput = vIn
+          directAdaptor = adaptor
+          directStartPTS = pts
+          directSize = (w, h)
+          directDidStart = true
+          let cb = directStartResult
+          directStartResult = nil
+          DispatchQueue.main.async { cb?(true) }
+        }
+      } catch {
+        isDirectRecording = false
+        let cb = directStartResult
+        directStartResult = nil
+        DispatchQueue.main.async {
+          cb?(FlutterError(code: "writer_failed", message: error.localizedDescription, details: nil))
+        }
+      }
+    }
+
+    guard let writer = directWriter,
+          writer.status == .writing,
+          let vIn = directVideoInput,
+          vIn.isReadyForMoreMediaData,
+          let adaptor = directAdaptor,
+          let pool = adaptor.pixelBufferPool,
+          directSize.0 == w, directSize.1 == h else {
+      stateLock.unlock()
+      return
+    }
+    stateLock.unlock()
+
+    var dst: CVPixelBuffer?
+    guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &dst) == kCVReturnSuccess,
+          let pixelBuf = dst else { return }
+    AppDelegate.gradingContext.render(graded, to: pixelBuf)
+    stateLock.lock()
+    if isDirectRecording, directWriter?.status == .writing, directVideoInput?.isReadyForMoreMediaData == true {
+      directAdaptor?.append(pixelBuf, withPresentationTime: pts)
+    }
+    stateLock.unlock()
+  }
+
+  private func nextPixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+    stateLock.lock()
+    if pool == nil || poolSize.0 != width || poolSize.1 != height {
+      var newPool: CVPixelBufferPool?
+      let attrs: [String: Any] = [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
+        kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+        kCVPixelBufferMetalCompatibilityKey as String: true
+      ]
+      CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &newPool)
+      pool = newPool
+      poolSize = (width, height)
+    }
+    let currentPool = pool
+    stateLock.unlock()
+
+    guard let p = currentPool else { return nil }
+    var buf: CVPixelBuffer?
+    guard CVPixelBufferPoolCreatePixelBuffer(nil, p, &buf) == kCVReturnSuccess else { return nil }
+    return buf
+  }
+
+  /// Broadcast cinema False Color IRE 33³ LUT:
+  /// Purple (<5 IRE crushed), Blue (5-15 shadows), Grey (mid), Green (38-45 mid-grey),
+  /// Pink (55-68 skin tone), Yellow (80-92 hot), Red (>94 clipped).
+  private static func falseColorCube() -> Data? {
+    if let cached = falseColorCubeCache { return cached }
+    let n = 33
+    let last = Double(n - 1)
+    var vals = [Float]()
+    vals.reserveCapacity(n * n * n * 4)
+    for bi in 0..<n {
+      for gi in 0..<n {
+        for ri in 0..<n {
+          let y = 0.2126 * Double(ri) / last
+            + 0.7152 * Double(gi) / last
+            + 0.0722 * Double(bi) / last
+          let rgb: (Float, Float, Float)
+          if y < 0.05 { rgb = (0.45, 0.05, 0.75) }         // Purple: crushed
+          else if y < 0.15 { rgb = (0.10, 0.35, 0.90) }    // Blue: deep shadow
+          else if y >= 0.38 && y <= 0.45 { rgb = (0.15, 0.80, 0.25) } // Green: 18% grey
+          else if y >= 0.55 && y <= 0.68 { rgb = (0.95, 0.52, 0.68) } // Pink: skin tone
+          else if y >= 0.82 && y < 0.94 { rgb = (0.95, 0.85, 0.15) }  // Yellow: bright
+          else if y >= 0.94 { rgb = (0.98, 0.12, 0.12) }              // Red: clipped
+          else {
+            let g = Float(y)
+            rgb = (g, g, g)
+          }
+          vals.append(rgb.0); vals.append(rgb.1); vals.append(rgb.2); vals.append(1.0)
+        }
+      }
+    }
+    let data = vals.withUnsafeBufferPointer { Data(buffer: $0) }
+    falseColorCubeCache = data
+    return data
   }
 }

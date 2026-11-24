@@ -3,6 +3,8 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
+
+import '../../../../core/l10n/app_strings.dart';
 import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
 
@@ -24,9 +26,6 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
 
   bool get _isVideo => widget.args.mediaType == MediaCaptureType.video;
 
-   /// Path of the file on disk, when this preview came from the gallery (or a
-   /// recorded clip). A still that only exists as in-memory bytes cannot be
-   /// reopened by the native editor.
   String? get _editablePath =>
       _isVideo ? widget.args.videoFilePath : widget.args.imageFilePath;
 
@@ -40,8 +39,6 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
 
   @override
   void dispose() {
-    // Pause before disposing: leaving a player running while the camera
-    // session is re-created is what made the preview keep "playing on its own".
     _videoController?.pause();
     _videoController?.dispose();
     _videoController = null;
@@ -65,15 +62,11 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
     try {
       await previous?.pause();
       await previous?.dispose();
-    } catch (_) {
-      // Ignore teardown failures of the previous controller.
-    }
+    } catch (_) {}
 
     final controller = VideoPlayerController.file(File(path));
     try {
       await controller.initialize();
-      // Muted playback keeps the iOS audio session on the camera capture
-      // category instead of switching it to playback.
       await controller.setVolume(0);
       await controller.setLooping(true);
       await controller.play();
@@ -125,12 +118,12 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Text(
-              'Hasil edit ditambahkan ke galeri CineLens.',
-              style: TextStyle(fontSize: 12),
+              AppStrings.of(context).saveToGalleryOnly,
+              style: const TextStyle(fontSize: 12),
             ),
-            backgroundColor: AppTheme.surfaceDark,
+            backgroundColor: AppTheme.cardDark,
             behavior: SnackBarBehavior.floating,
           ),
         );
@@ -139,22 +132,36 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final s = AppStrings.of(context);
+
     return Scaffold(
       backgroundColor: AppTheme.backgroundBlack,
       appBar: AppBar(
+        backgroundColor: AppTheme.backgroundBlack,
         leading: IconButton(
           icon: const Icon(CupertinoIcons.back, color: Colors.white),
           onPressed: _close,
         ),
-        title: Text(_isVideo ? 'CINEMA REEL' : 'CINEMA STILL'),
+        title: Text(_isVideo ? s.video : s.photo),
         actions: [
-          IconButton(
-            tooltip: _editablePath == null
-                ? 'Edit hanya untuk media yang tersimpan di galeri'
-                : 'Edit foto/video',
-            icon: const Icon(Icons.tune_rounded),
-            onPressed: _editablePath == null ? null : _openEditor,
-          ),
+          if (_editablePath != null)
+            TextButton.icon(
+              onPressed: _openEditor,
+              icon: const Icon(
+                Icons.tune_rounded,
+                size: 16,
+                color: AppTheme.cinemaAmber,
+              ),
+              label: Text(
+                s.editMedia.toUpperCase(),
+                style: const TextStyle(
+                  color: AppTheme.cinemaAmber,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.7,
+                ),
+              ),
+            ),
         ],
       ),
       body: SafeArea(
@@ -162,70 +169,68 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
           children: [
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                 child: ClipRRect(
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(12),
                   child: _isVideo
-                      ? _buildVideoPreview()
+                      ? _buildVideoPreview(s)
                       : _buildPhotoPreview(),
                 ),
               ),
             ),
             Container(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              padding: const EdgeInsets.all(14),
+              margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
                 color: AppTheme.surfaceDark,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: AppTheme.cinemaAmber.withValues(alpha: 0.35),
-                ),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppTheme.hairline),
               ),
               child: Row(
                 children: [
                   const Icon(
                     CupertinoIcons.checkmark_seal_fill,
                     color: AppTheme.cinemaAmber,
-                    size: 26,
+                    size: 18,
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.args.imageBytes != null || _isVideo
-                              ? 'Tersimpan di Apple Photos (${widget.args.tone.name})'
-                              : 'Tersimpan di galeri CineLens (${widget.args.tone.name})',
-                          style: const TextStyle(
-                            color: AppTheme.textPrimary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${_isVideo ? 'Cinema Reel' : widget.args.tone.filmReference} • Intensitas ${(widget.args.intensity * 100).round()}% • ${widget.args.isAnamorphic ? '2.39:1' : 'Full'}',
-                          style: const TextStyle(
-                            color: AppTheme.textSecondary,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ],
+                    child: Text(
+                      '${widget.args.tone.name.toUpperCase()}  ·  '
+                      '${(widget.args.intensity * 100).round()}%'
+                      '${widget.args.isAnamorphic ? '  ·  2.39:1' : ''}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTheme.monoStyle(
+                        color: AppTheme.textPrimary,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+              padding: const EdgeInsets.fromLTRB(14, 2, 14, 14),
               child: SizedBox(
                 width: double.infinity,
-                child: CupertinoButton.filled(
+                child: FilledButton(
                   onPressed: _close,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppTheme.cinemaAmber,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
                   child: Text(
-                    _isVideo ? 'Rekam Adegan Berikutnya' : 'Ambil Foto Lainnya',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+                    s.done.toUpperCase(),
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.8,
+                    ),
                   ),
                 ),
               ),
@@ -239,20 +244,29 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
   Widget _buildPhotoPreview() {
     final bytes = widget.args.imageBytes;
     if (bytes != null) {
-      return Image.memory(bytes, fit: BoxFit.contain);
+      return InteractiveViewer(
+        minScale: 1.0,
+        maxScale: 5.0,
+        child: Image.memory(bytes, fit: BoxFit.contain),
+      );
     }
 
     final path = widget.args.imageFilePath;
     if (path != null) {
-      return Image.file(
-        File(path),
-        fit: BoxFit.contain,
-        errorBuilder: (context, error, stackTrace) => const ColoredBox(
-          color: Colors.black,
-          child: Center(
-            child: Text(
-              'Foto tidak dapat dibuka.',
-              style: TextStyle(color: Colors.white70, fontSize: 12),
+      return InteractiveViewer(
+        minScale: 1.0,
+        maxScale: 5.0,
+        child: Image.file(
+          File(path),
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) => const ColoredBox(
+            color: Colors.black,
+            child: Center(
+              child: Icon(
+                Icons.broken_image_outlined,
+                color: Colors.white38,
+                size: 36,
+              ),
             ),
           ),
         ),
@@ -262,7 +276,7 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
     return const ColoredBox(color: Colors.black);
   }
 
-  Widget _buildVideoPreview() {
+  Widget _buildVideoPreview(AppStrings s) {
     if (_videoError != null) {
       return ColoredBox(
         color: Colors.black,
@@ -275,24 +289,23 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
                 const Icon(
                   Icons.videocam_off_rounded,
                   color: Colors.white54,
-                  size: 42,
+                  size: 38,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 Text(
-                  'Video tidak dapat diputar.\n$_videoError',
+                  _videoError!,
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white70, fontSize: 12),
                 ),
-                const SizedBox(height: 14),
-                CupertinoButton(
-                  padding: EdgeInsets.zero,
+                const SizedBox(height: 12),
+                TextButton(
                   onPressed: () {
                     final path = widget.args.videoFilePath;
                     if (path != null) _initVideoPlayer(path);
                   },
-                  child: const Text(
-                    'Coba lagi',
-                    style: TextStyle(color: AppTheme.cinemaAmber),
+                  child: Text(
+                    s.retry,
+                    style: const TextStyle(color: AppTheme.cinemaAmber),
                   ),
                 ),
               ],
@@ -342,7 +355,7 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
                     child: const Icon(
                       CupertinoIcons.play_fill,
                       color: Colors.white,
-                      size: 36,
+                      size: 34,
                     ),
                   ),
               ],
