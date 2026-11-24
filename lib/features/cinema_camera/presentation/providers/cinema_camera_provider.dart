@@ -53,6 +53,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   /// Profile the live controller was created with, used to skip needless
   /// rebuilds when the user re-selects the same quality.
+  CinemaCaptureMode? _profileMode;
   ResolutionPreset? _profilePreset;
   int? _profileFps;
   bool _isSwitchingProfile = false;
@@ -892,13 +893,18 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       }
     }
 
+    final isVideo = mode == CinemaCaptureMode.video24fps;
     final newController = CameraController(
       cameraDescription,
       preset,
       enableAudio: true,
-      fps: frameRate.value,
-      videoBitrate: _videoBitrateFor(resolution, frameRate),
-      audioBitrate: 192000,
+      // Passing `fps` on iOS (`camera_avfoundation`) overrides `.photo` preset
+      // with a 16:9 video format (often 2MP binned 1080p), causing soft/oily
+      // zoomed stills and blocking full 4:3 12MP/48MP photo & Bayer RAW output.
+      // Only lock video frame rate & bitrate when actually in video mode.
+      fps: isVideo ? frameRate.value : null,
+      videoBitrate: isVideo ? _videoBitrateFor(resolution, frameRate) : null,
+      audioBitrate: isVideo ? 192000 : null,
       imageFormatGroup: ImageFormatGroup.bgra8888,
     );
 
@@ -919,8 +925,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     _controller = newController;
     _activeCamera = cameraDescription;
+    _profileMode = mode;
     _profilePreset = preset;
-    _profileFps = frameRate.value;
+    _profileFps = isVideo ? frameRate.value : null;
     _lastAppliedZoom = minZoom;
     return (
       minExposure: minExp,
@@ -951,8 +958,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final nextPreset = _presetFor(nextResolution, nextMode);
 
     final needsRebuild = _controller == null ||
+        _profileMode != nextMode ||
         _profilePreset != nextPreset ||
-        _profileFps != nextFrameRate.value;
+        (nextMode == CinemaCaptureMode.video24fps &&
+            _profileFps != nextFrameRate.value);
 
     _isSwitchingProfile = true;
     state = AsyncData(

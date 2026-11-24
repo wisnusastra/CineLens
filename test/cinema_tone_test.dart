@@ -67,17 +67,28 @@ void main() {
     });
   });
 
-  group('Pro FilmLook & Built-in Stocks v2.0', () {
-    test('defaults preserve stock halation/grain and crisp acutance', () {
+  group('Pro FilmLook & Built-in Stocks v2.0.1', () {
+    test('defaults preserve stock halation/grain with zero double-sharpening', () {
       const look = FilmLook();
       expect(look.useStockEffects, isTrue);
-      expect(look.acutance, greaterThan(0.1));
+      expect(look.acutance, 0.0);
       expect(look.shadowDepth, 0.0);
 
       final native = look.toNative();
       expect(native['useStockEffects'], isTrue);
       expect(native['shadowDepth'], 0.0);
-      expect(native['acutance'], look.acutance);
+      expect(native['acutance'], 0.0);
+    });
+
+    test('migrates legacy v3 default acutance (0.22) cleanly to 0.0', () {
+      final restored = FilmLook.fromJson(<String, dynamic>{
+        'v': 3,
+        'useStockEffects': true,
+        'acutance': 0.22,
+        'shadowDepth': 0.3,
+      });
+      expect(restored.acutance, 0.0);
+      expect(restored.shadowDepth, closeTo(0.3, 1e-6));
     });
 
     test('FilmLook JSON round trip preserves shadowDepth & acutance', () {

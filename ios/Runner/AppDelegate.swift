@@ -511,8 +511,26 @@ final class ExportProgressReporter {
     activeSession = session
     let changed = activeDevice !== device
     activeDevice = device
+    disableAutomaticVideoHDRIfNeeded(on: device)
     if changed {
       reapplyManualControls()
+    }
+  }
+
+  /// Prevents iOS from silently recording 10-bit HLG HDR video when the user is
+  /// shooting standard Rec.709/sRGB LUT footage (HLG fed into an sRGB LUT makes
+  /// highlights & midtones look muddy and strangely colored).
+  private func disableAutomaticVideoHDRIfNeeded(on device: AVCaptureDevice) {
+    guard device.activeFormat.isVideoHDRSupported else { return }
+    do {
+      try device.lockForConfiguration()
+      defer { device.unlockForConfiguration() }
+      if device.automaticallyAdjustsVideoHDREnabled || device.isVideoHDREnabled {
+        device.automaticallyAdjustsVideoHDREnabled = false
+        device.isVideoHDREnabled = false
+      }
+    } catch {
+      // Best effort: session may still be settling.
     }
   }
 
@@ -1602,16 +1620,19 @@ final class ExportProgressReporter {
           if rawFilter.isLocalToneMapSupported {
             rawFilter.localToneMapAmount = 0.0
           }
-          rawFilter.boostAmount = 0.15
+          // Keep natural photographic tone curve while disabling Smart HDR shadow
+          // boosting. Near-zero luminance NR prevents watercolor/oil-painting
+          // smearing on foliage and fine textures.
+          rawFilter.boostAmount = 0.72
           rawFilter.boostShadowAmount = 0.0
           if rawFilter.isLuminanceNoiseReductionSupported {
-            rawFilter.luminanceNoiseReductionAmount = 0.14
+            rawFilter.luminanceNoiseReductionAmount = 0.02
           }
           if rawFilter.isColorNoiseReductionSupported {
-            rawFilter.colorNoiseReductionAmount = 0.35
+            rawFilter.colorNoiseReductionAmount = 0.15
           }
           if rawFilter.isSharpnessSupported {
-            rawFilter.sharpnessAmount = 0.28
+            rawFilter.sharpnessAmount = 0.10
           }
           decoded = rawFilter.outputImage
         } else {
@@ -1960,12 +1981,12 @@ final class ExportProgressReporter {
         )
         output = PhotoEditor.applyColor(edit, to: sourceImg)
         if let look = filmLook {
-          output = look.apply(to: output, frameIndex: frameIndex)
+          output = look.apply(to: output, frameIndex: frameIndex, isVideo: true)
         } else if let look = effectLook {
           let graded = matrix.count == 20
             ? AppDelegate.colorMatrixImage(matrix, to: output)
             : output
-          output = look.apply(to: graded, frameIndex: frameIndex)
+          output = look.apply(to: graded, frameIndex: frameIndex, isVideo: true)
         } else if matrix.count == 20 {
           output = AppDelegate.colorMatrixImage(matrix, to: output)
         }
@@ -1975,7 +1996,7 @@ final class ExportProgressReporter {
         let frameIndex = Int(
           (request.compositionTime.seconds * Double(fps)).rounded()
         )
-        output = look.apply(to: sourceImg, frameIndex: frameIndex)
+        output = look.apply(to: sourceImg, frameIndex: frameIndex, isVideo: true)
           .cropped(to: sourceExtent)
       } else if let effectLook = effectLook {
         // Effects-only: the tone matrix still owns the colour.
@@ -1987,7 +2008,7 @@ final class ExportProgressReporter {
           to: sourceImg
         )
         output = effectLook
-          .apply(to: graded, frameIndex: frameIndex)
+          .apply(to: graded, frameIndex: frameIndex, isVideo: true)
           .cropped(to: sourceExtent)
       } else {
         output = AppDelegate.colorMatrixImage(matrix, to: sourceImg)
@@ -3152,12 +3173,13 @@ struct FilmLook {
   /// Chiaroscuro deep shadow toe strength (0…1).
   var shadowDepth: Double = 0.0
 
-  /// Optical micro-contrast acutance sharpness (0…1).
-  var acutance: Double = 0.18
+  /// Optical micro-contrast acutance sharpness (0…1). Defaults to 0 so native
+  /// lens optical detail is never double-sharpened into oily halos.
+  var acutance: Double = 0.0
 
-  /// Renders the full look: colour cube, deep shadow toe, optical acutance,
-  /// subtle softness, halation, bloom, grain and vignette.
-  func apply(to image: CIImage, frameIndex: Int) -> CIImage {
+  /// Renders the full look: colour cube, deep shadow toe, optional micro-radius
+  /// acutance, specular-only halation/bloom, full-resolution fine grain and vignette.
+  func apply(to image: CIImage, frameIndex: Int, isVideo: Bool = false) -> CIImage {
     let extent = image.extent
     guard extent.width > 1, extent.height > 1,
           extent.width.isFinite, extent.height.isFinite else {
@@ -3202,58 +3224,42 @@ struct FilmLook {
         .cropped(to: extent)
     }
 
-    // 2. Optical sharpness vs subtle film softness: trim heavy blur so outputs
-    //    stay razor-sharp while preserving organic highlight roll-off.
-    let soften = p.soften * 0.42 * fx
-    if soften > 0.001 {
-      let blurred = output.clampedToExtent()
-        .applyingGaussianBlur(sigma: 0.75 * scale)
-        .cropped(to: extent)
-      output = FilmLook.scaled(blurred, by: soften).composited(over: output)
-    }
-
+    // 2. Optical crispness: NEVER apply global Gaussian softening (which turns
+    //    foliage and micro-textures into mush). Apply only a single micro-radius
+    //    luminance acutance pass when the user explicitly dials acutance > 0.
     if acutance > 0.005 {
-      // Fine-radius luminance acutance gives Cooke/Leica prime-lens crispness
-      // without creating harsh digital halos.
       output = output.applyingFilter(
         "CISharpenLuminance",
         parameters: [
-          "inputSharpness": CGFloat(acutance * 0.55),
-          "inputRadius": CGFloat(max(0.8, 1.35 * scale))
-        ]
-      ).cropped(to: extent)
-      output = output.applyingFilter(
-        "CIUnsharpMask",
-        parameters: [
-          "inputRadius": CGFloat(max(0.7, 1.15 * scale)),
-          "inputIntensity": CGFloat(acutance * 0.28)
+          "inputSharpness": CGFloat(acutance * 0.35),
+          "inputRadius": CGFloat(min(0.9, max(0.45, 0.55 * scale)))
         ]
       ).cropped(to: extent)
     }
 
-    // 3. Halation: red-orange glow around highlights (light bouncing off the
-    //    film base), and a wide white bloom like a diffusion filter. Both are
-    //    low-frequency, so they share one quarter-resolution pass.
+    // 3. Halation & Bloom: strictly gated to true specular highlights (> 0.86)
+    //    so daytime skies, sunlit foliage, and pavement stay razor sharp
+    //    instead of getting washed in milky low-res haze.
     let halation = p.halation * fx
     let bloom = p.bloom * fx
     var glowLayers: [FilmLook.GlowLayer] = []
     if halation > 0.001 {
       glowLayers.append(
         FilmLook.GlowLayer(
-          threshold: 0.80,
+          threshold: 0.88,
           tint: [1.0, 0.32, 0.10],
-          amount: halation * 1.6,
-          sigma: 11.0 * scale
+          amount: halation * 0.70,
+          sigma: 9.0 * scale
         )
       )
     }
     if bloom > 0.001 {
       glowLayers.append(
         FilmLook.GlowLayer(
-          threshold: 0.62,
+          threshold: 0.86,
           tint: [1.0, 1.0, 1.0],
-          amount: bloom * 1.4,
-          sigma: 30.0 * scale
+          amount: bloom * 0.45,
+          sigma: 22.0 * scale
         )
       )
     }
@@ -3261,15 +3267,16 @@ struct FilmLook {
       output = FilmLook.glow(over: output, extent: extent, layers: glowLayers)
     }
 
-    // 4. Grain: monochrome noise, soft-light blended so it lives in the
-    //    mid-tones, re-seeded every frame.
-    let grain = p.grain * fx
+    // 4. Grain: full-resolution fine monochrome silver-halide grain. Scaled
+    //    lighter on video so temporal HEVC/H.264 compression preserves crisp
+    //    foliage and fine detail instead of burning bitrate on random noise.
+    let grain = p.grain * fx * (isVideo ? 0.42 : 1.0)
     if grain > 0.001 {
       output = FilmLook.addGrain(
         to: output,
         extent: extent,
         amount: grain,
-        size: p.grainSize * scale,
+        size: p.grainSize,
         frameIndex: frameIndex
       )
     }
@@ -3399,23 +3406,15 @@ struct FilmLook {
       return base
     }
 
-    // Grain is built at half resolution: the blur then costs a quarter of the
-    // pixels and the upscale keeps the specks film-sized. The gain below still
-    // uses the full-resolution radius, so the slider feels the same.
-    let reduction = 2.0
-    let downscale = CGAffineTransform(scaleX: 1 / reduction, y: 1 / reduction)
-    let smallExtent = extent.applying(downscale)
-
-    // A different offset per frame makes the grain move like real film.
+    // Render grain at native full resolution (no half-res downscale/upscale)
+    // so grain stays crisp 1-2px silver-halide texture instead of turning into
+    // blotchy 4-8px oil-painting smears.
     let offsetX = CGFloat((frameIndex &* 7919) % 2048)
     let offsetY = CGFloat((frameIndex &* 104729) % 2048)
-    // CIRandomGenerator also randomises alpha. Colour filters un-premultiply
-    // before working, so a tiny random alpha blew the noise up into harsh
-    // black and white speckles. Forcing alpha to 1 keeps the raw 0...1 values.
     let shifted = noise
       .transformed(by: CGAffineTransform(translationX: offsetX, y: offsetY))
-      .cropped(to: smallExtent)
-      .settingAlphaOne(in: smallExtent)
+      .cropped(to: extent)
+      .settingAlphaOne(in: extent)
 
     // Average the three noise channels into one monochrome value.
     let third = CGFloat(1.0 / 3.0)
@@ -3430,18 +3429,25 @@ struct FilmLook {
       ]
     )
 
-    // Blur sets the grain size; the gain restores the contrast the blur
-    // removes so the strength stays comparable across sizes.
-    let sigma = max(0.55 * size + 0.35, 0.35)
-    let softenedSmall = mono.clampedToExtent()
-      .applyingGaussianBlur(sigma: max(sigma / reduction, 0.25))
-      .cropped(to: smallExtent)
-    let softened = softenedSmall
-      .transformed(by: CGAffineTransform(scaleX: reduction, y: reduction))
-      .cropped(to: extent)
+    // Keep fine grain unblurred at native 1px; only soften slightly for coarser
+    // stocks (> 0.65) with a tight sigma so texture remains sharp and organic.
+    let clampedSize = min(max(size, 0.3), 1.6)
+    let softened: CIImage
+    let effectiveSigma: Double
+    if clampedSize > 0.65 {
+      effectiveSigma = 0.22 + (clampedSize - 0.65) * 0.28
+      softened = mono.clampedToExtent()
+        .applyingGaussianBlur(sigma: effectiveSigma)
+        .cropped(to: extent)
+    } else {
+      effectiveSigma = 0.0
+      softened = mono
+    }
 
-    let rawDeviation = 0.1667 / max(1.0, 2.0 * sigma * Double.pi.squareRoot())
-    let gain = CGFloat((amount * 0.30) / rawDeviation)
+    let rawDeviation = effectiveSigma > 0.0
+      ? 0.1667 / max(1.0, 2.0 * effectiveSigma * Double.pi.squareRoot())
+      : 0.1667
+    let gain = CGFloat((amount * 0.14) / rawDeviation)
     let bias = 0.5 - 0.5 * gain
     let centred = softened.applyingFilter(
       "CIColorMatrix",
@@ -3454,13 +3460,12 @@ struct FilmLook {
       ]
     )
 
-    // Safety net: whatever the noise statistics turn out to be, the grain can
-    // never push a pixel more than a soft-light step away from the picture.
+    // Tight soft-light safety clamp keeps grain delicate and natural.
     let limited = centred.applyingFilter(
       "CIColorClamp",
       parameters: [
-        "inputMinComponents": CIVector(x: 0.2, y: 0.2, z: 0.2, w: 0),
-        "inputMaxComponents": CIVector(x: 0.8, y: 0.8, z: 0.8, w: 1)
+        "inputMinComponents": CIVector(x: 0.34, y: 0.34, z: 0.34, w: 0),
+        "inputMaxComponents": CIVector(x: 0.66, y: 0.66, z: 0.66, w: 1)
       ]
     )
 
@@ -3533,7 +3538,7 @@ enum FilmEngine {
     let clamped = min(max(intensity, 0.0), 1.0)
     let params = effects.map { stock.withEffects($0) } ?? stock
     let shadowDepth = effects?.shadowDepth ?? 0.0
-    let acutance = effects?.acutance ?? 0.20
+    let acutance = effects?.acutance ?? 0.0
 
     let key = "\(toneId)-\(Int((clamped * 100.0).rounded()))"
 
@@ -3583,7 +3588,7 @@ enum FilmEngine {
       usesCube: true,
       effectScale: effects == nil ? nil : 1.0,
       shadowDepth: effects?.shadowDepth ?? 0.0,
-      acutance: effects?.acutance ?? 0.20
+      acutance: effects?.acutance ?? 0.0
     )
   }
 
@@ -3809,18 +3814,27 @@ enum FilmEngine {
       cube = built
     }
 
-    guard let cubeData = cube,
-          let filter = CIFilter(name: "CIColorCube") else {
-      return image
+    guard let cubeData = cube else { return image }
+    if let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
+       let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+      filter.setValue(image, forKey: kCIInputImageKey)
+      filter.setValue(33, forKey: "inputCubeDimension")
+      filter.setValue(cubeData, forKey: "inputCubeData")
+      filter.setValue(srgb, forKey: "inputColorSpace")
+      if let out = filter.outputImage {
+        return out.cropped(to: image.extent)
+      }
     }
+    guard let filter = CIFilter(name: "CIColorCube") else { return image }
     filter.setValue(image, forKey: kCIInputImageKey)
     filter.setValue(33, forKey: "inputCubeDimension")
     filter.setValue(cubeData, forKey: "inputCubeData")
     return filter.outputImage?.cropped(to: image.extent) ?? image
   }
 
-  /// Sculpted Deep Film Toe: deepens shadows below luma 0.36 toward velvety
-  /// ink-black while keeping sunlit highlights & textures untouched.
+  /// Sculpted Deep Film Toe: deepens shadows below luma 0.40 toward velvety
+  /// ink-black using a smooth monotonic gamma curve that preserves gradation
+  /// instead of crushing dark foliage into flat black blobs.
   static func applyShadowDepth(to image: CIImage, strength: Double) -> CIImage {
     let clamped = min(max(strength, 0.0), 1.0)
     guard clamped > 0.005 else { return image }
@@ -3843,13 +3857,13 @@ enum FilmEngine {
             let g = Double(gi) / last
             let b = Double(bi) / last
             let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            // Smooth shadow mask: 1.0 at deep shadows, 0.0 above midtones (0.42)
-            let mask = 1.0 - smoothstep(0.02, 0.42, y)
-            // Deepen toe non-linearly toward rich ink-black + suppress shadow chroma mud
-            let toeGain = max(0.0, 1.0 - s * 0.82 * mask * (1.0 - y * 1.4))
-            let nr = min(max(r * toeGain, 0.0), 1.0)
-            let ng = min(max(g * toeGain, 0.0), 1.0)
-            let nb = min(max(b * toeGain, 0.0), 1.0)
+            // Smooth monotonic shadow mask: 1.0 in deep shadows, 0.0 above midtones (0.40)
+            let mask = 1.0 - smoothstep(0.0, 0.40, y)
+            let toeExponent = 1.0 + s * 0.85 * mask
+            let factor = y > 0.0001 ? pow(y, toeExponent - 1.0) : 1.0
+            let nr = min(max(r * factor, 0.0), 1.0)
+            let ng = min(max(g * factor, 0.0), 1.0)
+            let nb = min(max(b * factor, 0.0), 1.0)
             values.append(Float(nr))
             values.append(Float(ng))
             values.append(Float(nb))
@@ -3865,10 +3879,18 @@ enum FilmEngine {
       cube = built
     }
 
-    guard let cubeData = cube,
-          let filter = CIFilter(name: "CIColorCube") else {
-      return image
+    guard let cubeData = cube else { return image }
+    if let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
+       let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+      filter.setValue(image, forKey: kCIInputImageKey)
+      filter.setValue(33, forKey: "inputCubeDimension")
+      filter.setValue(cubeData, forKey: "inputCubeData")
+      filter.setValue(srgb, forKey: "inputColorSpace")
+      if let out = filter.outputImage {
+        return out.cropped(to: image.extent)
+      }
     }
+    guard let filter = CIFilter(name: "CIColorCube") else { return image }
     filter.setValue(image, forKey: kCIInputImageKey)
     filter.setValue(33, forKey: "inputCubeDimension")
     filter.setValue(cubeData, forKey: "inputCubeData")
@@ -3880,36 +3902,36 @@ enum FilmEngine {
   private static let stocks: [String: FilmStockParams] = [
       "leica_chiaroscuro": FilmStockParams(
         mix: [1.04, -0.02, -0.02, -0.01, 1.02, -0.01, -0.02, 0.0, 1.02],
-        ev: -0.08,
-        k: [7.6, 7.5, 7.4], pivot: [0.50, 0.50, 0.51],
-        sat: 0.94, hlDesat: 0.22, shDesat: 0.35,
-        shadowTint: [-0.008, -0.008, -0.004], hlTint: [0.024, 0.016, -0.008],
-        black: 0.0, white: 0.985, mono: nil,
-        grain: 0.14, grainSize: 0.75,
-        halation: 0.12, bloom: 0.06,
-        vignette: 0.22, soften: 0.0
+        ev: -0.06,
+        k: [6.4, 6.3, 6.2], pivot: [0.50, 0.50, 0.51],
+        sat: 0.96, hlDesat: 0.18, shDesat: 0.25,
+        shadowTint: [-0.005, -0.005, -0.002], hlTint: [0.020, 0.014, -0.006],
+        black: 0.0, white: 0.99, mono: nil,
+        grain: 0.08, grainSize: 0.55,
+        halation: 0.08, bloom: 0.0,
+        vignette: 0.18, soften: 0.0
       ),
       "arri_alexa_709": FilmStockParams(
         mix: [1.05, -0.03, -0.02, -0.01, 1.03, -0.02, -0.02, 0.01, 1.01],
         ev: -0.02,
         k: [5.9, 5.8, 5.6], pivot: [0.52, 0.52, 0.53],
-        sat: 1.04, hlDesat: 0.26, shDesat: 0.10,
-        shadowTint: [-0.006, 0.004, 0.016], hlTint: [0.022, 0.014, -0.012],
-        black: 0.008, white: 0.98, mono: nil,
-        grain: 0.16, grainSize: 0.85,
-        halation: 0.22, bloom: 0.10,
-        vignette: 0.14, soften: 0.02
+        sat: 1.04, hlDesat: 0.22, shDesat: 0.08,
+        shadowTint: [-0.006, 0.004, 0.014], hlTint: [0.020, 0.012, -0.010],
+        black: 0.006, white: 0.985, mono: nil,
+        grain: 0.10, grainSize: 0.60,
+        halation: 0.16, bloom: 0.05,
+        vignette: 0.12, soften: 0.0
       ),
       "kodak_trix_400": FilmStockParams(
         mix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-        ev: -0.06,
-        k: [7.8, 7.8, 7.8], pivot: [0.51, 0.51, 0.51],
+        ev: -0.05,
+        k: [6.6, 6.6, 6.6], pivot: [0.51, 0.51, 0.51],
         sat: 1.0, hlDesat: 0.0, shDesat: 0.0,
         shadowTint: [0.0, 0.0, 0.0], hlTint: [0.0, 0.0, 0.0],
-        black: 0.0, white: 0.985, mono: [0.36, 0.54, 0.10],
-        grain: 0.44, grainSize: 1.15,
-        halation: 0.18, bloom: 0.08,
-        vignette: 0.28, soften: 0.0
+        black: 0.0, white: 0.99, mono: [0.36, 0.54, 0.10],
+        grain: 0.26, grainSize: 0.85,
+        halation: 0.12, bloom: 0.04,
+        vignette: 0.24, soften: 0.0
       ),
       "kodak_2383": FilmStockParams(
         mix: [1.06, -0.03, -0.03, -0.02, 1.04, -0.02, -0.04, -0.01, 1.05],
@@ -4456,7 +4478,6 @@ enum PhotoEditor {
   ) -> CIImage {
     let extent = image.extent
     guard extent.width > 1, extent.height > 1 else { return image }
-    let scale = Double(max(extent.width, extent.height)) / 1920.0
     var output = image
 
     if params.grain > 0.001 {
@@ -4464,7 +4485,7 @@ enum PhotoEditor {
         to: output,
         extent: extent,
         amount: params.grain,
-        size: 1.0 * scale,
+        size: 0.75,
         frameIndex: frameIndex
       )
     }

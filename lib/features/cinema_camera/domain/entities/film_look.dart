@@ -42,7 +42,7 @@ class FilmLook {
     this.bloom = 0.0,
     this.vignette = 0.16,
     this.shadowDepth = 0.0,
-    this.acutance = 0.22,
+    this.acutance = 0.0,
     this.lutMix = 1.0,
   });
 
@@ -92,7 +92,7 @@ class FilmLook {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'v': 3,
+        'v': 4,
         'useStockEffects': useStockEffects,
         'grain': grain,
         'grainSize': grainSize,
@@ -117,15 +117,21 @@ class FilmLook {
     final bloom = read('bloom', 0.0);
     final vignette = read('vignette', 0.16);
     final shadowDepth = read('shadowDepth', 0.0);
-    final acutance = read('acutance', 0.22);
+    var acutance = read('acutance', 0.0);
 
     // Upgrade untouched v1/v2 defaults cleanly so existing users immediately
-    // get authentic stock halation/grain + crisp optical acutance.
+    // get authentic stock halation/grain with natural zero-halo sharpness.
     final untouchedLegacy = version < 3 &&
         ((grain - 0.30).abs() < 0.03 || (grain - 0.12).abs() < 0.03) &&
         (halation <= 0.01 || (halation - 0.35).abs() < 0.03) &&
         (bloom <= 0.01 || (bloom - 0.20).abs() < 0.03);
     if (untouchedLegacy) return const FilmLook();
+
+    // v3 shipped with a 0.22 default acutance that double-sharpened iPhone
+    // Deep Fusion photos; reset untouched v3 default cleanly to 0.0.
+    if (version == 3 && (acutance - 0.22).abs() < 0.005) {
+      acutance = 0.0;
+    }
 
     final useStock = json['useStockEffects'] is bool
         ? json['useStockEffects'] as bool
