@@ -1,10 +1,15 @@
 import 'dart:ui';
-import 'package:camera/camera.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/film_look.dart';
 import '../../domain/entities/frame_format.dart';
 import '../../domain/entities/pro_capture_capabilities.dart';
 import '../../domain/services/color_matrix_builder.dart';
+
+/// Camera lens facing direction (native Swift engine, zero plugin dependency).
+enum CameraLensDirection { back, front }
+
+/// Flash / torch control mode.
+enum FlashMode { off, auto, always, torch }
 
 enum CinemaCaptureMode {
   portrait,
@@ -25,47 +30,32 @@ enum CinemaCaptureMode {
 }
 
 /// One back camera focal-length choice (`0.5×`, `1×`, `2×` 48mm optical crop,
-/// `TEL`). Switching optical lenses keeps full sensor sharpness & real optical
+/// `3×`). Switching optical lenses keeps full sensor sharpness & real optical
 /// compression instead of blurry digital crop.
 class OpticalLensOption {
-  final int index;
-  final String cameraName;
+  final String id;
   final String label;
   final double initialZoom;
 
   const OpticalLensOption({
-    required this.index,
-    required this.cameraName,
+    required this.id,
     required this.label,
     this.initialZoom = 1.0,
   });
 }
 
 /// Output resolution offered to the user.
-///
-/// Photos and video are treated differently on purpose:
-/// * video is capped at 4K because the plugin's H.264/HEVC writer cannot
-///   encode a 12–48 MP sensor format, and
-/// * photos only reach the full sensor with [ResolutionPreset.max], because
-///   the iOS plugin turns `isHighResolutionPhotoEnabled` on **only** for that
-///   preset. That is why every still used to come out at 1080p.
 enum CaptureResolution {
-  fullHD('1080p', 'Full HD 1920×1080', ResolutionPreset.veryHigh),
-  uhd4K('4K', 'Ultra HD 3840×2160', ResolutionPreset.ultraHigh),
-  maxSensor('MAX', 'Sensor penuh (foto)', ResolutionPreset.max);
+  fullHD('1080p', 'Full HD 1920×1080'),
+  uhd4K('4K', 'Ultra HD 3840×2160'),
+  maxSensor('MAX', 'Sensor penuh (foto)');
 
-  const CaptureResolution(this.label, this.description, this.preset);
+  const CaptureResolution(this.label, this.description);
 
   final String label;
   final String description;
-  final ResolutionPreset preset;
 
   bool get isMaxSensor => this == CaptureResolution.maxSensor;
-
-  ResolutionPreset get photoPreset => preset;
-
-  ResolutionPreset get videoPreset =>
-      isMaxSensor ? ResolutionPreset.ultraHigh : preset;
 }
 
 /// Recording frame rate. The iOS plugin resolves the closest rate the active
@@ -193,6 +183,9 @@ class CinemaCameraState {
   /// Direct-to-Disk HEVC Video LUT Recording, and Real-Time DOP Overlays.
   final bool liveMetalEnabled;
   final int? liveMetalTextureId;
+  final double previewWidth;
+  final double previewHeight;
+  final bool hasHardwareDepth;
   final bool directLutRecordingEnabled;
   final bool focusPeakingEnabled;
   final bool zebraEnabled;
@@ -273,6 +266,9 @@ class CinemaCameraState {
     this.hardwareShutterTick = 0,
     this.liveMetalEnabled = false,
     this.liveMetalTextureId,
+    this.previewWidth = 1080.0,
+    this.previewHeight = 1920.0,
+    this.hasHardwareDepth = false,
     this.directLutRecordingEnabled = false,
     this.focusPeakingEnabled = false,
     this.zebraEnabled = false,
@@ -372,6 +368,18 @@ class CinemaCameraState {
 
   bool get isZoomed => zoomLevel > minZoom + 0.01;
 
+  /// True when the native Metal GPU texture already has color grading/bokeh/DOP
+  /// overlays baked into the preview pixels (so Dart skips `ColorFiltered`).
+  bool get isGpuGradingActive =>
+      liveMetalEnabled ||
+      captureMode == CinemaCaptureMode.cinematicVideo ||
+      focusPeakingEnabled ||
+      zebraEnabled ||
+      falseColorEnabled ||
+      liveScopeEnabled;
+
+  Size get previewSize => Size(previewWidth, previewHeight);
+
   CinemaCameraState copyWith({
     List<CinemaTone>? tones,
     CinemaTone? selectedTone,
@@ -432,6 +440,9 @@ class CinemaCameraState {
     bool? liveMetalEnabled,
     int? liveMetalTextureId,
     bool clearLiveMetalTexture = false,
+    double? previewWidth,
+    double? previewHeight,
+    bool? hasHardwareDepth,
     bool? directLutRecordingEnabled,
     bool? focusPeakingEnabled,
     bool? zebraEnabled,
@@ -515,6 +526,9 @@ class CinemaCameraState {
       liveMetalTextureId: clearLiveMetalTexture
           ? null
           : (liveMetalTextureId ?? this.liveMetalTextureId),
+      previewWidth: previewWidth ?? this.previewWidth,
+      previewHeight: previewHeight ?? this.previewHeight,
+      hasHardwareDepth: hasHardwareDepth ?? this.hasHardwareDepth,
       directLutRecordingEnabled:
           directLutRecordingEnabled ?? this.directLutRecordingEnabled,
       focusPeakingEnabled: focusPeakingEnabled ?? this.focusPeakingEnabled,

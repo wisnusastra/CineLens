@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -45,35 +44,25 @@ final cinemaCameraProvider =
 
 class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     with WidgetsBindingObserver {
-  CameraController? _controller;
-  CameraDescription? _activeCamera;
-  List<CameraDescription> _availableCameras = [];
   Timer? _focusIndicatorTimer;
   Timer? _recordingTimer;
   bool _disposed = false;
 
-  /// Profile the live controller was created with, used to skip needless
-  /// rebuilds when the user re-selects the same quality.
-  CinemaCaptureMode? _profileMode;
-  ResolutionPreset? _profilePreset;
-  int? _profileFps;
   bool _isSwitchingProfile = false;
   double _lastAppliedZoom = 1.0;
   bool _stabilizationActive = false;
   int _stabilizationMode = 0;
 
   /// True between a successful `startProRes` and the take being finalised.
-  /// Kept off the UI state because it must survive the state being replaced
-  /// while the native recorder is still writing.
   bool _proResRecording = false;
-  bool _directLutRecording = false;
+
+  /// True while the single-session native HEVC+Audio recorder is active.
+  bool _nativeRecording = false;
 
   /// Manual sliders emit dozens of values per second; the native call is
   /// coalesced so the device is not locked for configuration on every tick.
   Timer? _manualSyncTimer;
   Future<void> Function()? _pendingManualSync;
-
-  CameraController? get controller => _controller;
 
   @override
   Future<CinemaCameraState> build() async {
@@ -84,8 +73,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       _focusIndicatorTimer?.cancel();
       _recordingTimer?.cancel();
       _manualSyncTimer?.cancel();
-      _controller?.dispose();
-      _controller = null;
+      unawaited(ref.read(cinemaCameraRepositoryProvider).nativeCameraDispose());
     });
 
     final repository = ref.read(cinemaCameraRepositoryProvider);
@@ -96,8 +84,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final bakeLook = await repository.loadBakeLookIntoProRes();
     final proImaging = await repository.loadProImagingSettings();
 
-    // Subscribe before the session starts: the native side reports the active
-    // stabilisation mode as soon as `AVCaptureSession` starts running.
+    // Subscribe before the native session starts so stabilization & DOP
+    // telemetry are captured immediately.
     repository.listenToStabilization(
       _handleStabilizationChanged,
       onProResFinished: _handleProResFinished,
@@ -125,43 +113,70 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final frameRate = CaptureFrameRate.fromValue(
       captureSettings.frameRate ?? AppConstants.cinemaTargetFps,
     );
+    final frameFormat = CameraFrameFormat.fromName(proImaging.frameFormat);
 
-    _availableCameras = await availableCameras();
-    if (_availableCameras.isEmpty) {
-      throw Exception('Kamera tidak ditemukan pada perangkat iOS ini.');
-    }
+    final initialMatrix = selectedTone.blendedMatrix(savedPrefs.intensity);
+    final initialLook = <String, dynamic>{
+      ...filmLook.toNative(),
+      if (selectedTone.lutCubePath != null &&
+          selectedTone.lutCubePath!.isNotEmpty) ...<String, dynamic>{
+        'lutCubePath': selectedTone.lutCubePath,
+        'lutIntensity': savedPrefs.intensity,
+      },
+    };
 
-    final backCameras = _availableCameras
-        .where((cam) => cam.lensDirection == CameraLensDirection.back)
-        .toList();
-    final backLenses = _buildBackLensOptions(backCameras);
+    // Boot our 100% Native Swift Single-Session Cinema Camera Engine.
+    final initMap = await repository.nativeCameraInit(<String, dynamic>{
+      'mode': CinemaCaptureMode.photo.name,
+      'resolution': resolution.name,
+      'fps': frameRate.value,
+      'position': 'back',
+      'hiRes48MP': proImaging.hiRes48MP,
+      'grading': <String, dynamic>{
+        'liveMetal': proImaging.liveMetalPreview,
+        'matrix': initialMatrix,
+        'toneId': selectedTone.isCustom ? null : selectedTone.id,
+        'intensity': savedPrefs.intensity,
+        'look': initialLook,
+        'appleLogInput': false,
+        'focusPeaking': false,
+        'zebraStripes': false,
+        'falseColor': false,
+        'liveScope': false,
+        'frameAspectRatio': frameFormat.aspectRatio,
+        'anamorphicCrop': proImaging.anamorphicCrop,
+        'apertureFStop': proImaging.apertureFStop,
+        'rackToBackground': false,
+      },
+    });
+
+    final textureId = (initMap['textureId'] as num?)?.toInt();
+    final previewWidth = (initMap['previewWidth'] as num?)?.toDouble() ?? 1080.0;
+    final previewHeight =
+        (initMap['previewHeight'] as num?)?.toDouble() ?? 1920.0;
+    final minExposure = (initMap['minExposure'] as num?)?.toDouble() ?? -2.0;
+    final maxExposure = (initMap['maxExposure'] as num?)?.toDouble() ?? 2.0;
+    final minZoom = (initMap['minZoom'] as num?)?.toDouble() ?? 1.0;
+    final maxZoom = (initMap['maxZoom'] as num?)?.toDouble() ?? 8.0;
+    final zoomLevel = (initMap['zoomLevel'] as num?)?.toDouble() ?? minZoom;
+    final hasHardwareDepth = initMap['hasHardwareDepth'] == true;
+    final backLenses = _parseNativeLenses(initMap['lenses']);
     final wideIdx = backLenses.indexWhere((l) => l.label == '1×');
     final initialLensIdx = wideIdx >= 0 ? wideIdx : 0;
-    final backCamera = backCameras.isNotEmpty
-        ? backCameras[initialLensIdx.clamp(0, backCameras.length - 1)]
-        : _availableCameras.first;
-
-    final bounds = await _initializeCameraController(
-      backCamera,
-      resolution: resolution,
-      frameRate: frameRate,
-      mode: CinemaCaptureMode.photo,
-    );
+    _lastAppliedZoom = zoomLevel;
 
     var initialExposureOffset = 0.0;
-    if (proImaging.highlightMetering && _controller != null) {
-      final bias = (-0.9).clamp(bounds.minExposure, bounds.maxExposure);
-      try {
-        await _controller!.setExposureOffset(bias);
-        initialExposureOffset = bias;
-      } catch (_) {}
+    if (proImaging.highlightMetering) {
+      final bias = (-0.9).clamp(minExposure, maxExposure);
+      unawaited(repository.nativeCameraSetExposureBias(bias));
+      initialExposureOffset = bias;
     }
 
-    // The plugin does not expose the device, so the manual limits (ISO range,
-    // shutter range, Apple Log/ProRes support) are read from the running
-    // session. This is retried because the session starts asynchronously.
-    final capabilities = await _probeProCapabilities();
-    final frameFormat = CameraFrameFormat.fromName(proImaging.frameFormat);
+    final rawCaps = initMap['capabilities'];
+    final capabilities = rawCaps is Map
+        ? ProCaptureCapabilities.fromMap(rawCaps)
+        : await _probeProCapabilities();
+
     unawaited(repository.setDopTelemetry(horizon: true, audio: false));
     unawaited(repository.setVolumeShutterEnabled(proImaging.volumeShutter));
 
@@ -170,14 +185,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       selectedTone: selectedTone,
       intensity: savedPrefs.intensity,
       exposureOffset: initialExposureOffset,
-      minExposure: bounds.minExposure,
-      maxExposure: bounds.maxExposure,
-      lensDirection: backCamera.lensDirection,
+      minExposure: minExposure,
+      maxExposure: maxExposure,
+      lensDirection: CameraLensDirection.back,
       resolution: resolution,
       frameRate: frameRate,
-      zoomLevel: bounds.minZoom,
-      minZoom: bounds.minZoom,
-      maxZoom: bounds.maxZoom,
+      zoomLevel: zoomLevel,
+      minZoom: minZoom,
+      maxZoom: maxZoom,
       videoStabilizationActive: _stabilizationActive,
       videoStabilizationMode: _stabilizationMode,
       proCapabilities: capabilities,
@@ -198,6 +213,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       isAnamorphicRatio: frameFormat == CameraFrameFormat.scope239,
       directLutRecordingEnabled: proImaging.directLutRecording,
       liveMetalEnabled: proImaging.liveMetalPreview,
+      liveMetalTextureId: textureId,
+      previewWidth: previewWidth,
+      previewHeight: previewHeight,
+      hasHardwareDepth: hasHardwareDepth,
       latestGalleryThumbPath: latestThumb,
       backLenses: backLenses,
       activeBackLensIndex: initialLensIdx,
@@ -211,67 +230,31 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     );
   }
 
-  /// Labels the physical back lenses exposed by iOS (`0.5×`, `1×`, `TEL`).
-  List<OpticalLensOption> _buildBackLensOptions(
-    List<CameraDescription> backCameras,
-  ) {
+  /// Parses the hardware optical lens list reported by `NativeCinemaCameraEngine`
+  /// (`0.5×`, `1×`, `2×`, `3×`).
+  List<OpticalLensOption> _parseNativeLenses(Object? raw) {
     final options = <OpticalLensOption>[];
-    final seenLabels = <String>{};
-    for (var i = 0; i < backCameras.length; i++) {
-      final name = backCameras[i].name;
-      final lower = name.toLowerCase();
-      String label;
-      if (lower.contains('ultrawide') || lower.contains('ultra')) {
-        label = '0.5×';
-      } else if (lower.contains('telephoto') || lower.contains('tele')) {
-        label = 'TEL';
-      } else if (lower.contains('dual') || lower.contains('triple')) {
-        // Skip composite virtual cameras so each pill switches a discrete lens.
-        continue;
-      } else {
-        label = '1×';
+    if (raw is List) {
+      for (final item in raw) {
+        if (item is Map) {
+          final id = item['id']?.toString() ?? '';
+          final label = item['label']?.toString() ?? '1×';
+          final initialZoom = (item['initialZoom'] as num?)?.toDouble() ?? 1.0;
+          if (id.isNotEmpty) {
+            options.add(
+              OpticalLensOption(
+                id: id,
+                label: label,
+                initialZoom: initialZoom,
+              ),
+            );
+          }
+        }
       }
-      if (seenLabels.contains(label)) {
-        label = '${label}_${i + 1}';
-      }
-      seenLabels.add(label);
-      options.add(
-        OpticalLensOption(index: i, cameraName: name, label: label),
-      );
     }
-    if (options.isEmpty && backCameras.isNotEmpty) {
-      options.add(
-        OpticalLensOption(
-          index: 0,
-          cameraName: backCameras.first.name,
-          label: '1×',
-        ),
-      );
+    if (options.isEmpty) {
+      options.add(const OpticalLensOption(id: 'default', label: '1×'));
     }
-
-    // Add 2× (48mm optical-quality sensor crop on 48MP main wide camera like
-    // iPhone 14 Pro Max / 15 Pro / 16 Pro) right after 1×.
-    final wideLens = options.where((o) => o.label == '1×').firstOrNull;
-    if (wideLens != null && !options.any((o) => o.label == '2×')) {
-      options.add(
-        OpticalLensOption(
-          index: wideLens.index,
-          cameraName: wideLens.cameraName,
-          label: '2×',
-          initialZoom: 2.0,
-        ),
-      );
-    }
-
-    // Order cleanly: 0.5× -> 1× -> 2× -> TEL
-    int rank(String l) {
-      if (l.startsWith('0.5')) return 0;
-      if (l.startsWith('1×')) return 1;
-      if (l.startsWith('2×')) return 2;
-      return 3;
-    }
-
-    options.sort((a, b) => rank(a.label).compareTo(rank(b.label)));
     return options;
   }
 
@@ -342,6 +325,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   Map<String, dynamic> _liveMetalConfigFor(CinemaCameraState s) {
     return <String, dynamic>{
+      'liveMetal': s.liveMetalEnabled,
       'matrix': s.captureColorMatrix,
       'toneId': s.selectedTone.isCustom ? null : s.selectedTone.id,
       'intensity': s.intensity,
@@ -360,11 +344,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   }
 
   void _syncLiveMetalIfActive(CinemaCameraState next) {
-    if (next.liveMetalTextureId == null) return;
     unawaited(
       ref
           .read(cinemaCameraRepositoryProvider)
-          .updateLiveMetalConfig(_liveMetalConfigFor(next)),
+          .nativeCameraUpdateGrading(_liveMetalConfigFor(next)),
     );
   }
 
@@ -409,8 +392,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   /// Frame size requested from the ProRes recorder.
   ///
-  /// `MAX` is a photo-only preset, so its video path is the same 4K the plugin
-  /// records with (see [CaptureResolution.videoPreset]).
+  /// `MAX` is a photo-only setting, so its video path uses 4K.
   ({int width, int height}) _proResFrameSize(CaptureResolution resolution) {
     return switch (resolution) {
       CaptureResolution.fullHD => (width: 1920, height: 1080),
@@ -434,31 +416,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     return capabilities;
   }
 
-  /// Re-reads the limits after the session was rebuilt with another format.
-  Future<void> _refreshProCapabilities() async {
-    final capabilities = await _probeProCapabilities();
-    if (_disposed) return;
-    final current = state.valueOrNull;
-    if (current == null) return;
-
-    state = AsyncData(
-      current.copyWith(
-        proCapabilities: capabilities,
-        iso: current.iso
-            .clamp(capabilities.minIso, capabilities.maxIso)
-            .toDouble(),
-        shutterSeconds: current.shutterSeconds
-            .clamp(
-              capabilities.minShutterSeconds,
-              capabilities.maxShutterSeconds,
-            )
-            .toDouble(),
-      ),
-    );
-    await _reapplyManualControls();
-  }
-
-  /// Replays the locked settings after the plugin rebuilt its capture session.
+  /// Replays the locked settings after the native session reconfigured.
   Future<void> _reapplyManualControls() async {
     final current = state.valueOrNull;
     if (current == null) return;
@@ -753,11 +711,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     unawaited(ref.read(cinemaCameraRepositoryProvider).saveHeif10Bit(enabled));
   }
 
-  void setHiRes48MP(bool enabled) {
+  Future<void> setHiRes48MP(bool enabled) async {
     final current = state.valueOrNull;
-    if (current == null) return;
+    if (current == null || current.isRecordingVideo) return;
     state = AsyncData(current.copyWith(hiRes48MP: enabled));
     unawaited(ref.read(cinemaCameraRepositoryProvider).saveHiRes48MP(enabled));
+    if (current.captureMode == CinemaCaptureMode.photo) {
+      await applyCaptureProfile(mode: current.captureMode);
+    }
   }
 
   void setApertureFStop(double fStop) {
@@ -845,27 +806,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (current == null || current.isRecordingVideo) return;
     final repo = ref.read(cinemaCameraRepositoryProvider);
     unawaited(repo.saveLiveMetalPreview(enabled));
-
-    if (!enabled) {
-      await repo.disableLiveMetalPreview();
-      if (_disposed) return;
-      final latest = state.valueOrNull ?? current;
-      state = AsyncData(
-        latest.copyWith(liveMetalEnabled: false, clearLiveMetalTexture: true),
-      );
-      return;
-    }
-
-    final tid = await repo.enableLiveMetalPreview(_liveMetalConfigFor(current));
-    if (_disposed) return;
-    final latest = state.valueOrNull ?? current;
-    state = AsyncData(
-      latest.copyWith(
-        liveMetalEnabled: tid != null,
-        liveMetalTextureId: tid,
-        clearLiveMetalTexture: tid == null,
-      ),
-    );
+    final next = current.copyWith(liveMetalEnabled: enabled);
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
   }
 
   Future<void> setDopOverlay({
@@ -887,25 +830,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       liveScopeEnabled: liveScope ?? current.liveScopeEnabled,
     );
     state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
 
     final repo = ref.read(cinemaCameraRepositoryProvider);
-    final wantsGpuOverlay = next.focusPeakingEnabled ||
-        next.zebraEnabled ||
-        next.falseColorEnabled ||
-        next.liveScopeEnabled;
-
-    if (wantsGpuOverlay && next.liveMetalTextureId == null) {
-      final tid = await repo.enableLiveMetalPreview(_liveMetalConfigFor(next));
-      if (!_disposed && tid != null) {
-        final latest = state.valueOrNull ?? next;
-        state = AsyncData(
-          latest.copyWith(liveMetalEnabled: true, liveMetalTextureId: tid),
-        );
-      }
-    } else if (next.liveMetalTextureId != null) {
-      unawaited(repo.updateLiveMetalConfig(_liveMetalConfigFor(next)));
-    }
-
     unawaited(
       repo.setDopTelemetry(
         horizon: next.horizonLevelEnabled,
@@ -961,17 +888,13 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (current == null) return;
 
     var nextOffset = current.exposureOffset;
-    final cam = _controller;
-    if (cam != null &&
-        cam.value.isInitialized &&
-        !current.manualExposureEnabled) {
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    if (!current.manualExposureEnabled) {
       final target = enabled
           ? (-0.9).clamp(current.minExposure, current.maxExposure)
           : 0.0;
-      try {
-        await cam.setExposureOffset(target);
-        nextOffset = target;
-      } catch (_) {}
+      await repo.nativeCameraSetExposureBias(target);
+      nextOffset = target;
     }
 
     state = AsyncData(
@@ -980,9 +903,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         exposureOffset: nextOffset,
       ),
     );
-    unawaited(
-      ref.read(cinemaCameraRepositoryProvider).saveHighlightMetering(enabled),
-    );
+    unawaited(repo.saveHighlightMetering(enabled));
   }
 
   /// Locks shutter to the 180° cinema rule (`1 / 2×fps`: 1/48 @ 24fps,
@@ -1018,7 +939,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     );
   }
 
-  /// Switches directly to another physical optical back lens (0.5× / 1× / TEL).
+  /// Switches directly to another physical optical back lens (`0.5×` / `1×` /
+  /// `2×` / `3×`) on the single owned native `AVCaptureSession`.
   Future<void> switchBackLens(int optionIndex) async {
     final current = state.valueOrNull;
     if (current == null ||
@@ -1034,61 +956,42 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     }
 
     final option = current.backLenses[optionIndex];
-    final backCameras = _availableCameras
-        .where((cam) => cam.lensDirection == CameraLensDirection.back)
-        .toList();
-    if (option.index < 0 || option.index >= backCameras.length) return;
-    final targetCamera = backCameras[option.index];
-
-    // Fast path: switching between 1× (24mm) and 2× (48mm optical sensor crop)
-    // on the same physical 48MP wide sensor requires ZERO controller rebuild!
-    if (current.lensDirection == CameraLensDirection.back &&
-        _activeCamera?.name == targetCamera.name &&
-        _controller != null &&
-        _controller!.value.isInitialized) {
-      final targetZoom =
-          option.initialZoom.clamp(current.minZoom, current.maxZoom);
-      state = AsyncData(
-        current.copyWith(
-          activeBackLensIndex: optionIndex,
-          zoomLevel: targetZoom,
-        ),
-      );
-      _lastAppliedZoom = targetZoom;
-      try {
-        await _controller!.setZoomLevel(targetZoom);
-      } catch (_) {}
-      return;
-    }
-
     _isSwitchingProfile = true;
     try {
-      final bounds = await _initializeCameraController(
-        targetCamera,
-        resolution: current.resolution,
-        frameRate: current.frameRate,
-        mode: current.captureMode,
-      );
+      final repo = ref.read(cinemaCameraRepositoryProvider);
+      final cfg = await repo.nativeCameraConfigure(<String, dynamic>{
+        'mode': current.captureMode.name,
+        'resolution': current.resolution.name,
+        'fps': current.frameRate.value,
+        'position': 'back',
+        'lensId': option.id,
+        'initialZoom': option.initialZoom,
+        'hiRes48MP': current.hiRes48MP,
+        'grading': _liveMetalConfigFor(current),
+      });
       if (_disposed) return;
 
-      final targetZoom =
-          option.initialZoom.clamp(bounds.minZoom, bounds.maxZoom);
-      if ((targetZoom - bounds.minZoom).abs() > 0.05 && _controller != null) {
-        try {
-          await _controller!.setZoomLevel(targetZoom);
-          _lastAppliedZoom = targetZoom;
-        } catch (_) {}
-      }
+      final minExposure = (cfg['minExposure'] as num?)?.toDouble() ?? -2.0;
+      final maxExposure = (cfg['maxExposure'] as num?)?.toDouble() ?? 2.0;
+      final minZoom = (cfg['minZoom'] as num?)?.toDouble() ?? 1.0;
+      final maxZoom = (cfg['maxZoom'] as num?)?.toDouble() ?? 8.0;
+      final zoomLevel = (cfg['zoomLevel'] as num?)?.toDouble() ?? minZoom;
+      final previewWidth =
+          (cfg['previewWidth'] as num?)?.toDouble() ?? current.previewWidth;
+      final previewHeight =
+          (cfg['previewHeight'] as num?)?.toDouble() ?? current.previewHeight;
+      final hasHardwareDepth = cfg['hasHardwareDepth'] == true;
+      final rawCaps = cfg['capabilities'];
+      final caps = rawCaps is Map
+          ? ProCaptureCapabilities.fromMap(rawCaps)
+          : current.proCapabilities;
+      _lastAppliedZoom = zoomLevel;
 
       var nextOffset = 0.0;
-      if (current.highlightMeteringEnabled &&
-          !current.manualExposureEnabled &&
-          _controller != null) {
-        final bias = (-0.9).clamp(bounds.minExposure, bounds.maxExposure);
-        try {
-          await _controller!.setExposureOffset(bias);
-          nextOffset = bias;
-        } catch (_) {}
+      if (current.highlightMeteringEnabled && !current.manualExposureEnabled) {
+        final bias = (-0.9).clamp(minExposure, maxExposure);
+        unawaited(repo.nativeCameraSetExposureBias(bias));
+        nextOffset = bias;
       }
 
       final latest = state.valueOrNull ?? current;
@@ -1098,16 +1001,23 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           activeBackLensIndex: optionIndex,
           flashMode: FlashMode.off,
           exposureOffset: nextOffset,
-          minExposure: bounds.minExposure,
-          maxExposure: bounds.maxExposure,
-          zoomLevel: targetZoom,
-          minZoom: bounds.minZoom,
-          maxZoom: bounds.maxZoom,
+          minExposure: minExposure,
+          maxExposure: maxExposure,
+          zoomLevel: zoomLevel,
+          minZoom: minZoom,
+          maxZoom: maxZoom,
+          previewWidth: previewWidth,
+          previewHeight: previewHeight,
+          hasHardwareDepth: hasHardwareDepth,
+          proCapabilities: caps,
+          iso: latest.iso.clamp(caps.minIso, caps.maxIso).toDouble(),
+          shutterSeconds: latest.shutterSeconds
+              .clamp(caps.minShutterSeconds, caps.maxShutterSeconds)
+              .toDouble(),
           clearFocusPoint: true,
         ),
       );
-      await _refreshProCapabilities();
-      await _rebindLiveMetalIfNeeded();
+      await _reapplyManualControls();
     } finally {
       _isSwitchingProfile = false;
     }
@@ -1191,144 +1101,20 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     return frameRate == CaptureFrameRate.fps60 ? base * 3 ~/ 2 : base;
   }
 
-  ResolutionPreset _presetFor(
-    CaptureResolution resolution,
-    CinemaCaptureMode mode,
-  ) {
-    if (mode == CinemaCaptureMode.cinematicVideo) {
-      // 1080p guarantees rock-solid 24/30fps with live Vision bokeh + 3D LUT +
-      // Display P3 HEVC encoding and zero memory stalls on A16/A17/A18.
-      return ResolutionPreset.veryHigh;
-    }
-    return mode.isPhoto ? resolution.photoPreset : resolution.videoPreset;
-  }
-
-  /// Picks the hardware depth-capable virtual camera (`Triple` / `DualWide` /
-  /// `Dual` / `LiDAR`) when entering Portrait Photo mode on the back camera so
-  /// iOS delivers real metric `AVDepthData` to `CIDepthBlurEffect`!
-  CameraDescription _cameraForMode(
-    CinemaCameraState current,
-    CinemaCaptureMode targetMode,
-  ) {
-    if (current.lensDirection != CameraLensDirection.back) {
-      return _activeCamera ?? _availableCameras.first;
-    }
-    final backCameras = _availableCameras
-        .where((cam) => cam.lensDirection == CameraLensDirection.back)
-        .toList();
-    if (targetMode == CinemaCaptureMode.portrait) {
-      for (final cam in backCameras) {
-        final lower = cam.name.toLowerCase();
-        if (lower.contains('triple') ||
-            lower.contains('dual') ||
-            lower.contains('lidar')) {
-          return cam;
-        }
-      }
-    }
-    if (current.backLenses.isNotEmpty) {
-      final opt = current.backLenses[
-          current.activeBackLensIndex.clamp(0, current.backLenses.length - 1)];
-      if (opt.index >= 0 && opt.index < backCameras.length) {
-        return backCameras[opt.index];
-      }
-    }
-    return _activeCamera ?? _availableCameras.first;
-  }
-
-  Future<
-      ({
-        double minExposure,
-        double maxExposure,
-        double minZoom,
-        double maxZoom,
-      })> _initializeCameraController(
-    CameraDescription cameraDescription, {
-    required CaptureResolution resolution,
-    required CaptureFrameRate frameRate,
-    required CinemaCaptureMode mode,
-  }) async {
-    final preset = _presetFor(resolution, mode);
-    final previousController = _controller;
-    _controller = null;
-    if (previousController != null) {
-      try {
-        await previousController.dispose();
-      } catch (_) {
-        // The controller can already be torn down after an interruption.
-      }
-    }
-
-    final isVideo = mode.isVideo;
-    final newController = CameraController(
-      cameraDescription,
-      preset,
-      enableAudio: true,
-      // Passing `fps` on iOS (`camera_avfoundation`) overrides `.photo` preset
-      // with a 16:9 video format (often 2MP binned 1080p), causing soft/oily
-      // zoomed stills and blocking full 4:3 12MP/48MP photo & Bayer RAW output.
-      // Only lock video frame rate & bitrate when actually in video mode.
-      fps: isVideo ? frameRate.value : null,
-      videoBitrate: isVideo ? _videoBitrateFor(resolution, frameRate) : null,
-      audioBitrate: isVideo ? 192000 : null,
-      imageFormatGroup: ImageFormatGroup.bgra8888,
-    );
-
-    await newController.initialize();
-    await newController.setFlashMode(FlashMode.off);
-
-    final minExp = await newController.getMinExposureOffset();
-    final maxExp = await newController.getMaxExposureOffset();
-
-    var minZoom = 1.0;
-    var maxZoom = 1.0;
-    try {
-      minZoom = await newController.getMinZoomLevel();
-      maxZoom = await newController.getMaxZoomLevel();
-    } catch (_) {
-      // Some front cameras report no zoom support.
-    }
-
-    _controller = newController;
-    _activeCamera = cameraDescription;
-    _profileMode = mode;
-    _profilePreset = preset;
-    _profileFps = isVideo ? frameRate.value : null;
-    _lastAppliedZoom = minZoom;
-    return (
-      minExposure: minExp,
-      maxExposure: maxExp,
-      minZoom: minZoom,
-      maxZoom: maxZoom,
-    );
-  }
-
-  /// Switches mode, resolution or frame rate and rebuilds the capture session
-  /// only when the underlying profile actually changes.
-  ///
-  /// Photo mode runs at [ResolutionPreset.max] so the still output keeps the
-  /// full sensor, video mode is kept at 4K where the writer is reliable.
+  /// Switches mode, resolution, frame rate, or 48MP configuration directly on
+  /// our owned single-session `NativeCinemaCameraEngine`.
   Future<void> applyCaptureProfile({
     CinemaCaptureMode? mode,
     CaptureResolution? resolution,
     CaptureFrameRate? frameRate,
   }) async {
     final current = state.valueOrNull;
-    final description = _activeCamera;
-    if (current == null || description == null || _isSwitchingProfile) return;
+    if (current == null || _isSwitchingProfile) return;
     if (current.isRecordingVideo || current.isCapturing) return;
 
     final nextMode = mode ?? current.captureMode;
     final nextResolution = resolution ?? current.resolution;
     final nextFrameRate = frameRate ?? current.frameRate;
-    final nextPreset = _presetFor(nextResolution, nextMode);
-    final targetDescription = _cameraForMode(current, nextMode);
-
-    final needsRebuild = _controller == null ||
-        _activeCamera?.name != targetDescription.name ||
-        (_profileMode?.isVideo ?? false) != nextMode.isVideo ||
-        _profilePreset != nextPreset ||
-        (nextMode.isVideo && _profileFps != nextFrameRate.value);
 
     _isSwitchingProfile = true;
     final switched = current.copyWith(
@@ -1339,56 +1125,82 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     );
     state = AsyncData(switched);
 
-    if (!needsRebuild) {
-      _profileMode = nextMode;
-      _isSwitchingProfile = false;
-      await _persistCaptureSettings(nextResolution, nextFrameRate);
-      await _syncModeMetalPipeline(switched);
-      return;
-    }
-
     try {
-      final bounds = await _initializeCameraController(
-        targetDescription,
-        resolution: nextResolution,
-        frameRate: nextFrameRate,
-        mode: nextMode,
-      );
+      final repo = ref.read(cinemaCameraRepositoryProvider);
+      final activeLens = current.backLenses.isNotEmpty
+          ? current.backLenses[current.activeBackLensIndex
+              .clamp(0, current.backLenses.length - 1)]
+          : null;
+      final cfg = await repo.nativeCameraConfigure(<String, dynamic>{
+        'mode': nextMode.name,
+        'resolution': nextResolution.name,
+        'fps': nextFrameRate.value,
+        'position':
+            current.lensDirection == CameraLensDirection.front ? 'front' : 'back',
+        if (activeLens != null &&
+            current.lensDirection == CameraLensDirection.back) ...<String, dynamic>{
+          'lensId': activeLens.id,
+          'initialZoom': activeLens.initialZoom,
+        },
+        'hiRes48MP': current.hiRes48MP,
+        'grading': _liveMetalConfigFor(switched),
+      });
       if (_disposed) return;
 
-      final latest = state.valueOrNull ?? current;
-      state = AsyncData(
-        latest.copyWith(
-          captureMode: nextMode,
-          resolution: nextResolution,
-          frameRate: nextFrameRate,
-          exposureOffset: 0.0,
-          minExposure: bounds.minExposure,
-          maxExposure: bounds.maxExposure,
-          zoomLevel: bounds.minZoom,
-          minZoom: bounds.minZoom,
-          maxZoom: bounds.maxZoom,
-          clearFocusPoint: true,
+      final minExposure = (cfg['minExposure'] as num?)?.toDouble() ?? -2.0;
+      final maxExposure = (cfg['maxExposure'] as num?)?.toDouble() ?? 2.0;
+      final minZoom = (cfg['minZoom'] as num?)?.toDouble() ?? 1.0;
+      final maxZoom = (cfg['maxZoom'] as num?)?.toDouble() ?? 8.0;
+      final zoomLevel = (cfg['zoomLevel'] as num?)?.toDouble() ?? minZoom;
+      final previewWidth =
+          (cfg['previewWidth'] as num?)?.toDouble() ?? current.previewWidth;
+      final previewHeight =
+          (cfg['previewHeight'] as num?)?.toDouble() ?? current.previewHeight;
+      final hasHardwareDepth = cfg['hasHardwareDepth'] == true;
+      final rawCaps = cfg['capabilities'];
+      final caps = rawCaps is Map
+          ? ProCaptureCapabilities.fromMap(rawCaps)
+          : current.proCapabilities;
+      _lastAppliedZoom = zoomLevel;
+
+      var nextOffset = 0.0;
+      if (current.highlightMeteringEnabled && !current.manualExposureEnabled) {
+        final bias = (-0.9).clamp(minExposure, maxExposure);
+        unawaited(repo.nativeCameraSetExposureBias(bias));
+        nextOffset = bias;
+      }
+
+      final latest = state.valueOrNull ?? switched;
+      final synced = latest.copyWith(
+        captureMode: nextMode,
+        resolution: nextResolution,
+        frameRate: nextFrameRate,
+        exposureOffset: nextOffset,
+        minExposure: minExposure,
+        maxExposure: maxExposure,
+        zoomLevel: zoomLevel,
+        minZoom: minZoom,
+        maxZoom: maxZoom,
+        previewWidth: previewWidth,
+        previewHeight: previewHeight,
+        hasHardwareDepth: hasHardwareDepth,
+        proCapabilities: caps,
+        iso: latest.iso.clamp(caps.minIso, caps.maxIso).toDouble(),
+        shutterSeconds: latest.shutterSeconds
+            .clamp(caps.minShutterSeconds, caps.maxShutterSeconds)
+            .toDouble(),
+        clearFocusPoint: true,
+      );
+      state = AsyncData(synced);
+      await _persistCaptureSettings(nextResolution, nextFrameRate);
+      await _reapplyManualControls();
+
+      unawaited(
+        repo.setDopTelemetry(
+          horizon: synced.horizonLevelEnabled,
+          audio: synced.audioMeterEnabled && synced.captureMode.isVideo,
         ),
       );
-      await _persistCaptureSettings(nextResolution, nextFrameRate);
-
-      // A new format changes the ISO/shutter range and can enable or lose
-      // Apple Log (it needs a specific 4K/1080p format), so the pro panel has to
-      // re-read the device before the operator touches a slider.
-      await _refreshProCapabilities();
-
-      final synced = state.valueOrNull;
-      if (synced != null) {
-        final repo = ref.read(cinemaCameraRepositoryProvider);
-        unawaited(
-          repo.setDopTelemetry(
-            horizon: synced.horizonLevelEnabled,
-            audio: synced.audioMeterEnabled && synced.captureMode.isVideo,
-          ),
-        );
-        await _syncModeMetalPipeline(synced);
-      }
     } catch (error) {
       final latest = state.valueOrNull ?? current;
       state = AsyncData(
@@ -1401,34 +1213,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       rethrow;
     } finally {
       _isSwitchingProfile = false;
-    }
-  }
-
-  /// Ensures Live Metal GPU preview is engaged whenever Portrait/Cinematic
-  /// bokeh mode (or user Live Metal / DOP overlay) is active, and updates config.
-  Future<void> _syncModeMetalPipeline(CinemaCameraState synced) async {
-    if (_disposed) return;
-    final repo = ref.read(cinemaCameraRepositoryProvider);
-    final wantsGpu = synced.liveMetalEnabled ||
-        synced.captureMode == CinemaCaptureMode.cinematicVideo ||
-        synced.focusPeakingEnabled ||
-        synced.zebraEnabled ||
-        synced.falseColorEnabled ||
-        synced.liveScopeEnabled;
-
-    if (wantsGpu) {
-      final tid =
-          await repo.enableLiveMetalPreview(_liveMetalConfigFor(synced));
-      if (!_disposed && tid != null) {
-        final now = state.valueOrNull ?? synced;
-        state = AsyncData(now.copyWith(liveMetalTextureId: tid));
-      }
-    } else if (synced.liveMetalTextureId != null) {
-      await repo.disableLiveMetalPreview();
-      if (!_disposed) {
-        final now = state.valueOrNull ?? synced;
-        state = AsyncData(now.copyWith(clearLiveMetalTexture: true));
-      }
     }
   }
 
@@ -1462,8 +1246,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   Future<void> setZoomLevel(double target) async {
     final current = state.valueOrNull;
-    final cam = _controller;
-    if (current == null || cam == null || !cam.value.isInitialized) return;
+    if (current == null) return;
 
     final clamped = target.clamp(current.minZoom, current.maxZoom);
     if ((clamped - current.zoomLevel).abs() > 0.001) {
@@ -1472,11 +1255,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if ((clamped - _lastAppliedZoom).abs() < 0.004) return;
 
     _lastAppliedZoom = clamped;
-    try {
-      await cam.setZoomLevel(clamped);
-    } catch (_) {
-      // Zoom can be rejected while the session is reconfiguring.
-    }
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).nativeCameraSetZoom(clamped),
+    );
   }
 
   Future<void> resetZoom() => setZoomLevel(state.valueOrNull?.minZoom ?? 1.0);
@@ -1666,8 +1447,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   Future<void> cycleFlashMode() async {
     final current = state.valueOrNull;
-    final cam = _controller;
-    if (current == null || cam == null || !cam.value.isInitialized) return;
+    if (current == null) return;
 
     final nextMode = switch (current.flashMode) {
       FlashMode.off => FlashMode.auto,
@@ -1675,17 +1455,20 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       _ => FlashMode.off,
     };
 
-    await cam.setFlashMode(nextMode);
+    await ref
+        .read(cinemaCameraRepositoryProvider)
+        .nativeCameraSetFlash(nextMode.name);
     state = AsyncData(current.copyWith(flashMode: nextMode));
   }
 
   Future<void> setExposureOffset(double offset) async {
     final current = state.valueOrNull;
-    final cam = _controller;
-    if (current == null || cam == null || !cam.value.isInitialized) return;
+    if (current == null) return;
 
     final clamped = offset.clamp(current.minExposure, current.maxExposure);
-    await cam.setExposureOffset(clamped);
+    await ref
+        .read(cinemaCameraRepositoryProvider)
+        .nativeCameraSetExposureBias(clamped);
     state = AsyncData(current.copyWith(exposureOffset: clamped));
   }
 
@@ -1694,30 +1477,22 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     Offset screenTapPosition,
   ) async {
     final current = state.valueOrNull;
-    final cam = _controller;
-    if (current == null || cam == null || !cam.value.isInitialized) return;
+    if (current == null) return;
 
-    // The plugin implements tap-to-focus by switching the device back to
-    // automatic, which would silently break a manual lock. Tap-tracking only
-    // the subsystems the operator has not locked keeps the pro controls honest.
     final wantsFocus = !current.manualFocusEnabled;
     final wantsExposure = !current.manualExposureEnabled;
-    if (!wantsFocus && !wantsExposure) return;
-
-    try {
-      if (wantsFocus) await cam.setFocusPoint(normalizedPoint);
-      if (wantsExposure) await cam.setExposurePoint(normalizedPoint);
-    } catch (_) {}
-
-    var rackedToBg = current.cinematicRackedToBg;
-    if (current.captureMode.isBokehMode) {
-      rackedToBg = await ref
-          .read(cinemaCameraRepositoryProvider)
-          .triggerCinematicRackFocus(
-            x: normalizedPoint.dx,
-            y: normalizedPoint.dy,
-          );
+    if (!wantsFocus && !wantsExposure && !current.captureMode.isBokehMode) {
+      return;
     }
+
+    final rackedToBg = await ref
+        .read(cinemaCameraRepositoryProvider)
+        .nativeCameraSetFocusPoint(
+          x: normalizedPoint.dx,
+          y: normalizedPoint.dy,
+          focus: wantsFocus,
+          exposure: wantsExposure,
+        );
 
     if (_disposed) return;
     final nowState = state.valueOrNull ?? current;
@@ -1725,7 +1500,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       nowState.copyWith(
         focusPoint: screenTapPosition,
         lastFocusNormalized: normalizedPoint,
-        cinematicRackedToBg: rackedToBg,
+        cinematicRackedToBg: current.captureMode.isBokehMode
+            ? rackedToBg
+            : nowState.cinematicRackedToBg,
       ),
     );
     _focusIndicatorTimer?.cancel();
@@ -1739,10 +1516,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   Future<void> switchCamera() async {
     final current = state.valueOrNull;
-    if (current == null ||
-        current.isRecordingVideo ||
-        _isSwitchingProfile ||
-        _availableCameras.length < 2) {
+    if (current == null || current.isRecordingVideo || _isSwitchingProfile) {
       return;
     }
 
@@ -1750,59 +1524,76 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         ? CameraLensDirection.front
         : CameraLensDirection.back;
 
-    final targetCamera = _availableCameras.firstWhere(
-      (cam) => cam.lensDirection == targetDirection,
-      orElse: () => _availableCameras.first,
-    );
-
     _isSwitchingProfile = true;
     try {
-      final bounds = await _initializeCameraController(
-        targetCamera,
-        resolution: current.resolution,
-        frameRate: current.frameRate,
-        mode: current.captureMode,
-      );
+      final repo = ref.read(cinemaCameraRepositoryProvider);
+      final activeLens = current.backLenses.isNotEmpty
+          ? current.backLenses[current.activeBackLensIndex
+              .clamp(0, current.backLenses.length - 1)]
+          : null;
+      final cfg = await repo.nativeCameraConfigure(<String, dynamic>{
+        'mode': current.captureMode.name,
+        'resolution': current.resolution.name,
+        'fps': current.frameRate.value,
+        'position':
+            targetDirection == CameraLensDirection.front ? 'front' : 'back',
+        if (targetDirection == CameraLensDirection.back &&
+            activeLens != null) ...<String, dynamic>{
+          'lensId': activeLens.id,
+          'initialZoom': activeLens.initialZoom,
+        },
+        'hiRes48MP': current.hiRes48MP,
+        'grading': _liveMetalConfigFor(current),
+      });
       if (_disposed) return;
+
+      final minExposure = (cfg['minExposure'] as num?)?.toDouble() ?? -2.0;
+      final maxExposure = (cfg['maxExposure'] as num?)?.toDouble() ?? 2.0;
+      final minZoom = (cfg['minZoom'] as num?)?.toDouble() ?? 1.0;
+      final maxZoom = (cfg['maxZoom'] as num?)?.toDouble() ?? 8.0;
+      final zoomLevel = (cfg['zoomLevel'] as num?)?.toDouble() ?? minZoom;
+      final previewWidth =
+          (cfg['previewWidth'] as num?)?.toDouble() ?? current.previewWidth;
+      final previewHeight =
+          (cfg['previewHeight'] as num?)?.toDouble() ?? current.previewHeight;
+      final hasHardwareDepth = cfg['hasHardwareDepth'] == true;
+      final rawCaps = cfg['capabilities'];
+      final caps = rawCaps is Map
+          ? ProCaptureCapabilities.fromMap(rawCaps)
+          : current.proCapabilities;
+      _lastAppliedZoom = zoomLevel;
+
       final latest = state.valueOrNull ?? current;
       state = AsyncData(
         latest.copyWith(
           lensDirection: targetDirection,
           flashMode: FlashMode.off,
           exposureOffset: 0.0,
-          minExposure: bounds.minExposure,
-          maxExposure: bounds.maxExposure,
-          zoomLevel: bounds.minZoom,
-          minZoom: bounds.minZoom,
-          maxZoom: bounds.maxZoom,
+          minExposure: minExposure,
+          maxExposure: maxExposure,
+          zoomLevel: zoomLevel,
+          minZoom: minZoom,
+          maxZoom: maxZoom,
+          previewWidth: previewWidth,
+          previewHeight: previewHeight,
+          hasHardwareDepth: hasHardwareDepth,
+          proCapabilities: caps,
+          iso: latest.iso.clamp(caps.minIso, caps.maxIso).toDouble(),
+          shutterSeconds: latest.shutterSeconds
+              .clamp(caps.minShutterSeconds, caps.maxShutterSeconds)
+              .toDouble(),
           clearFocusPoint: true,
         ),
       );
-      await _refreshProCapabilities();
-      await _rebindLiveMetalIfNeeded();
+      await _reapplyManualControls();
     } finally {
       _isSwitchingProfile = false;
     }
   }
 
-  /// Re-syncs the Live Metal LUT texture pipeline after a physical lens or
-  /// camera switch so switching to 2×/TEL or front camera never leaves a blank
-  /// preview texture.
-  Future<void> _rebindLiveMetalIfNeeded() async {
-    if (_disposed) return;
-    final synced = state.valueOrNull;
-    if (synced == null) return;
-    await _syncModeMetalPipeline(synced);
-  }
-
   Future<PhotoCaptureResult?> captureAndSavePhoto() async {
     final current = state.valueOrNull;
-    final cam = _controller;
-    if (current == null ||
-        cam == null ||
-        !cam.value.isInitialized ||
-        current.isCapturing ||
-        _isSwitchingProfile) {
+    if (current == null || current.isCapturing || _isSwitchingProfile) {
       return null;
     }
 
@@ -1810,53 +1601,33 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     try {
       final repository = ref.read(cinemaCameraRepositoryProvider);
-      final toneId = current.selectedTone.isCustom ? null : current.selectedTone.id;
+      final toneId =
+          current.selectedTone.isCustom ? null : current.selectedTone.id;
       final isPortrait = current.captureMode == CinemaCaptureMode.portrait;
-      Uint8List? gradedBytes;
 
-      if ((current.processZeroEnabled || current.hiRes48MP || isPortrait) &&
-          current.lensDirection == CameraLensDirection.back) {
-        gradedBytes = await repository.captureProcessZeroPhoto(
-          colorMatrix: current.captureColorMatrix,
-          applyAnamorphicBars: current.isAnamorphicRatio,
-          anamorphicCrop: current.anamorphicCrop,
-          frameAspectRatio: current.effectiveFrameAspectRatio,
-          saveDngRaw: current.saveDngRaw,
-          nightStack: current.nightStack,
-          heif10Bit: current.heif10Bit,
-          hiRes48MP: current.hiRes48MP,
-          portraitMode: isPortrait,
-          apertureFStop: current.apertureFStop,
-          focusX: current.lastFocusNormalized.dx,
-          focusY: current.lastFocusNormalized.dy,
-          desqueeze: current.anamorphicDesqueeze,
-          look: current.nativeLook,
-          toneId: toneId,
-          intensity: current.intensity,
-        );
-      }
-
-      if (gradedBytes == null) {
-        final XFile rawFile = await cam.takePicture();
-        final Uint8List rawBytes = await rawFile.readAsBytes();
-        gradedBytes = await repository.renderGradedImage(
-          rawBytes: rawBytes,
-          colorMatrix: current.captureColorMatrix,
-          applyAnamorphicBars: current.isAnamorphicRatio,
-          anamorphicCrop: current.anamorphicCrop,
-          frameAspectRatio: current.effectiveFrameAspectRatio,
-          desqueeze: current.anamorphicDesqueeze,
-          appleLogInput: current.appleLogEnabled,
-          heif10Bit: current.heif10Bit,
-          portraitMode: isPortrait,
-          apertureFStop: current.apertureFStop,
-          focusX: current.lastFocusNormalized.dx,
-          focusY: current.lastFocusNormalized.dy,
-          look: current.nativeLook,
-          toneId: toneId,
-          intensity: current.intensity,
-        );
-      }
+      final gradedBytes = await repository.nativeCameraCapturePhoto(
+        <String, dynamic>{
+          'matrix': current.captureColorMatrix,
+          'toneId': toneId,
+          'intensity': current.intensity,
+          if (current.nativeLook != null) 'look': current.nativeLook,
+          'anamorphic': current.isAnamorphicRatio,
+          'anamorphicCrop': current.anamorphicCrop,
+          'frameAspectRatio': current.effectiveFrameAspectRatio,
+          'desqueeze': current.anamorphicDesqueeze,
+          'appleLogInput': current.appleLogEnabled,
+          'processZero': current.processZeroEnabled,
+          'saveDngRaw': current.saveDngRaw,
+          'nightStack': current.nightStack,
+          'heif10Bit': current.heif10Bit,
+          'hiRes48MP': current.hiRes48MP,
+          'portraitMode': isPortrait,
+          'apertureFStop': current.apertureFStop,
+          'focusX': current.lastFocusNormalized.dx,
+          'focusY': current.lastFocusNormalized.dy,
+          'quality': 0.96,
+        },
+      );
 
       String? warning;
       String? storedPath;
@@ -1898,53 +1669,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   // ------------------------------------------------------- video recording
 
-  /// Forces the platform controller back into a clean, non-recording state.
-  ///
-  /// When iOS aborts a recording on its own (incoming call, app sent to the
-  /// background, memory pressure) it never tells Dart, so
-  /// `controller.value.isRecordingVideo` stays `true` forever. From then on
-  /// every `startVideoRecording()` throws "A video recording is already
-  /// started." and every `stopVideoRecording()` throws "Video is not
-  /// recording!". That is the "cannot stop the video + error" dead end, so we
-  /// clear the stale flag — rebuilding the controller when it is stuck.
-  Future<CameraController?> _ensureControllerIdle() async {
-    var cam = _controller;
-    if (cam == null || !cam.value.isInitialized) return cam;
-    if (!cam.value.isRecordingVideo) return cam;
-
-    try {
-      await cam.stopVideoRecording();
-    } catch (_) {
-      // Already finalised by the system; nothing to salvage.
-    }
-    if (!cam.value.isRecordingVideo) return cam;
-
-    final description = _activeCamera;
-    final current = state.valueOrNull;
-    if (description == null || current == null) return null;
-
-    try {
-      await _initializeCameraController(
-        description,
-        resolution: current.resolution,
-        frameRate: current.frameRate,
-        mode: current.captureMode,
-      );
-      cam = _controller;
-      return cam;
-    } catch (_) {
-      return null;
-    }
-  }
-
   Future<void> startVideo24fpsRecording() async {
     final current = state.valueOrNull;
     if (current == null || current.isRecordingVideo || _isSwitchingProfile) {
       return;
     }
 
-    // ProRes writes a 10-bit 4:2:2 `.mov` master through the native recorder.
-    // The plugin's own writer is bypassed entirely for that take.
+    // ProRes writes a 10-bit 4:2:2 `.mov` master through the native ProRes
+    // recorder (non-Cinematic mode).
     if (current.proResEnabled &&
         current.proCapabilities.supportsProRes &&
         current.captureMode != CinemaCaptureMode.cinematicVideo) {
@@ -1952,43 +1684,22 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       return;
     }
 
-    // 10-Bit Display P3 HEVC Direct LUT Recording (always used in Cinematic
-    // Video mode so live Bokeh + Rack Focus + 3D LUT bake directly to disk!).
-    if (current.directLutRecordingEnabled ||
-        current.captureMode == CinemaCaptureMode.cinematicVideo) {
-      try {
-        final repo = ref.read(cinemaCameraRepositoryProvider);
-        _directLutRecording = true;
-        await repo.startDirectLutRecording(<String, dynamic>{
-          ..._liveMetalConfigFor(current),
-          'fps': current.frameRate.value,
-          'bitrate': _videoBitrateFor(current.resolution, current.frameRate),
-        });
-        if (_disposed) return;
-        state = AsyncData(
-          current.copyWith(
-            isRecordingVideo: true,
-            isProcessingVideo: false,
-            recordingDuration: Duration.zero,
-          ),
-        );
-        _startRecordingClock();
-        return;
-      } catch (_) {
-        _directLutRecording = false;
-        // Fall back seamlessly to standard plugin recording.
-      }
-    }
-
-    final cam = await _ensureControllerIdle();
-    if (cam == null || !cam.value.isInitialized) {
-      throw Exception('Kamera belum siap. Tutup lalu buka lagi aplikasinya.');
-    }
-
+    // Single-session Native Swift HEVC Display P3 + AAC 192kbps recorder!
+    // Video + Audio + Hardware LiDAR Depth share ONE AVCaptureSession, so
+    // recordings never drop or cut off at 0.125s and save instantaneously!
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    _nativeRecording = true;
     try {
-      await cam.prepareForVideoRecording();
-      await cam.startVideoRecording();
+      await repo.nativeCameraStartVideo(<String, dynamic>{
+        'fps': current.frameRate.value,
+        'bitrate': _videoBitrateFor(current.resolution, current.frameRate),
+        'burnLut': current.directLutRecordingEnabled ||
+            current.captureMode == CinemaCaptureMode.cinematicVideo ||
+            current.hasRenderableLook,
+        'grading': _liveMetalConfigFor(current),
+      });
     } catch (error) {
+      _nativeRecording = false;
       _recordingTimer?.cancel();
       _writeRecordingStopped();
       rethrow;
@@ -2006,16 +1717,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   }
 
   /// Starts the native ProRes take and marks the UI as recording.
-  ///
-  /// Bubbles the [PlatformException] up so the shutter handler can toast the
-  /// native reason (unsupported format, session not ready) instead of silently
-  /// falling back to H.264 while the ProRes switch is on.
   Future<void> _startProResTake(CinemaCameraState current) async {
     final frame = _proResFrameSize(current.resolution);
 
-    // Claim the take before awaiting: iOS can finish the recording on its own
-    // (call, background) before this call returns, and that path reads the flag
-    // to decide whether the file has been persisted already.
     _proResRecording = true;
 
     try {
@@ -2032,8 +1736,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       rethrow;
     }
 
-    // A native interruption may have already finalised the take while this call
-    // was in flight; `_handleProResFinished` cleared the flag for us.
     if (_disposed || !_proResRecording) return;
 
     final latest = state.valueOrNull ?? current;
@@ -2062,24 +1764,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     });
   }
 
-  /// Stops the recording and always leaves the UI in a usable state.
-  ///
-  /// Returns `null` only when no usable file exists (the system already
-  /// dropped the recording); otherwise the returned path is always playable,
-  /// with [VideoStopResult.warning] set when the LUT export or the Photos
-  /// upload failed.
+  /// Stops the active recording cleanly and indexes/saves the file.
   Future<VideoStopResult?> stopVideo24fpsRecording() async {
     final current = state.valueOrNull;
-    final cam = _controller;
     if (current == null) return null;
 
     final isProResTake = _proResRecording;
-    final isDirectLutTake = _directLutRecording;
-    final pluginRecording = cam?.value.isRecordingVideo ?? false;
-    if (!current.isRecordingVideo &&
-        !isProResTake &&
-        !isDirectLutTake &&
-        !pluginRecording) {
+    final isNativeTake = _nativeRecording;
+    if (!current.isRecordingVideo && !isProResTake && !isNativeTake) {
       return null;
     }
 
@@ -2093,88 +1785,19 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           recordingDuration: Duration.zero,
           videoProcessingLabel: bakingProRes
               ? 'Baking ProRes...'
-              : isDirectLutTake
-                  ? 'Saving HEVC...'
-                  : isProResTake
-                      ? 'Finalizing ProRes...'
-                      : 'Grading video...',
+              : isProResTake
+                  ? 'Finalizing ProRes...'
+                  : 'Saving HEVC...',
           clearVideoProcessingProgress: true,
         ),
       );
     }
 
     if (isProResTake) return _finishProResTake(current);
-    if (isDirectLutTake) return _finishDirectLutTake(current);
-
-    String? rawPath;
-    try {
-      if (cam != null && cam.value.isInitialized) {
-        final rawVideo = await cam.stopVideoRecording();
-        rawPath = rawVideo.path;
-      }
-    } catch (_) {
-      // The system already closed the file; handled below.
-    }
-
-    if (rawPath == null) {
-      _writeRecordingStopped();
-      return null;
-    }
-
-    final repository = ref.read(cinemaCameraRepositoryProvider);
-    var finalPath = rawPath;
-    String? warning;
-
-    try {
-      finalPath = await repository.renderGradedVideo(
-        rawVideoPath: rawPath,
-        colorMatrix: current.captureColorMatrix,
-        applyAnamorphicBars: current.isAnamorphicRatio,
-        anamorphicCrop: current.anamorphicCrop,
-        frameAspectRatio: current.effectiveFrameAspectRatio,
-        desqueeze: current.anamorphicDesqueeze,
-        appleLogInput: current.appleLogEnabled,
-        fps: current.frameRate.value,
-        look: current.nativeLook,
-        toneId: current.selectedTone.isCustom ? null : current.selectedTone.id,
-        intensity: current.intensity,
-      );
-    } catch (error) {
-      finalPath = rawPath;
-      warning = 'LUT gagal diterapkan: ${_describeError(error)}';
-    }
-
-    try {
-      await repository.storeVideo(
-        sourcePath: finalPath,
-        toneId: current.selectedTone.id,
-        toneName: current.selectedTone.name,
-        intensity: current.intensity,
-        isAnamorphic: current.isAnamorphicRatio,
-      );
-    } catch (error) {
-      final message = 'Video tidak masuk galeri CineLens: '
-          '${_describeError(error)}';
-      warning = warning == null ? message : '$warning · $message';
-    }
-
-    try {
-      await repository.saveVideoToGallery(finalPath);
-    } catch (error) {
-      warning = warning == null
-          ? 'Tidak tersimpan ke Apple Photos: ${_describeError(error)}'
-          : '$warning · tidak tersimpan ke Apple Photos';
-    }
-
-    _writeRecordingStopped();
-    return VideoStopResult(path: finalPath, warning: warning);
+    return _finishNativeVideoTake(current);
   }
 
   /// Stops the native ProRes take and indexes the ungraded `.mov` master.
-  ///
-  /// The master stays ungraded unless the user explicitly turns on
-  /// "Sertakan look di ProRes": a flat master survives several grades, so the
-  /// default only shows the tone in the live preview.
   Future<VideoStopResult?> _finishProResTake(CinemaCameraState current) async {
     _proResRecording = false;
 
@@ -2249,12 +1872,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     );
   }
 
-  /// A recording cannot survive the app leaving the foreground: iOS tears the
-  /// capture session down without notifying Dart. Finalise what is on disk so
-  /// the shutter never stays locked on "REC".
-  ///
-  /// `inactive` is deliberately ignored — on iOS it also fires for a Control
-  /// Center swipe or a system alert, where the recording keeps running.
   @override
   void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
     switch (lifecycleState) {
@@ -2262,7 +1879,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
         unawaited(_abandonInterruptedRecording());
+        unawaited(ref.read(cinemaCameraRepositoryProvider).nativeCameraPause());
       case AppLifecycleState.resumed:
+        unawaited(
+          ref.read(cinemaCameraRepositoryProvider).nativeCameraResume(),
+        );
       case AppLifecycleState.inactive:
         break;
     }
@@ -2275,8 +1896,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     _recordingTimer?.cancel();
     _writeRecordingStopped();
 
-    // A ProRes take is closed by the native recorder; stop it explicitly so
-    // the `.mov` gets finalised, then index whatever reached the disk.
     if (_proResRecording) {
       _proResRecording = false;
       try {
@@ -2286,62 +1905,37 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         if (path != null && path.isNotEmpty) {
           await _persistProResTake(path);
         }
-      } catch (_) {
-        // The recorder already finalised (and reported) the file.
-      }
-      return;
-    }
-
-    if (_directLutRecording) {
-      _directLutRecording = false;
-      try {
-        final path = await ref
-            .read(cinemaCameraRepositoryProvider)
-            .stopDirectLutRecording();
-        if (path != null && path.isNotEmpty) {
-          await _persistProResTake(path);
-        }
       } catch (_) {}
       return;
     }
 
-    final cam = _controller;
-    if (cam == null || !cam.value.isInitialized) return;
-
-    try {
-      final file = await cam.stopVideoRecording();
-      final repository = ref.read(cinemaCameraRepositoryProvider);
+    if (_nativeRecording) {
+      _nativeRecording = false;
       try {
-        await repository.storeVideo(
-          sourcePath: file.path,
-          toneId: current.selectedTone.id,
-          toneName: current.selectedTone.name,
-          intensity: current.intensity,
-          isAnamorphic: current.isAnamorphicRatio,
-        );
-      } catch (_) {
-        // The gallery index is best effort here.
-      }
-      await repository.saveVideoToGallery(file.path);
-    } catch (_) {
-      // Nothing was written, or the system already aborted the file.
+        final path = await ref
+            .read(cinemaCameraRepositoryProvider)
+            .nativeCameraStopVideo();
+        if (path.isNotEmpty) {
+          await _persistProResTake(path);
+        }
+      } catch (_) {}
     }
   }
 
-  Future<VideoStopResult?> _finishDirectLutTake(
+  Future<VideoStopResult?> _finishNativeVideoTake(
     CinemaCameraState current,
   ) async {
-    _directLutRecording = false;
+    _nativeRecording = false;
     final repository = ref.read(cinemaCameraRepositoryProvider);
-    String? path;
+    String path;
     try {
-      path = await repository.stopDirectLutRecording();
+      path = await repository.nativeCameraStopVideo();
     } catch (error) {
       _writeRecordingStopped();
       _setProError(_describeError(error));
       return null;
     }
-    if (path == null || path.isEmpty) {
+    if (path.isEmpty) {
       _writeRecordingStopped();
       return null;
     }

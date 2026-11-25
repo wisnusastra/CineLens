@@ -1279,6 +1279,134 @@ class CinemaCameraRepository {
     }
   }
 
+  // ----------------------------------------- v3.0 Native Swift Camera Engine
+
+  Future<Map<String, dynamic>> nativeCameraInit(
+    Map<String, dynamic> args,
+  ) async {
+    final raw = await _videoChannel.invokeMapMethod<Object?, Object?>(
+      'nativeCameraInit',
+      args,
+    );
+    if (raw == null) return const <String, dynamic>{};
+    return raw.map((k, v) => MapEntry(k.toString(), v));
+  }
+
+  Future<Map<String, dynamic>> nativeCameraConfigure(
+    Map<String, dynamic> args,
+  ) async {
+    final raw = await _videoChannel.invokeMapMethod<Object?, Object?>(
+      'nativeCameraConfigure',
+      args,
+    );
+    if (raw == null) return const <String, dynamic>{};
+    return raw.map((k, v) => MapEntry(k.toString(), v));
+  }
+
+  Future<void> nativeCameraSetZoom(double zoom) async {
+    try {
+      await _videoChannel.invokeMethod<bool>(
+        'nativeCameraSetZoom',
+        <String, dynamic>{'zoom': zoom},
+      );
+    } catch (_) {}
+  }
+
+  Future<void> nativeCameraSetExposureBias(double ev) async {
+    try {
+      await _videoChannel.invokeMethod<bool>(
+        'nativeCameraSetExposureBias',
+        <String, dynamic>{'ev': ev},
+      );
+    } catch (_) {}
+  }
+
+  Future<void> nativeCameraSetFlash(String mode) async {
+    try {
+      await _videoChannel.invokeMethod<bool>(
+        'nativeCameraSetFlash',
+        <String, dynamic>{'mode': mode},
+      );
+    } catch (_) {}
+  }
+
+  Future<bool> nativeCameraSetFocusPoint({
+    required double x,
+    required double y,
+    required bool focus,
+    required bool exposure,
+  }) async {
+    try {
+      return (await _videoChannel.invokeMethod<bool>(
+            'nativeCameraSetFocusPoint',
+            <String, dynamic>{
+              'x': x,
+              'y': y,
+              'focus': focus,
+              'exposure': exposure,
+            },
+          )) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> nativeCameraUpdateGrading(Map<String, dynamic> args) async {
+    try {
+      await _videoChannel.invokeMethod<bool>(
+        'nativeCameraUpdateGrading',
+        args,
+      );
+    } catch (_) {}
+  }
+
+  Future<Uint8List> nativeCameraCapturePhoto(
+    Map<String, dynamic> args,
+  ) async {
+    final bytes = await _videoChannel
+        .invokeMethod<Uint8List>('nativeCameraCapturePhoto', args)
+        .timeout(const Duration(seconds: 26));
+    if (bytes == null || bytes.isEmpty) {
+      throw Exception('Foto gagal diambil oleh mesin kamera native.');
+    }
+    return bytes;
+  }
+
+  Future<void> nativeCameraStartVideo(Map<String, dynamic> args) async {
+    await _videoChannel
+        .invokeMethod<bool>('nativeCameraStartVideo', args)
+        .timeout(const Duration(seconds: 10));
+  }
+
+  Future<String> nativeCameraStopVideo() async {
+    final path = await _videoChannel
+        .invokeMethod<String>('nativeCameraStopVideo')
+        .timeout(const Duration(seconds: 30));
+    if (path == null || path.isEmpty) {
+      throw Exception('Video tidak berhasil disimpan.');
+    }
+    return path;
+  }
+
+  Future<void> nativeCameraPause() async {
+    try {
+      await _videoChannel.invokeMethod<bool>('nativeCameraPause');
+    } catch (_) {}
+  }
+
+  Future<void> nativeCameraResume() async {
+    try {
+      await _videoChannel.invokeMethod<bool>('nativeCameraResume');
+    } catch (_) {}
+  }
+
+  Future<void> nativeCameraDispose() async {
+    try {
+      await _videoChannel.invokeMethod<bool>('nativeCameraDispose');
+    } catch (_) {}
+  }
+
   Future<void> _ensureGalleryPermission() async {
     final hasAccess = await Gal.hasAccess(toAlbum: true);
     if (!hasAccess) {

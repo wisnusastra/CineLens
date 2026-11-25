@@ -3,6 +3,7 @@ import 'package:cinelens_ios/features/cinema_camera/data/datasources/cinema_tone
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/cinema_tone.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/film_look.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/frame_format.dart';
+import 'package:cinelens_ios/features/cinema_camera/presentation/providers/cinema_camera_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -161,6 +162,19 @@ void main() {
       expect(AppStrings.id.cinematic, 'SINEMATIK');
       expect(AppStrings.en.hiRes48MP, '48MP HI-RES');
       expect(AppStrings.id.hiRes48MP, '48MP PENUH');
+    });
+
+    test('v3.0 native camera enums & OpticalLensOption work without camera plugin', () {
+      const lens = OpticalLensOption(id: 'wide#2x', label: '2×', initialZoom: 2.0);
+      expect(lens.id, 'wide#2x');
+      expect(lens.label, '2×');
+      expect(lens.initialZoom, 2.0);
+      expect(CameraLensDirection.values, hasLength(2));
+      expect(FlashMode.values, containsAll(<FlashMode>[FlashMode.off, FlashMode.auto, FlashMode.torch]));
+      expect(CinemaCaptureMode.portrait.isBokehMode, isTrue);
+      expect(CinemaCaptureMode.portrait.isPhoto, isTrue);
+      expect(CinemaCaptureMode.cinematicVideo.isBokehMode, isTrue);
+      expect(CinemaCaptureMode.cinematicVideo.isVideo, isTrue);
     });
   });
 }

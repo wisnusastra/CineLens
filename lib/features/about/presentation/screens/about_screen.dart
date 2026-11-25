@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '2.4.1 PRO';
+  static const String appVersion = '3.0.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,27 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v2.4.1 PRO',
+        version: 'v3.0.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Mesin Kamera 100% Native Swift (AVFoundation + Metal GPU 60fps), tanpa plugin kamera Flutter',
+                'Mode PORTRAIT pakai Sensor Hardware LiDAR / TripleCamera + Apple CIDepthBlurEffect asli (bokeh optik alami tanpa halo cat air)',
+                'Mode CINEMATIC Video pakai Hardware LiDAR Z-Depth real-time + Smooth Rack Focus ke objek apa pun (tanpa patah-patah)',
+                'Rekam Video + Audio dalam 1 sesi tunggal (tidak lagi terputus di 0.1 detik, simpan instan HEVC Display P3 + AAC 192kbps)',
+                'Manajemen RAM super aman (autoreleasepool + CIContext.clearCaches) — anti hang / Jetsam OOM meski foto 48MP berulang kali',
+              ]
+            : const [
+                '100% Native Swift Single-Session Camera Engine (AVFoundation + 60fps Metal GPU), completely removing the Flutter camera plugin',
+                'True Hardware LiDAR / TripleCamera PORTRAIT Photo depth via Apple CIDepthBlurEffect (natural optical falloff, zero watercolor halo)',
+                'True Hardware LiDAR Z-Depth CINEMATIC Video with smooth real-time Rack Focus on any subject and stutter-free recording',
+                'Unified single-session Video + Audio recording (fixes 0.125s cutoff, instant Display P3 HEVC + 192kbps AAC save)',
+                'Ultra-safe RAM pipeline (autoreleasepool + CIContext.clearCaches) preventing Jetsam OOM hangs across consecutive 48MP captures',
+              ],
+      ),
+      (
+        version: 'v2.4.1 PRO',
+        tag: 'DEPTH FIX',
         items: isId
             ? const [
                 'Fix Portrait Photo pakai Hardware LiDAR/Dual-Cam Depth (Apple CIDepthBlurEffect) agar bokeh alami tanpa halo cat air',

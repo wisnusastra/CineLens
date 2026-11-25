@@ -4,7 +4,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -112,12 +111,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   // ------------------------------------------------------------------ layout
 
   Widget _buildProLayout(CinemaCameraState state, CameraOptionsState options) {
-    final controller = _notifier.controller;
     final isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
 
     if (isLandscape) {
-      return _buildLandscapeStack(state, options, controller);
+      return _buildLandscapeStack(state, options);
     }
 
     return Column(
@@ -131,7 +129,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
               builder: (context, constraints) {
                 final size = Size(constraints.maxWidth, constraints.maxHeight);
                 return _buildViewfinderStack(
-                  controller: controller,
                   state: state,
                   options: options,
                   viewport: size,
@@ -150,7 +147,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   Widget _buildLandscapeStack(
     CinemaCameraState state,
     CameraOptionsState options,
-    CameraController? controller,
   ) {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -159,7 +155,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           fit: StackFit.expand,
           children: [
             _buildViewfinderStack(
-              controller: controller,
               state: state,
               options: options,
               viewport: size,
@@ -261,22 +256,19 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   // ------------------------------------------------------------- viewfinder
 
   Widget _buildViewfinderStack({
-    required CameraController? controller,
     required CinemaCameraState state,
     required CameraOptionsState options,
     required Size viewport,
     required bool isLandscape,
   }) {
     final isVideo = state.captureMode.isVideo;
-    final hasLiveMetal = state.liveMetalTextureId != null &&
-        (state.liveMetalEnabled || state.captureMode.isBokehMode);
+    final hasLiveMetal = state.isGpuGradingActive;
 
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (controller != null && controller.value.isInitialized)
+        if (state.liveMetalTextureId != null)
           _buildInteractiveFeed(
-            controller: controller,
             state: state,
             viewport: viewport,
             haptics: options.hapticFeedback,
@@ -413,16 +405,27 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   }
 
   Widget _buildInteractiveFeed({
-    required CameraController controller,
     required CinemaCameraState state,
     required Size viewport,
     required bool haptics,
     required bool isLandscape,
     required bool hasLiveMetal,
   }) {
-    final previewSize = controller.value.previewSize ?? const Size(1920, 1080);
-    final feedWidth = isLandscape ? previewSize.width : previewSize.height;
-    final feedHeight = isLandscape ? previewSize.height : previewSize.width;
+    // NativeCinemaCameraEngine reports portrait dimensions (e.g. 1080×1920).
+    final previewSize = state.previewSize;
+    final feedWidth = isLandscape ? previewSize.height : previewSize.width;
+    final feedHeight = isLandscape ? previewSize.width : previewSize.height;
+
+    final textureFeed = SizedBox.expand(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: feedWidth,
+          height: feedHeight,
+          child: Texture(textureId: state.liveMetalTextureId!),
+        ),
+      ),
+    );
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -445,29 +448,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         fit: StackFit.expand,
         children: [
           if (hasLiveMetal)
-            SizedBox.expand(
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width: feedWidth,
-                  height: feedHeight,
-                  child: Texture(textureId: state.liveMetalTextureId!),
-                ),
-              ),
-            )
+            textureFeed
           else
             ColorFiltered(
               colorFilter: ColorFilter.matrix(state.activeColorMatrix),
-              child: SizedBox.expand(
-                child: FittedBox(
-                  fit: BoxFit.cover,
-                  child: SizedBox(
-                    width: feedWidth,
-                    height: feedHeight,
-                    child: CameraPreview(controller),
-                  ),
-                ),
-              ),
+              child: textureFeed,
             ),
           if (!hasLiveMetal && !state.filmLook.isNeutral)
             IgnorePointer(
@@ -481,6 +466,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   Widget _buildActiveBadges(CinemaCameraState state, bool hasLiveMetal) {
     final chips = <String>[
       if (hasLiveMetal) 'METAL',
+      if (state.hasHardwareDepth && state.captureMode.isBokehMode) 'LiDAR',
       if (state.captureMode.isBokehMode)
         'f/${state.apertureFStop.toStringAsFixed(1)}',
       if (state.hiRes48MP && state.captureMode.isPhoto) '48MP',
@@ -1369,18 +1355,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   }
 
   Future<void> _lockOrientationForRecording() async {
-    final deviceOrientation = _notifier.controller?.value.deviceOrientation;
-    final bool lockLandscape;
-    if (deviceOrientation == DeviceOrientation.landscapeLeft ||
-        deviceOrientation == DeviceOrientation.landscapeRight) {
-      lockLandscape = true;
-    } else if (deviceOrientation == DeviceOrientation.portraitUp ||
-        deviceOrientation == DeviceOrientation.portraitDown) {
-      lockLandscape = false;
-    } else {
-      lockLandscape =
-          MediaQuery.of(context).orientation == Orientation.landscape;
-    }
+    final lockLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
     _orientationLocked = true;
     await SystemChrome.setPreferredOrientations(
       lockLandscape ? AppConstants.landscapeOnly : AppConstants.portraitOnly,
