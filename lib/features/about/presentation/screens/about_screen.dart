@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.1.0 PRO';
+  static const String appVersion = '3.1.1 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,21 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.1.0 PRO',
+        version: 'v3.1.1 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix Portrait Photo miring 90° & ketarik (apply EXIF orientation asli pada output Apple CIDepthBlurEffect)',
+                'Fix gagal rekam Cinematic & error "Recording already active" (pisah delegate LiDAR depth dari videoOutput agar 24fps & LiDAR 30fps tidak deadlock + auto-reset watchdog)',
+              ]
+            : const [
+                'Fixed Portrait Photo rotated 90° and stretched (properly applies EXIF orientation to Apple CIDepthBlurEffect output)',
+                'Fixed Cinematic Video recording failure & "Recording already active" lock by decoupling LiDAR depth delegate from videoOutput (zero 24fps-vs-30fps deadlock) + auto-reset watchdog',
+              ],
+      ),
+      (
+        version: 'v3.1.0 PRO',
+        tag: 'LiDAR & SPEED',
         items: isId
             ? const [
                 'Fix Portrait Photo anti-loncat lensa 14mm makro: kunci sensor Hardware LiDAR 24mm + autofocus plane CIDepthBlurEffect asli',

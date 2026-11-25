@@ -5303,16 +5303,39 @@ enum FilmEngine {
         let focusRect = CGRect(x: fx - 0.04, y: fy - 0.04, width: 0.08, height: 0.08)
         depthFilter.setValue(CIVector(cgRect: focusRect), forKey: "inputFocusRect")
       }
-      if let depthOut = depthFilter.outputImage {
-        let outExt = depthOut.extent
+      if var depthOut = depthFilter.outputImage {
+        // `depthBlurEffectFilter(forImageData:options:)` can ignore `.applyOrientationProperty`
+        // and return raw landscape sensor pixels (4032×3024) while `image` is upright portrait
+        // (3024×4032). Always apply EXIF orientation if aspect is inverted — NEVER squish/stretch!
+        var outExt = depthOut.extent
+        let srcPortrait = extent.height > extent.width
+        let outPortrait = outExt.height > outExt.width
+        if srcPortrait != outPortrait {
+          var exifOrient: Int32 = 6 // Default iPhone portrait rear sensor EXIF orientation
+          if let imgSrc = CGImageSourceCreateWithData(data as CFData, nil),
+             let props = CGImageSourceCopyPropertiesAtIndex(imgSrc, 0, nil) as? [CFString: Any],
+             let rawOrient = props[kCGImagePropertyOrientation] as? NSNumber {
+            exifOrient = rawOrient.int32Value
+          }
+          depthOut = depthOut.oriented(forExifOrientation: exifOrient)
+          outExt = depthOut.extent
+        }
+        if outExt.origin != extent.origin {
+          depthOut = depthOut.transformed(
+            by: CGAffineTransform(
+              translationX: extent.origin.x - outExt.origin.x,
+              y: extent.origin.y - outExt.origin.y
+            )
+          )
+          outExt = depthOut.extent
+        }
         if abs(outExt.width - extent.width) > 2 || abs(outExt.height - extent.height) > 2 {
           let sx = extent.width / max(outExt.width, 1.0)
           let sy = extent.height / max(outExt.height, 1.0)
-          return depthOut
+          depthOut = depthOut
             .transformed(by: CGAffineTransform(translationX: -outExt.origin.x, y: -outExt.origin.y))
             .transformed(by: CGAffineTransform(scaleX: sx, y: sy))
             .transformed(by: CGAffineTransform(translationX: extent.origin.x, y: extent.origin.y))
-            .cropped(to: extent)
         }
         return depthOut.cropped(to: extent)
       }
@@ -9487,7 +9510,7 @@ final class NativeCinemaCameraEngine: NSObject,
   FlutterTexture,
   AVCaptureVideoDataOutputSampleBufferDelegate,
   AVCaptureAudioDataOutputSampleBufferDelegate,
-  AVCaptureDataOutputSynchronizerDelegate {
+  AVCaptureDepthDataOutputDelegate {
 
   private weak var registry: FlutterTextureRegistry?
   private weak var channel: FlutterMethodChannel?
@@ -9502,6 +9525,7 @@ final class NativeCinemaCameraEngine: NSObject,
   private let sessionQueue = DispatchQueue(label: "cinelens.native.session", qos: .userInitiated)
   private let videoQueue = DispatchQueue(label: "cinelens.native.video", qos: .userInteractive)
   private let audioQueue = DispatchQueue(label: "cinelens.native.audio", qos: .userInitiated)
+  private let depthQueue = DispatchQueue(label: "cinelens.native.depth", qos: .userInitiated)
   private let renderQueue = DispatchQueue(label: "cinelens.native.render", qos: .userInteractive)
   private let writerQueue = DispatchQueue(label: "cinelens.native.writer", qos: .userInitiated)
   private let visionQueue = DispatchQueue(label: "cinelens.native.vision", qos: .utility)
@@ -9514,7 +9538,6 @@ final class NativeCinemaCameraEngine: NSObject,
   private let videoOutput = AVCaptureVideoDataOutput()
   private let audioOutput = AVCaptureAudioDataOutput()
   private let depthOutput = AVCaptureDepthDataOutput()
-  private var synchronizer: AVCaptureDataOutputSynchronizer?
 
   private var photoDelegate: ProcessZeroPhotoDelegate?
   private var burstDelegate: ProcessZeroBurstDelegate?
@@ -9703,7 +9726,8 @@ final class NativeCinemaCameraEngine: NSObject,
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
       if self.session.isRunning { self.session.stopRunning() }
-      self.synchronizer = nil
+      self.depthOutput.setDelegate(nil, callbackQueue: nil)
+      self.videoOutput.setSampleBufferDelegate(nil, queue: nil)
       self.stateLock.lock()
       self.latestPixelBuffer = nil
       self.latestDisparityBuffer = nil
@@ -10039,9 +10063,9 @@ final class NativeCinemaCameraEngine: NSObject,
             }
           }
           if self.session.outputs.contains(self.depthOutput) {
-            let sync = AVCaptureDataOutputSynchronizer(dataOutputs: [self.videoOutput, self.depthOutput])
-            sync.setDelegate(self, queue: self.videoQueue)
-            self.synchronizer = sync
+            // DECOUPLED independent depth delegate: videoOutput ALWAYS streams smoothly
+            // at 24/30/60fps without AVCaptureDataOutputSynchronizer 24fps-vs-30fps deadlocks!
+            self.depthOutput.setDelegate(self, callbackQueue: self.depthQueue)
             depthSynced = true
           }
         } else if self.session.canSetSessionPreset(.hd1920x1080) {
@@ -10050,12 +10074,13 @@ final class NativeCinemaCameraEngine: NSObject,
       }
 
       if !depthSynced {
-        self.synchronizer = nil
+        self.depthOutput.setDelegate(nil, callbackQueue: nil)
         if self.session.outputs.contains(self.depthOutput) {
           self.session.removeOutput(self.depthOutput)
         }
-        self.videoOutput.setSampleBufferDelegate(self, queue: self.videoQueue)
       }
+      // Video output delegate is ALWAYS directly connected (never blocked by depth sync!).
+      self.videoOutput.setSampleBufferDelegate(self, queue: self.videoQueue)
 
       self.session.commitConfiguration()
 
@@ -10140,6 +10165,16 @@ final class NativeCinemaCameraEngine: NSObject,
 
       self.stateLock.lock()
       self.cinematicActive = isCinematic
+      if self.isRecording && self.recordWriter == nil {
+        self.isRecording = false
+        let staleCb = self.recordStartResult
+        self.recordStartResult = nil
+        if let cb = staleCb {
+          DispatchQueue.main.async {
+            cb(FlutterError(code: "cancelled", message: "Session reconfigured.", details: nil))
+          }
+        }
+      }
       if !isCinematic {
         self.latestDisparityBuffer = nil
         self.latestVisionMatte = nil
@@ -10674,11 +10709,19 @@ final class NativeCinemaCameraEngine: NSObject,
     let burnLut = (args["burnLut"] as? Bool) ?? true
 
     stateLock.lock()
-    if isRecording {
+    if isRecording && recordWriter != nil {
       stateLock.unlock()
       result(FlutterError(code: "busy", message: "Recording already active.", details: nil))
       return
     }
+    // Self-heal any stale unstarted recording state instead of locking permanently.
+    if let staleCb = recordStartResult {
+      recordStartResult = nil
+      DispatchQueue.main.async {
+        staleCb(FlutterError(code: "cancelled", message: "Superseded.", details: nil))
+      }
+    }
+    let done = ReplyOnce(result)
     recordFps = max(fps, 1)
     recordBitrate = max(bitrate, 12_000_000)
     burnLutOnRecord = burnLut
@@ -10690,10 +10733,29 @@ final class NativeCinemaCameraEngine: NSObject,
     recordAudioInput = nil
     recordStartPTS = nil
     recordSize = (0, 0)
-    recordStartResult = result
+    recordStartResult = { value in done.send(value) }
     isRecording = true
     isWritingFrame = false
     stateLock.unlock()
+
+    // Safety watchdog: never leave `isRecording = true` stuck if camera frames fail to arrive.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+      guard let self = self else { return }
+      self.stateLock.lock()
+      let stuck = self.isRecording && self.recordWriter == nil
+      if stuck {
+        self.isRecording = false
+        self.recordStartResult = nil
+      }
+      self.stateLock.unlock()
+      if stuck {
+        done.send(FlutterError(
+          code: "no_frames",
+          message: "Kamera belum mengirim frame video. Coba ulangi tekan rekam.",
+          details: nil
+        ))
+      }
+    }
   }
 
   func stopVideoRecording(result: @escaping FlutterResult) {
@@ -10744,25 +10806,19 @@ final class NativeCinemaCameraEngine: NSObject,
     }
   }
 
-  // MARK: - SampleBuffer & Synchronized Depth Delegates
+  // MARK: - Decoupled SampleBuffer & Hardware LiDAR Depth Delegates
 
-  func dataOutputSynchronizer(
-    _ synchronizer: AVCaptureDataOutputSynchronizer,
-    didOutput synchronizedDataCollection: AVCaptureSynchronizedDataCollection
+  func depthDataOutput(
+    _ output: AVCaptureDepthDataOutput,
+    didOutput depthData: AVDepthData,
+    timestamp: CMTime,
+    connection: AVCaptureConnection
   ) {
-    guard let syncVideo = synchronizedDataCollection.synchronizedData(for: videoOutput)
-            as? AVCaptureSynchronizedSampleBufferData,
-          !syncVideo.sampleBufferWasDropped else { return }
-
-    var disparityBuf: CVPixelBuffer? = nil
-    if let syncDepth = synchronizedDataCollection.synchronizedData(for: depthOutput)
-         as? AVCaptureSynchronizedDepthData,
-       !syncDepth.depthDataWasDropped {
-      let converted = syncDepth.depthData.converting(toDepthDataType: kCVPixelFormatType_DisparityFloat32)
-      disparityBuf = converted.depthDataMap
-    }
-
-    handleVideoSample(syncVideo.sampleBuffer, hardwareDisparity: disparityBuf)
+    let converted = depthData.converting(toDepthDataType: kCVPixelFormatType_DisparityFloat32)
+    let map = converted.depthDataMap
+    stateLock.lock()
+    latestDisparityBuffer = map
+    stateLock.unlock()
   }
 
   func captureOutput(
@@ -10771,7 +10827,10 @@ final class NativeCinemaCameraEngine: NSObject,
     from connection: AVCaptureConnection
   ) {
     if output === videoOutput {
-      handleVideoSample(sampleBuffer, hardwareDisparity: nil)
+      stateLock.lock()
+      let latestDisp = cinematicActive ? latestDisparityBuffer : nil
+      stateLock.unlock()
+      handleVideoSample(sampleBuffer, hardwareDisparity: latestDisp)
     } else if output === audioOutput {
       handleAudioSample(sampleBuffer)
     }
