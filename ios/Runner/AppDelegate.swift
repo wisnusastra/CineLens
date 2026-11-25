@@ -10065,13 +10065,12 @@ final class NativeCinemaCameraEngine: NSObject,
       do {
         try targetDevice.lockForConfiguration()
         // Prevent TripleCamera/DualWide from silently hijacking to 14mm UltraWide macro on close subjects!
-        if (isPortrait || isCinematic) && targetDevice.isVirtualDevice {
-          if targetDevice.isPrimaryConstituentDeviceSwitchingBehaviorSupported(.restricted) {
-            targetDevice.setPrimaryConstituentDeviceSwitchingBehavior(
-              .restricted,
-              restrictedSwitchingBehaviorConditions: []
-            )
-          }
+        if (isPortrait || isCinematic) &&
+            (targetDevice.deviceType == .builtInTripleCamera || targetDevice.deviceType == .builtInDualWideCamera) {
+          targetDevice.setPrimaryConstituentDeviceSwitchingBehavior(
+            .restricted,
+            restrictedSwitchingBehaviorConditions: []
+          )
         }
         if targetDevice.isVideoHDREnabled {
           targetDevice.automaticallyAdjustsVideoHDREnabled = false
