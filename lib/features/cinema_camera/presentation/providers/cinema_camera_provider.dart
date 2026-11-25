@@ -116,14 +116,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final frameFormat = CameraFrameFormat.fromName(proImaging.frameFormat);
 
     final initialMatrix = selectedTone.blendedMatrix(savedPrefs.intensity);
-    final initialLook = <String, dynamic>{
-      ...filmLook.toNative(),
-      if (selectedTone.lutCubePath != null &&
-          selectedTone.lutCubePath!.isNotEmpty) ...<String, dynamic>{
-        'lutCubePath': selectedTone.lutCubePath,
-        'lutIntensity': savedPrefs.intensity,
-      },
-    };
+    final initialLook = filmLook.toNative(
+      lutPath: selectedTone.isLutTone ? selectedTone.lutPath : null,
+      lutSize: selectedTone.isLutTone ? selectedTone.lutSize : null,
+      mix: selectedTone.isLutTone ? savedPrefs.intensity.clamp(0.0, 1.0) : 0,
+    );
 
     // Boot our 100% Native Swift Single-Session Cinema Camera Engine.
     final initMap = await repository.nativeCameraInit(<String, dynamic>{
@@ -1610,7 +1607,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           'matrix': current.captureColorMatrix,
           'toneId': toneId,
           'intensity': current.intensity,
-          if (current.nativeLook != null) 'look': current.nativeLook,
+          'look': current.nativeLook,
           'anamorphic': current.isAnamorphicRatio,
           'anamorphicCrop': current.anamorphicCrop,
           'frameAspectRatio': current.effectiveFrameAspectRatio,
