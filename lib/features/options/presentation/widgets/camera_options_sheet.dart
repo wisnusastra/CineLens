@@ -345,6 +345,14 @@ class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
               active: state.heif10Bit,
               onTap: () => notifier.setHeif10Bit(!state.heif10Bit),
             ),
+            if (caps.supports48MP || state.hiRes48MP)
+              _SwitchCardData(
+                title: s.hiRes48MP,
+                subtitle: s.hiRes48MPSub,
+                active: state.hiRes48MP,
+                enabled: !state.isRecordingVideo,
+                onTap: () => notifier.setHiRes48MP(!state.hiRes48MP),
+              ),
             _SwitchCardData(
               title: s.hlMetering,
               subtitle: s.hlMeteringSub,

@@ -6,20 +6,38 @@ import '../../domain/entities/frame_format.dart';
 import '../../domain/entities/pro_capture_capabilities.dart';
 import '../../domain/services/color_matrix_builder.dart';
 
-enum CinemaCaptureMode { photo, video24fps }
+enum CinemaCaptureMode {
+  portrait,
+  photo,
+  video24fps,
+  cinematicVideo;
 
-/// One physical back camera lens discovered on the iPhone (Ultra-Wide, Wide,
-/// Telephoto). Switching optical lenses keeps full sensor sharpness & real
-/// optical compression instead of blurry digital crop.
+  bool get isVideo =>
+      this == CinemaCaptureMode.video24fps ||
+      this == CinemaCaptureMode.cinematicVideo;
+
+  bool get isPhoto =>
+      this == CinemaCaptureMode.photo || this == CinemaCaptureMode.portrait;
+
+  bool get isBokehMode =>
+      this == CinemaCaptureMode.portrait ||
+      this == CinemaCaptureMode.cinematicVideo;
+}
+
+/// One back camera focal-length choice (`0.5×`, `1×`, `2×` 48mm optical crop,
+/// `TEL`). Switching optical lenses keeps full sensor sharpness & real optical
+/// compression instead of blurry digital crop.
 class OpticalLensOption {
   final int index;
   final String cameraName;
   final String label;
+  final double initialZoom;
 
   const OpticalLensOption({
     required this.index,
     required this.cameraName,
     required this.label,
+    this.initialZoom = 1.0,
   });
 }
 
@@ -163,6 +181,10 @@ class CinemaCameraState {
   final bool saveDngRaw;
   final bool nightStack;
   final bool heif10Bit;
+  final bool hiRes48MP;
+  final double apertureFStop;
+  final bool cinematicRackedToBg;
+  final Offset lastFocusNormalized;
   final bool volumeShutterEnabled;
   final int timerSeconds;
   final int hardwareShutterTick;
@@ -242,6 +264,10 @@ class CinemaCameraState {
     this.saveDngRaw = false,
     this.nightStack = false,
     this.heif10Bit = false,
+    this.hiRes48MP = false,
+    this.apertureFStop = 2.2,
+    this.cinematicRackedToBg = false,
+    this.lastFocusNormalized = const Offset(0.5, 0.5),
     this.volumeShutterEnabled = true,
     this.timerSeconds = 0,
     this.hardwareShutterTick = 0,
@@ -396,6 +422,10 @@ class CinemaCameraState {
     bool? saveDngRaw,
     bool? nightStack,
     bool? heif10Bit,
+    bool? hiRes48MP,
+    double? apertureFStop,
+    bool? cinematicRackedToBg,
+    Offset? lastFocusNormalized,
     bool? volumeShutterEnabled,
     int? timerSeconds,
     int? hardwareShutterTick,
@@ -474,6 +504,10 @@ class CinemaCameraState {
       saveDngRaw: saveDngRaw ?? this.saveDngRaw,
       nightStack: nightStack ?? this.nightStack,
       heif10Bit: heif10Bit ?? this.heif10Bit,
+      hiRes48MP: hiRes48MP ?? this.hiRes48MP,
+      apertureFStop: apertureFStop ?? this.apertureFStop,
+      cinematicRackedToBg: cinematicRackedToBg ?? this.cinematicRackedToBg,
+      lastFocusNormalized: lastFocusNormalized ?? this.lastFocusNormalized,
       volumeShutterEnabled: volumeShutterEnabled ?? this.volumeShutterEnabled,
       timerSeconds: timerSeconds ?? this.timerSeconds,
       hardwareShutterTick: hardwareShutterTick ?? this.hardwareShutterTick,

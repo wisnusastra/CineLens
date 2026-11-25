@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '2.3.0 PRO';
+  static const String appVersion = '2.4.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,27 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v2.3.0 PRO',
+        version: 'v2.4.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Deep Shadow jauh lebih bersih (0% grain di hitam pekat + Shadow-Only Chroma NR)',
+                'Auto-Defringe optik & HEIF 10-Bit P3 efisien (~4–5 MB, kualitas 10-bit tetap penuh)',
+                'Mode 48MP HI-RES (bypass Quad-Bayer / ProRAW 48MP) & tombol lensa 2× (48mm crop murni)',
+                'Mode PORTRAIT (Foto Bokeh Optik f/1.4–f/16 via Vision AI + Film LUT & 10-Bit P3)',
+                'Mode CINEMATIC (Video Bokeh Real-Time f/1.4–f/16 + Smooth Rack Focus + Direct 10-Bit P3 HEVC)',
+              ]
+            : const [
+                'Cleaner deep shadows (0% ink-black grain + Shadow-Only Chroma Denoise)',
+                'Optical micro-defringe & efficient 10-Bit Display P3 HEIF (~4–5 MB master)',
+                '48MP HI-RES sensor bypass (ProRAW / Quad-Bayer 48MP) & 2× (48mm lossless crop) lens pill',
+                'PORTRAIT Photo Mode (f/1.4–f/16 Optical Disc Bokeh via Vision Neural Engine + Film LUT)',
+                'CINEMATIC Video Mode (Real-Time f/1.4–f/16 Bokeh + Smooth Rack Focus + 10-Bit P3 HEVC)',
+              ],
+      ),
+      (
+        version: 'v2.3.0 PRO',
+        tag: 'OUTPUT & AI',
         items: isId
             ? const [
                 'Fix Live Metal LUT layar hitam saat zoom 2× / pindah lensa',

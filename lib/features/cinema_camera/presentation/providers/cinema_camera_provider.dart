@@ -187,6 +187,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       saveDngRaw: proImaging.saveDngRaw,
       nightStack: proImaging.nightStack,
       heif10Bit: proImaging.heif10Bit,
+      hiRes48MP: proImaging.hiRes48MP,
+      apertureFStop: proImaging.apertureFStop,
       volumeShutterEnabled: proImaging.volumeShutter,
       timerSeconds: proImaging.timerSeconds,
       highlightMeteringEnabled: proImaging.highlightMetering,
@@ -246,11 +248,27 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         ),
       );
     }
-    // Order cleanly: 0.5× -> 1× -> TEL
+
+    // Add 2× (48mm optical-quality sensor crop on 48MP main wide camera like
+    // iPhone 14 Pro Max / 15 Pro / 16 Pro) right after 1×.
+    final wideLens = options.where((o) => o.label == '1×').firstOrNull;
+    if (wideLens != null && !options.any((o) => o.label == '2×')) {
+      options.add(
+        OpticalLensOption(
+          index: wideLens.index,
+          cameraName: wideLens.cameraName,
+          label: '2×',
+          initialZoom: 2.0,
+        ),
+      );
+    }
+
+    // Order cleanly: 0.5× -> 1× -> 2× -> TEL
     int rank(String l) {
       if (l.startsWith('0.5')) return 0;
       if (l.startsWith('1×')) return 1;
-      return 2;
+      if (l.startsWith('2×')) return 2;
+      return 3;
     }
 
     options.sort((a, b) => rank(a.label).compareTo(rank(b.label)));
@@ -335,6 +353,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       'liveScope': s.liveScopeEnabled,
       'frameAspectRatio': s.effectiveFrameAspectRatio,
       'anamorphicCrop': s.anamorphicCrop,
+      'cinematicEnabled': s.captureMode.isBokehMode,
+      'apertureFStop': s.apertureFStop,
+      'rackToBackground': s.cinematicRackedToBg,
     };
   }
 
@@ -732,6 +753,41 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     unawaited(ref.read(cinemaCameraRepositoryProvider).saveHeif10Bit(enabled));
   }
 
+  void setHiRes48MP(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(hiRes48MP: enabled));
+    unawaited(ref.read(cinemaCameraRepositoryProvider).saveHiRes48MP(enabled));
+  }
+
+  void setApertureFStop(double fStop) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final clamped = fStop.clamp(1.4, 16.0);
+    final next = current.copyWith(apertureFStop: clamped);
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveApertureFStop(clamped),
+    );
+  }
+
+  Future<void> toggleCinematicRackFocus() async {
+    final current = state.valueOrNull;
+    if (current == null || !current.captureMode.isBokehMode) return;
+    final targetBg = !current.cinematicRackedToBg;
+    final racked = await ref
+        .read(cinemaCameraRepositoryProvider)
+        .triggerCinematicRackFocus(
+          x: current.lastFocusNormalized.dx,
+          y: current.lastFocusNormalized.dy,
+          rackToBackground: targetBg,
+        );
+    if (_disposed) return;
+    final latest = state.valueOrNull ?? current;
+    state = AsyncData(latest.copyWith(cinematicRackedToBg: racked));
+  }
+
   void setVolumeShutterEnabled(bool enabled) {
     final current = state.valueOrNull;
     if (current == null) return;
@@ -853,8 +909,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     unawaited(
       repo.setDopTelemetry(
         horizon: next.horizonLevelEnabled,
-        audio: next.audioMeterEnabled &&
-            next.captureMode == CinemaCaptureMode.video24fps,
+        audio: next.audioMeterEnabled && next.captureMode.isVideo,
       ),
     );
   }
@@ -985,6 +1040,27 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (option.index < 0 || option.index >= backCameras.length) return;
     final targetCamera = backCameras[option.index];
 
+    // Fast path: switching between 1× (24mm) and 2× (48mm optical sensor crop)
+    // on the same physical 48MP wide sensor requires ZERO controller rebuild!
+    if (current.lensDirection == CameraLensDirection.back &&
+        _activeCamera?.name == targetCamera.name &&
+        _controller != null &&
+        _controller!.value.isInitialized) {
+      final targetZoom =
+          option.initialZoom.clamp(current.minZoom, current.maxZoom);
+      state = AsyncData(
+        current.copyWith(
+          activeBackLensIndex: optionIndex,
+          zoomLevel: targetZoom,
+        ),
+      );
+      _lastAppliedZoom = targetZoom;
+      try {
+        await _controller!.setZoomLevel(targetZoom);
+      } catch (_) {}
+      return;
+    }
+
     _isSwitchingProfile = true;
     try {
       final bounds = await _initializeCameraController(
@@ -994,6 +1070,15 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         mode: current.captureMode,
       );
       if (_disposed) return;
+
+      final targetZoom =
+          option.initialZoom.clamp(bounds.minZoom, bounds.maxZoom);
+      if ((targetZoom - bounds.minZoom).abs() > 0.05 && _controller != null) {
+        try {
+          await _controller!.setZoomLevel(targetZoom);
+          _lastAppliedZoom = targetZoom;
+        } catch (_) {}
+      }
 
       var nextOffset = 0.0;
       if (current.highlightMeteringEnabled &&
@@ -1015,7 +1100,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           exposureOffset: nextOffset,
           minExposure: bounds.minExposure,
           maxExposure: bounds.maxExposure,
-          zoomLevel: bounds.minZoom,
+          zoomLevel: targetZoom,
           minZoom: bounds.minZoom,
           maxZoom: bounds.maxZoom,
           clearFocusPoint: true,
@@ -1110,9 +1195,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     CaptureResolution resolution,
     CinemaCaptureMode mode,
   ) {
-    return mode == CinemaCaptureMode.photo
-        ? resolution.photoPreset
-        : resolution.videoPreset;
+    return mode.isPhoto ? resolution.photoPreset : resolution.videoPreset;
   }
 
   Future<
@@ -1138,7 +1221,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       }
     }
 
-    final isVideo = mode == CinemaCaptureMode.video24fps;
+    final isVideo = mode.isVideo;
     final newController = CameraController(
       cameraDescription,
       preset,
@@ -1203,23 +1286,24 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final nextPreset = _presetFor(nextResolution, nextMode);
 
     final needsRebuild = _controller == null ||
-        _profileMode != nextMode ||
+        (_profileMode?.isVideo ?? false) != nextMode.isVideo ||
         _profilePreset != nextPreset ||
-        (nextMode == CinemaCaptureMode.video24fps &&
-            _profileFps != nextFrameRate.value);
+        (nextMode.isVideo && _profileFps != nextFrameRate.value);
 
     _isSwitchingProfile = true;
-    state = AsyncData(
-      current.copyWith(
-        captureMode: nextMode,
-        resolution: nextResolution,
-        frameRate: nextFrameRate,
-      ),
+    final switched = current.copyWith(
+      captureMode: nextMode,
+      resolution: nextResolution,
+      frameRate: nextFrameRate,
+      cinematicRackedToBg: false,
     );
+    state = AsyncData(switched);
 
     if (!needsRebuild) {
+      _profileMode = nextMode;
       _isSwitchingProfile = false;
       await _persistCaptureSettings(nextResolution, nextFrameRate);
+      await _syncModeMetalPipeline(switched);
       return;
     }
 
@@ -1260,18 +1344,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         unawaited(
           repo.setDopTelemetry(
             horizon: synced.horizonLevelEnabled,
-            audio: synced.audioMeterEnabled &&
-                synced.captureMode == CinemaCaptureMode.video24fps,
+            audio: synced.audioMeterEnabled && synced.captureMode.isVideo,
           ),
         );
-        if (synced.liveMetalEnabled) {
-          final tid =
-              await repo.enableLiveMetalPreview(_liveMetalConfigFor(synced));
-          if (!_disposed && tid != null) {
-            final now = state.valueOrNull ?? synced;
-            state = AsyncData(now.copyWith(liveMetalTextureId: tid));
-          }
-        }
+        await _syncModeMetalPipeline(synced);
       }
     } catch (error) {
       final latest = state.valueOrNull ?? current;
@@ -1285,6 +1361,34 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       rethrow;
     } finally {
       _isSwitchingProfile = false;
+    }
+  }
+
+  /// Ensures Live Metal GPU preview is engaged whenever Portrait/Cinematic
+  /// bokeh mode (or user Live Metal / DOP overlay) is active, and updates config.
+  Future<void> _syncModeMetalPipeline(CinemaCameraState synced) async {
+    if (_disposed) return;
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    final wantsGpu = synced.liveMetalEnabled ||
+        synced.captureMode.isBokehMode ||
+        synced.focusPeakingEnabled ||
+        synced.zebraEnabled ||
+        synced.falseColorEnabled ||
+        synced.liveScopeEnabled;
+
+    if (wantsGpu) {
+      final tid =
+          await repo.enableLiveMetalPreview(_liveMetalConfigFor(synced));
+      if (!_disposed && tid != null) {
+        final now = state.valueOrNull ?? synced;
+        state = AsyncData(now.copyWith(liveMetalTextureId: tid));
+      }
+    } else if (synced.liveMetalTextureId != null) {
+      await repo.disableLiveMetalPreview();
+      if (!_disposed) {
+        final now = state.valueOrNull ?? synced;
+        state = AsyncData(now.copyWith(clearLiveMetalTexture: true));
+      }
     }
   }
 
@@ -1565,7 +1669,25 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       if (wantsExposure) await cam.setExposurePoint(normalizedPoint);
     } catch (_) {}
 
-    state = AsyncData(current.copyWith(focusPoint: screenTapPosition));
+    var rackedToBg = current.cinematicRackedToBg;
+    if (current.captureMode.isBokehMode) {
+      rackedToBg = await ref
+          .read(cinemaCameraRepositoryProvider)
+          .triggerCinematicRackFocus(
+            x: normalizedPoint.dx,
+            y: normalizedPoint.dy,
+          );
+    }
+
+    if (_disposed) return;
+    final nowState = state.valueOrNull ?? current;
+    state = AsyncData(
+      nowState.copyWith(
+        focusPoint: screenTapPosition,
+        lastFocusNormalized: normalizedPoint,
+        cinematicRackedToBg: rackedToBg,
+      ),
+    );
     _focusIndicatorTimer?.cancel();
     _focusIndicatorTimer = Timer(const Duration(milliseconds: 1400), () {
       final latest = state.valueOrNull;
@@ -1629,13 +1751,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   Future<void> _rebindLiveMetalIfNeeded() async {
     if (_disposed) return;
     final synced = state.valueOrNull;
-    if (synced == null || !synced.liveMetalEnabled) return;
-    final repo = ref.read(cinemaCameraRepositoryProvider);
-    final tid = await repo.enableLiveMetalPreview(_liveMetalConfigFor(synced));
-    if (!_disposed && tid != null) {
-      final now = state.valueOrNull ?? synced;
-      state = AsyncData(now.copyWith(liveMetalTextureId: tid));
-    }
+    if (synced == null) return;
+    await _syncModeMetalPipeline(synced);
   }
 
   Future<PhotoCaptureResult?> captureAndSavePhoto() async {
@@ -1654,9 +1771,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     try {
       final repository = ref.read(cinemaCameraRepositoryProvider);
       final toneId = current.selectedTone.isCustom ? null : current.selectedTone.id;
+      final isPortrait = current.captureMode == CinemaCaptureMode.portrait;
       Uint8List? gradedBytes;
 
-      if (current.processZeroEnabled &&
+      if ((current.processZeroEnabled || current.hiRes48MP) &&
           current.lensDirection == CameraLensDirection.back) {
         gradedBytes = await repository.captureProcessZeroPhoto(
           colorMatrix: current.captureColorMatrix,
@@ -1666,6 +1784,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           saveDngRaw: current.saveDngRaw,
           nightStack: current.nightStack,
           heif10Bit: current.heif10Bit,
+          hiRes48MP: current.hiRes48MP,
+          portraitMode: isPortrait,
+          apertureFStop: current.apertureFStop,
+          focusX: current.lastFocusNormalized.dx,
+          focusY: current.lastFocusNormalized.dy,
           desqueeze: current.anamorphicDesqueeze,
           look: current.nativeLook,
           toneId: toneId,
@@ -1685,6 +1808,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           desqueeze: current.anamorphicDesqueeze,
           appleLogInput: current.appleLogEnabled,
           heif10Bit: current.heif10Bit,
+          portraitMode: isPortrait,
+          apertureFStop: current.apertureFStop,
+          focusX: current.lastFocusNormalized.dx,
+          focusY: current.lastFocusNormalized.dy,
           look: current.nativeLook,
           toneId: toneId,
           intensity: current.intensity,
@@ -1778,13 +1905,17 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     // ProRes writes a 10-bit 4:2:2 `.mov` master through the native recorder.
     // The plugin's own writer is bypassed entirely for that take.
-    if (current.proResEnabled && current.proCapabilities.supportsProRes) {
+    if (current.proResEnabled &&
+        current.proCapabilities.supportsProRes &&
+        current.captureMode != CinemaCaptureMode.cinematicVideo) {
       await _startProResTake(current);
       return;
     }
 
-    // Tahap 2 Direct-to-Disk HEVC LUT Recording (zero post-stop wait!).
-    if (current.directLutRecordingEnabled) {
+    // 10-Bit Display P3 HEVC Direct LUT Recording (always used in Cinematic
+    // Video mode so live Bokeh + Rack Focus + 3D LUT bake directly to disk!).
+    if (current.directLutRecordingEnabled ||
+        current.captureMode == CinemaCaptureMode.cinematicVideo) {
       try {
         final repo = ref.read(cinemaCameraRepositoryProvider);
         _directLutRecording = true;

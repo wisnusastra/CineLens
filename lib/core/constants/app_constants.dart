@@ -26,6 +26,8 @@ class AppConstants {
   static const String prefNightStack = 'process_zero_night_stack_v1';
   static const String prefVolumeShutter = 'hardware_volume_shutter_v1';
   static const String prefTimerSeconds = 'camera_timer_seconds_v1';
+  static const String prefHiRes48MP = 'camera_hires_48mp_v1';
+  static const String prefApertureFStop = 'camera_aperture_fstop_v1';
 
   /// Set once the first-install opening clip has been shown. Keeping this as a
   /// versioned key means a future opening can be shown again if needed.

@@ -211,4 +211,13 @@ class AppStrings {
   String get copyEmail => _t('Copy Email', 'Salin Email');
   String get sendFeedback => _t('Send Feedback', 'Kirim Masukan');
   String get emailCopied => _t('Email copied', 'Email disalin');
+
+  // v2.4.0 48MP ProRAW, Portrait Photo & Cinematic Video Rack Focus
+  String get portrait => _t('PORTRAIT', 'POTRET');
+  String get cinematic => _t('CINEMATIC', 'SINEMATIK');
+  String get hiRes48MP => _t('48MP HI-RES', '48MP PENUH');
+  String get hiRes48MPSub => _t('Quad-Bayer / ProRAW', 'Sensor penuh 48MP');
+  String get aperture => _t('DEPTH', 'BUKAAN');
+  String get rackSubject => _t('SUBJECT', 'SUBJEK');
+  String get rackBackground => _t('BG RACK', 'FOKUS BG');
 }

@@ -15,6 +15,7 @@ class ProCaptureCapabilities {
   final double maxShutterSeconds;
   final bool supportsAppleLog;
   final bool supportsProRes;
+  final bool supports48MP;
 
   const ProCaptureCapabilities({
     required this.available,
@@ -25,6 +26,7 @@ class ProCaptureCapabilities {
     required this.maxShutterSeconds,
     required this.supportsAppleLog,
     required this.supportsProRes,
+    this.supports48MP = false,
   });
 
   /// Used before the native side has answered (and on a simulator).
@@ -37,6 +39,7 @@ class ProCaptureCapabilities {
     maxShutterSeconds: 1,
     supportsAppleLog: false,
     supportsProRes: false,
+    supports48MP: false,
   );
 
   factory ProCaptureCapabilities.fromMap(Map<Object?, Object?> map) {
@@ -58,6 +61,7 @@ class ProCaptureCapabilities {
           read('maxShutterSeconds', unavailable.maxShutterSeconds),
       supportsAppleLog: map['supportsAppleLog'] == true,
       supportsProRes: map['supportsProRes'] == true,
+      supports48MP: map['supports48MP'] == true,
     );
   }
 

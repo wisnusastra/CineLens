@@ -153,5 +153,14 @@ void main() {
       expect(restored.filmicRollOff, closeTo(0.65, 1e-6));
       expect(restored.toNative()['filmicRollOff'], closeTo(0.65, 1e-6));
     });
+
+    test('v2.4 AppStrings expose Portrait, Cinematic & 48MP labels in EN/ID', () {
+      expect(AppStrings.en.portrait, 'PORTRAIT');
+      expect(AppStrings.id.portrait, 'POTRET');
+      expect(AppStrings.en.cinematic, 'CINEMATIC');
+      expect(AppStrings.id.cinematic, 'SINEMATIK');
+      expect(AppStrings.en.hiRes48MP, '48MP HI-RES');
+      expect(AppStrings.id.hiRes48MP, '48MP PENUH');
+    });
   });
 }

@@ -304,6 +304,8 @@ class CinemaCameraRepository {
         bool saveDngRaw,
         bool nightStack,
         bool heif10Bit,
+        bool hiRes48MP,
+        double apertureFStop,
         bool volumeShutter,
         int timerSeconds,
         bool anamorphicCrop,
@@ -319,6 +321,8 @@ class CinemaCameraRepository {
       saveDngRaw: prefs.getBool(AppConstants.prefSaveDngRaw) ?? false,
       nightStack: prefs.getBool(AppConstants.prefNightStack) ?? false,
       heif10Bit: prefs.getBool(AppConstants.prefHeif10Bit) ?? false,
+      hiRes48MP: prefs.getBool(AppConstants.prefHiRes48MP) ?? false,
+      apertureFStop: prefs.getDouble(AppConstants.prefApertureFStop) ?? 2.2,
       volumeShutter: prefs.getBool(AppConstants.prefVolumeShutter) ?? true,
       timerSeconds: prefs.getInt(AppConstants.prefTimerSeconds) ?? 0,
       anamorphicCrop: prefs.getBool(AppConstants.prefAnamorphicCrop) ?? false,
@@ -336,6 +340,37 @@ class CinemaCameraRepository {
   Future<void> saveHeif10Bit(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(AppConstants.prefHeif10Bit, enabled);
+  }
+
+  Future<void> saveHiRes48MP(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefHiRes48MP, enabled);
+  }
+
+  Future<void> saveApertureFStop(double fStop) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(AppConstants.prefApertureFStop, fStop);
+  }
+
+  Future<bool> triggerCinematicRackFocus({
+    required double x,
+    required double y,
+    bool? rackToBackground,
+  }) async {
+    try {
+      return (await _videoChannel.invokeMethod<bool>(
+            'triggerCinematicRackFocus',
+            <String, dynamic>{
+              'x': x,
+              'y': y,
+              if (rackToBackground != null)
+                'rackToBackground': rackToBackground,
+            },
+          )) ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
   }
 
   Future<void> saveNightStack(bool enabled) async {
@@ -404,6 +439,11 @@ class CinemaCameraRepository {
     bool saveDngRaw = false,
     bool nightStack = false,
     bool heif10Bit = false,
+    bool hiRes48MP = false,
+    bool portraitMode = false,
+    double apertureFStop = 2.4,
+    double focusX = 0.5,
+    double focusY = 0.5,
     double desqueeze = 1.0,
     String? toneId,
     double intensity = 1.0,
@@ -422,11 +462,16 @@ class CinemaCameraRepository {
           'saveDngRaw': saveDngRaw,
           'nightStack': nightStack,
           'heif10Bit': heif10Bit,
+          'hiRes48MP': hiRes48MP,
+          'portraitMode': portraitMode,
+          'apertureFStop': apertureFStop,
+          'focusX': focusX,
+          'focusY': focusY,
           'desqueeze': desqueeze,
           'quality': 0.98,
           if (look != null) 'look': look,
         },
-      ).timeout(const Duration(seconds: 18));
+      ).timeout(const Duration(seconds: 24));
       if (graded != null && graded.isNotEmpty) return graded;
     } on MissingPluginException {
       return null;
@@ -506,6 +551,10 @@ class CinemaCameraRepository {
     double desqueeze = 1.0,
     bool appleLogInput = false,
     bool heif10Bit = false,
+    bool portraitMode = false,
+    double apertureFStop = 2.4,
+    double focusX = 0.5,
+    double focusY = 0.5,
     String? toneId,
     double intensity = 1.0,
     Map<String, dynamic>? look,
@@ -524,6 +573,10 @@ class CinemaCameraRepository {
           'desqueeze': desqueeze,
           'appleLogInput': appleLogInput,
           'heif10Bit': heif10Bit,
+          'portraitMode': portraitMode,
+          'apertureFStop': apertureFStop,
+          'focusX': focusX,
+          'focusY': focusY,
           'quality': 0.98,
           if (look != null) 'look': look,
         },
