@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '2.4.0 PRO';
+  static const String appVersion = '2.4.1 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,23 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v2.4.0 PRO',
+        version: 'v2.4.1 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix Portrait Photo pakai Hardware LiDAR/Dual-Cam Depth (Apple CIDepthBlurEffect) agar bokeh alami tanpa halo cat air',
+                'Fix Mode Cinematic Video patah-patah & hang (0.25× GPU blur, Vision .fast & async writer queue 1080p P3 HEVC)',
+                'Foto standar kembali 100% tajam tanpa blur tepi tambahan + Deep Shadow bersih 0% grain',
+              ]
+            : const [
+                'Fixed Portrait Photo to use real Hardware LiDAR/Dual-Cam Depth (Apple CIDepthBlurEffect) for natural optical falloff with zero watercolor halos',
+                'Fixed Cinematic Video stutter & freeze (fast 0.25× GPU blur, .fast Vision segmentation & non-blocking async HEVC writer)',
+                'Restored razor-sharp native Photo edge fidelity with clean 0%-grain deep shadows',
+              ],
+      ),
+      (
+        version: 'v2.4.0 PRO',
+        tag: '48MP & BOKEH',
         items: isId
             ? const [
                 'Deep Shadow jauh lebih bersih (0% grain di hitam pekat + Shadow-Only Chroma NR)',

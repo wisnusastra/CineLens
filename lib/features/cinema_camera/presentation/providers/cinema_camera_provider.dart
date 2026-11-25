@@ -353,7 +353,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       'liveScope': s.liveScopeEnabled,
       'frameAspectRatio': s.effectiveFrameAspectRatio,
       'anamorphicCrop': s.anamorphicCrop,
-      'cinematicEnabled': s.captureMode.isBokehMode,
+      'cinematicEnabled': s.captureMode == CinemaCaptureMode.cinematicVideo,
       'apertureFStop': s.apertureFStop,
       'rackToBackground': s.cinematicRackedToBg,
     };
@@ -1195,7 +1195,45 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     CaptureResolution resolution,
     CinemaCaptureMode mode,
   ) {
+    if (mode == CinemaCaptureMode.cinematicVideo) {
+      // 1080p guarantees rock-solid 24/30fps with live Vision bokeh + 3D LUT +
+      // Display P3 HEVC encoding and zero memory stalls on A16/A17/A18.
+      return ResolutionPreset.veryHigh;
+    }
     return mode.isPhoto ? resolution.photoPreset : resolution.videoPreset;
+  }
+
+  /// Picks the hardware depth-capable virtual camera (`Triple` / `DualWide` /
+  /// `Dual` / `LiDAR`) when entering Portrait Photo mode on the back camera so
+  /// iOS delivers real metric `AVDepthData` to `CIDepthBlurEffect`!
+  CameraDescription _cameraForMode(
+    CinemaCameraState current,
+    CinemaCaptureMode targetMode,
+  ) {
+    if (current.lensDirection != CameraLensDirection.back) {
+      return _activeCamera ?? _availableCameras.first;
+    }
+    final backCameras = _availableCameras
+        .where((cam) => cam.lensDirection == CameraLensDirection.back)
+        .toList();
+    if (targetMode == CinemaCaptureMode.portrait) {
+      for (final cam in backCameras) {
+        final lower = cam.name.toLowerCase();
+        if (lower.contains('triple') ||
+            lower.contains('dual') ||
+            lower.contains('lidar')) {
+          return cam;
+        }
+      }
+    }
+    if (current.backLenses.isNotEmpty) {
+      final opt = current.backLenses[
+          current.activeBackLensIndex.clamp(0, current.backLenses.length - 1)];
+      if (opt.index >= 0 && opt.index < backCameras.length) {
+        return backCameras[opt.index];
+      }
+    }
+    return _activeCamera ?? _availableCameras.first;
   }
 
   Future<
@@ -1284,8 +1322,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final nextResolution = resolution ?? current.resolution;
     final nextFrameRate = frameRate ?? current.frameRate;
     final nextPreset = _presetFor(nextResolution, nextMode);
+    final targetDescription = _cameraForMode(current, nextMode);
 
     final needsRebuild = _controller == null ||
+        _activeCamera?.name != targetDescription.name ||
         (_profileMode?.isVideo ?? false) != nextMode.isVideo ||
         _profilePreset != nextPreset ||
         (nextMode.isVideo && _profileFps != nextFrameRate.value);
@@ -1309,7 +1349,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     try {
       final bounds = await _initializeCameraController(
-        description,
+        targetDescription,
         resolution: nextResolution,
         frameRate: nextFrameRate,
         mode: nextMode,
@@ -1370,7 +1410,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (_disposed) return;
     final repo = ref.read(cinemaCameraRepositoryProvider);
     final wantsGpu = synced.liveMetalEnabled ||
-        synced.captureMode.isBokehMode ||
+        synced.captureMode == CinemaCaptureMode.cinematicVideo ||
         synced.focusPeakingEnabled ||
         synced.zebraEnabled ||
         synced.falseColorEnabled ||
@@ -1774,7 +1814,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       final isPortrait = current.captureMode == CinemaCaptureMode.portrait;
       Uint8List? gradedBytes;
 
-      if ((current.processZeroEnabled || current.hiRes48MP) &&
+      if ((current.processZeroEnabled || current.hiRes48MP || isPortrait) &&
           current.lensDirection == CameraLensDirection.back) {
         gradedBytes = await repository.captureProcessZeroPhoto(
           colorMatrix: current.captureColorMatrix,

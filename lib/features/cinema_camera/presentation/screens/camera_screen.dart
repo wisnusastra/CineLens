@@ -843,56 +843,58 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                 ),
               ),
             ),
-            const SizedBox(width: 8),
-            GestureDetector(
-              onTap: () {
-                if (haptics) HapticFeedback.selectionClick();
-                _notifier.toggleCinematicRackFocus();
-              },
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: state.cinematicRackedToBg
-                      ? AppTheme.cinemaAmber.withValues(alpha: 0.22)
-                      : Colors.black.withValues(alpha: 0.62),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
+            if (state.captureMode == CinemaCaptureMode.cinematicVideo) ...[
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () {
+                  if (haptics) HapticFeedback.selectionClick();
+                  _notifier.toggleCinematicRackFocus();
+                },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
                     color: state.cinematicRackedToBg
-                        ? AppTheme.cinemaAmber
-                        : Colors.white24,
-                    width: 0.9,
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      state.cinematicRackedToBg
-                          ? Icons.landscape_rounded
-                          : Icons.person_outline_rounded,
+                        ? AppTheme.cinemaAmber.withValues(alpha: 0.22)
+                        : Colors.black.withValues(alpha: 0.62),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
                       color: state.cinematicRackedToBg
                           ? AppTheme.cinemaAmber
-                          : Colors.white,
-                      size: 12,
+                          : Colors.white24,
+                      width: 0.9,
                     ),
-                    const SizedBox(width: 4),
-                    Text(
-                      state.cinematicRackedToBg
-                          ? s.rackBackground
-                          : s.rackSubject,
-                      style: AppTheme.monoStyle(
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        state.cinematicRackedToBg
+                            ? Icons.landscape_rounded
+                            : Icons.person_outline_rounded,
                         color: state.cinematicRackedToBg
                             ? AppTheme.cinemaAmber
                             : Colors.white,
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.w800,
+                        size: 12,
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 4),
+                      Text(
+                        state.cinematicRackedToBg
+                            ? s.rackBackground
+                            : s.rackSubject,
+                        style: AppTheme.monoStyle(
+                          color: state.cinematicRackedToBg
+                              ? AppTheme.cinemaAmber
+                              : Colors.white,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
+            ],
           ],
         ),
       ],
