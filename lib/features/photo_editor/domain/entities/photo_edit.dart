@@ -217,8 +217,11 @@ class SelectiveMask {
   final String id;
   final String name;
 
-  /// `'linear'` or `'radial'`.
+  /// `'linear'`, `'radial'`, `'ai_subject'`, or `'ai_sky'`.
   final String type;
+
+  /// Optional path to a generated Vision AI segmentation matte PNG.
+  final String? maskImagePath;
 
   /// Normalised 0…1 coordinates (UI space: top-left = 0,0, bottom-right = 1,1).
   /// For linear: start = full effect, end = zero effect.
@@ -244,6 +247,7 @@ class SelectiveMask {
     required this.id,
     required this.name,
     this.type = 'radial',
+    this.maskImagePath,
     this.startX = 0.5,
     this.startY = 0.5,
     this.endX = 0.82,
@@ -261,6 +265,7 @@ class SelectiveMask {
   });
 
   bool get isLinear => type == 'linear';
+  bool get isAiMask => maskImagePath != null && maskImagePath!.isNotEmpty;
 
   bool get isNeutral =>
       exposure.abs() < 0.001 &&
@@ -275,6 +280,7 @@ class SelectiveMask {
   SelectiveMask copyWith({
     String? name,
     String? type,
+    String? maskImagePath,
     double? startX,
     double? startY,
     double? endX,
@@ -294,6 +300,7 @@ class SelectiveMask {
       id: id,
       name: name ?? this.name,
       type: type ?? this.type,
+      maskImagePath: maskImagePath ?? this.maskImagePath,
       startX: (startX ?? this.startX).clamp(0.0, 1.0),
       startY: (startY ?? this.startY).clamp(0.0, 1.0),
       endX: (endX ?? this.endX).clamp(0.0, 1.0),
@@ -315,6 +322,8 @@ class SelectiveMask {
         'id': id,
         'name': name,
         'type': type,
+        if (maskImagePath != null && maskImagePath!.isNotEmpty)
+          'maskImagePath': maskImagePath,
         'startX': startX,
         'startY': startY,
         'endX': endX,
@@ -335,16 +344,30 @@ class SelectiveMask {
     if (raw is! Map) return null;
     final id = raw['id'];
     if (id is! String || id.isEmpty) return null;
-    final type = raw['type'] == 'linear' ? 'linear' : 'radial';
+    final rawType = raw['type'] is String ? raw['type'] as String : 'radial';
+    final type = switch (rawType) {
+      'linear' || 'radial' || 'ai_subject' || 'ai_sky' => rawType,
+      _ => 'radial',
+    };
+    final rawMaskPath = raw['maskImagePath'];
+    final maskImagePath =
+        rawMaskPath is String && rawMaskPath.isNotEmpty ? rawMaskPath : null;
     final name = raw['name'] is String && (raw['name'] as String).isNotEmpty
         ? raw['name'] as String
-        : (type == 'linear' ? 'Gradien Linear' : 'Gradien Radial');
+        : (type == 'linear'
+            ? 'Gradien Linear'
+            : type == 'ai_subject'
+                ? 'Subject AI'
+                : type == 'ai_sky'
+                    ? 'Sky / BG AI'
+                    : 'Gradien Radial');
     double coord(Object? v, double fallback) =>
         v is num ? v.toDouble().clamp(0.0, 1.0) : fallback;
     return SelectiveMask(
       id: id,
       name: name,
       type: type,
+      maskImagePath: maskImagePath,
       startX: coord(raw['startX'], 0.5),
       startY: coord(raw['startY'], type == 'linear' ? 0.15 : 0.5),
       endX: coord(raw['endX'], type == 'linear' ? 0.5 : 0.82),
@@ -482,6 +505,24 @@ class PhotoEdit {
   final double trimEnd;
   final bool normalizeAudio;
 
+  /// v2.3.0 Output Engine, Color Science & Editorial Film Borders:
+  /// - `filmicRollOff` (0..1): ACES/AgX highlight roll-off compression.
+  /// - `colorDensity` (-1..1): Subtractive film saturation density.
+  /// - `skinProtection` (0..1): Natural skin-tone vector protection.
+  /// - `heif10Bit`: Export 10-bit Display P3 HEIF master alongside gallery copy.
+  /// - `frameStyle`: `'none'`, `'leica_white'`, `'dark_matte'`, `'film_35mm'`,
+  ///   or `'polaroid'`.
+  /// - `frameExifCaption` / `frameDateStamp` / `frameCustomText`: EXIF caption &
+  ///   quartz `'YY MM DD` date stamp overlays.
+  final double filmicRollOff;
+  final double colorDensity;
+  final double skinProtection;
+  final bool heif10Bit;
+  final String frameStyle;
+  final bool frameExifCaption;
+  final bool frameDateStamp;
+  final String frameCustomText;
+
   const PhotoEdit({
     this.exposure = 0,
     this.contrast = 0,
@@ -541,6 +582,14 @@ class PhotoEdit {
     this.trimStart = 0.0,
     this.trimEnd = 1.0,
     this.normalizeAudio = false,
+    this.filmicRollOff = 0.0,
+    this.colorDensity = 0.0,
+    this.skinProtection = 0.0,
+    this.heif10Bit = false,
+    this.frameStyle = 'none',
+    this.frameExifCaption = false,
+    this.frameDateStamp = false,
+    this.frameCustomText = '',
   });
 
   static const List<HslBand> defaultHslBands = <HslBand>[
@@ -615,6 +664,14 @@ class PhotoEdit {
     double? trimStart,
     double? trimEnd,
     bool? normalizeAudio,
+    double? filmicRollOff,
+    double? colorDensity,
+    double? skinProtection,
+    bool? heif10Bit,
+    String? frameStyle,
+    bool? frameExifCaption,
+    bool? frameDateStamp,
+    String? frameCustomText,
   }) {
     final nextTurns = (rotateQuarterTurns ?? this.rotateQuarterTurns) % 4;
     final nextTrimStart = (trimStart ?? this.trimStart).clamp(0.0, 0.98);
@@ -687,6 +744,14 @@ class PhotoEdit {
       trimStart: nextTrimStart,
       trimEnd: nextTrimEnd,
       normalizeAudio: normalizeAudio ?? this.normalizeAudio,
+      filmicRollOff: (filmicRollOff ?? this.filmicRollOff).clamp(0.0, 1.0),
+      colorDensity: (colorDensity ?? this.colorDensity).clamp(-1.0, 1.0),
+      skinProtection: (skinProtection ?? this.skinProtection).clamp(0.0, 1.0),
+      heif10Bit: heif10Bit ?? this.heif10Bit,
+      frameStyle: frameStyle ?? this.frameStyle,
+      frameExifCaption: frameExifCaption ?? this.frameExifCaption,
+      frameDateStamp: frameDateStamp ?? this.frameDateStamp,
+      frameCustomText: frameCustomText ?? this.frameCustomText,
     );
   }
 
@@ -777,7 +842,13 @@ class PhotoEdit {
         inputLogProfile == 'rec709' &&
         !hasCdlChanges &&
         !hasTrimChanges &&
-        !normalizeAudio;
+        !normalizeAudio &&
+        filmicRollOff.abs() < 0.001 &&
+        colorDensity.abs() < 0.001 &&
+        skinProtection.abs() < 0.001 &&
+        !heif10Bit &&
+        frameStyle == 'none' &&
+        !frameDateStamp;
   }
 
   /// Payload understood by the native Core Image editor.
@@ -846,6 +917,14 @@ class PhotoEdit {
       'trimStart': trimStart,
       'trimEnd': trimEnd,
       'normalizeAudio': normalizeAudio,
+      'filmicRollOff': filmicRollOff,
+      'colorDensity': colorDensity,
+      'skinProtection': skinProtection,
+      'heif10Bit': heif10Bit,
+      'frameStyle': frameStyle,
+      'frameExifCaption': frameExifCaption,
+      'frameDateStamp': frameDateStamp,
+      'frameCustomText': frameCustomText,
     };
   }
 
@@ -980,6 +1059,18 @@ class PhotoEdit {
       trimStart: numOr(json['trimStart'], 0.0, 0.0, 0.98),
       trimEnd: numOr(json['trimEnd'], 1.0, 0.02, 1.0),
       normalizeAudio: json['normalizeAudio'] == true,
+      filmicRollOff: _positive(json['filmicRollOff']),
+      colorDensity: _signed(json['colorDensity']),
+      skinProtection: _positive(json['skinProtection']),
+      heif10Bit: json['heif10Bit'] == true,
+      frameStyle: json['frameStyle'] is String
+          ? json['frameStyle'] as String
+          : 'none',
+      frameExifCaption: json['frameExifCaption'] == true,
+      frameDateStamp: json['frameDateStamp'] == true,
+      frameCustomText: json['frameCustomText'] is String
+          ? json['frameCustomText'] as String
+          : '',
     );
   }
 

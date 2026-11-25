@@ -89,6 +89,21 @@ class CameraOptionsSheet extends ConsumerStatefulWidget {
 
 class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
   late int _activeTab = widget.initialTab.clamp(0, 3);
+  List<Map<String, dynamic>> _audioInputs = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAudioInputs();
+  }
+
+  Future<void> _loadAudioInputs() async {
+    final inputs =
+        await ref.read(cinemaCameraRepositoryProvider).listAudioInputs();
+    if (mounted) {
+      setState(() => _audioInputs = inputs);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -318,6 +333,19 @@ class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
               onTap: () => notifier.setSaveDngRaw(!state.saveDngRaw),
             ),
             _SwitchCardData(
+              title: s.nightStack,
+              subtitle: s.nightStackSub,
+              active: state.nightStack,
+              enabled: state.processZeroEnabled,
+              onTap: () => notifier.setNightStack(!state.nightStack),
+            ),
+            _SwitchCardData(
+              title: s.heif10Bit,
+              subtitle: s.heif10BitSub,
+              active: state.heif10Bit,
+              onTap: () => notifier.setHeif10Bit(!state.heif10Bit),
+            ),
+            _SwitchCardData(
               title: s.hlMetering,
               subtitle: s.hlMeteringSub,
               active: state.highlightMeteringEnabled,
@@ -446,6 +474,11 @@ class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
           label: s.acutance,
           value: look.acutance,
           onChanged: (v) => update(look.copyWith(acutance: v)),
+        ),
+        _CompactSliderRow(
+          label: s.filmicRollOff,
+          value: look.filmicRollOff,
+          onChanged: (v) => update(look.copyWith(filmicRollOff: v)),
         ),
         if (!look.useStockEffects) ...[
           const SizedBox(height: 4),
@@ -694,8 +727,41 @@ class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
               onTap: () => notifier
                   .setDirectLutRecordingEnabled(!state.directLutRecordingEnabled),
             ),
+            _SwitchCardData(
+              title: s.volumeShutter,
+              subtitle: s.volumeShutterSub,
+              active: state.volumeShutterEnabled,
+              onTap: () =>
+                  notifier.setVolumeShutterEnabled(!state.volumeShutterEnabled),
+            ),
           ],
         ),
+        if (_audioInputs.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          _SectionLabel(s.audioInput),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _audioInputs.map((input) {
+              final uid = (input['uid'] ?? '').toString();
+              final name = (input['name'] ?? 'Mic').toString();
+              final selected = input['selected'] == true;
+              return _PillChoice(
+                label: name,
+                selected: selected,
+                enabled: !isBusy,
+                onTap: () async {
+                  if (haptics) HapticFeedback.selectionClick();
+                  await ref
+                      .read(cinemaCameraRepositoryProvider)
+                      .selectAudioInput(uid);
+                  await _loadAudioInputs();
+                },
+              );
+            }).toList(),
+          ),
+        ],
         const SizedBox(height: 14),
         _SectionLabel(s.dopMonitors),
         const SizedBox(height: 8),

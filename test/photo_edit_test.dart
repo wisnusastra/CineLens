@@ -264,5 +264,43 @@ void main() {
       expect(restored.trimEnd, closeTo(0.85, 0.001));
       expect(restored.normalizeAudio, isTrue);
     });
+
+    test('v2.3 Output Engine, AI Mask, Film Borders & 10-Bit HEIF round-trip', () {
+      const aiMask = SelectiveMask(
+        id: 'ai_1',
+        name: 'Subject AI 1',
+        type: 'ai_subject',
+        maskImagePath: '/tmp/ai_subject_mask.png',
+        feather: 0.25,
+        exposure: 0.35,
+      );
+      final edit = PhotoEdit.neutral.copyWith(
+        filmicRollOff: 0.6,
+        colorDensity: 0.35,
+        skinProtection: 0.75,
+        heif10Bit: true,
+        frameStyle: 'film_35mm',
+        frameExifCaption: true,
+        frameDateStamp: true,
+        frameCustomText: 'KODAK PORTRA 400',
+        masks: const <SelectiveMask>[aiMask],
+      );
+
+      expect(edit.isNeutral, isFalse);
+      expect(aiMask.isAiMask, isTrue);
+
+      final restored = PhotoEdit.fromJson(edit.toJson());
+      expect(restored.filmicRollOff, closeTo(0.6, 0.001));
+      expect(restored.colorDensity, closeTo(0.35, 0.001));
+      expect(restored.skinProtection, closeTo(0.75, 0.001));
+      expect(restored.heif10Bit, isTrue);
+      expect(restored.frameStyle, 'film_35mm');
+      expect(restored.frameExifCaption, isTrue);
+      expect(restored.frameDateStamp, isTrue);
+      expect(restored.frameCustomText, 'KODAK PORTRA 400');
+      expect(restored.masks, hasLength(1));
+      expect(restored.masks.first.isAiMask, isTrue);
+      expect(restored.masks.first.maskImagePath, '/tmp/ai_subject_mask.png');
+    });
   });
 }

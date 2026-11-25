@@ -143,6 +143,15 @@ void main() {
       expect(AppStrings.id.gallery, 'GALERI');
       expect(AppStrings.en.selectedCount(3), '3 selected');
       expect(AppStrings.id.selectedCount(3), '3 dipilih');
+      expect(AppStrings.en.changelogBtn, 'View Changelog');
+      expect(AppStrings.id.changelogBtn, 'Lihat Riwayat Versi');
+    });
+
+    test('FilmLook v2.3 preserves ACES/AgX filmicRollOff in JSON & native payload', () {
+      const look = FilmLook(filmicRollOff: 0.65, shadowDepth: 0.2);
+      final restored = FilmLook.fromJson(look.toJson());
+      expect(restored.filmicRollOff, closeTo(0.65, 1e-6));
+      expect(restored.toNative()['filmicRollOff'], closeTo(0.65, 1e-6));
     });
   });
 }

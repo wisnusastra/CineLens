@@ -11,8 +11,12 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/l10n/app_strings.dart';
 import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../photo_editor/data/edit_clipboard_store.dart';
+import '../../../photo_editor/data/photo_editor_repository.dart';
+import '../../../photo_editor/domain/entities/photo_edit.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
+import '../../domain/entities/film_look.dart';
 import '../providers/cinema_camera_provider.dart';
 
 enum _GalleryFilter { all, photo, video, imported }
@@ -31,6 +35,7 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
   bool _loading = true;
   bool _importing = false;
   bool _batchBusy = false;
+  String? _batchProgressText;
 
   _GalleryFilter _filter = _GalleryFilter.all;
   bool _selectionMode = false;
@@ -238,6 +243,305 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
     });
     await _loadMedia();
     if (mounted) _snack(s.deletedCount(selected.length));
+  }
+
+  Future<void> _openBatchEditSheet() async {
+    final selected = _selectedItems;
+    if (selected.isEmpty || _batchBusy) return;
+    final s = AppStrings.of(context);
+    final presets = await EditClipboardStore.loadPresets();
+    final tones = ref.read(cinemaCameraProvider).valueOrNull?.tones ??
+        const <CinemaTone>[];
+    final clipboard = EditClipboardStore.clipboard;
+    if (!mounted) return;
+
+    final chosen = await showModalBottomSheet<
+        ({
+          String label,
+          PhotoEdit edit,
+          String toneId,
+          double toneIntensity,
+          bool stockEffects,
+          FilmLook? film,
+        })>(
+      context: context,
+      backgroundColor: AppTheme.surfaceDark,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        top: false,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(sheetCtx).size.height * 0.65,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  '${s.batchEdit.toUpperCase()} (${selected.length})',
+                  style: const TextStyle(
+                    color: AppTheme.cinemaAmber,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      if (clipboard != null)
+                        _batchChoiceTile(
+                          icon: Icons.content_paste_rounded,
+                          title: s.applyClipboard,
+                          subtitle: clipboard.toneId.toUpperCase(),
+                          accent: true,
+                          onTap: () => Navigator.of(sheetCtx).pop((
+                            label: s.applyClipboard,
+                            edit: clipboard.edit,
+                            toneId: clipboard.toneId,
+                            toneIntensity: clipboard.toneIntensity,
+                            stockEffects: clipboard.stockEffects,
+                            film: clipboard.film,
+                          )),
+                        ),
+                      for (final preset in presets)
+                        _batchChoiceTile(
+                          icon: Icons.auto_awesome_rounded,
+                          title: preset.name,
+                          subtitle: preset.toneId.toUpperCase(),
+                          onTap: () => Navigator.of(sheetCtx).pop((
+                            label: preset.name,
+                            edit: preset.edit,
+                            toneId: preset.toneId,
+                            toneIntensity: preset.toneIntensity,
+                            stockEffects: preset.stockEffects,
+                            film: null,
+                          )),
+                        ),
+                      for (final tone in tones)
+                        _batchChoiceTile(
+                          icon: Icons.movie_filter_outlined,
+                          title: tone.name,
+                          subtitle: tone.filmReference,
+                          onTap: () => Navigator.of(sheetCtx).pop((
+                            label: tone.name,
+                            edit: PhotoEdit.neutral,
+                            toneId: tone.id,
+                            toneIntensity: 1.0,
+                            stockEffects: true,
+                            film: null,
+                          )),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (chosen == null || !mounted) return;
+    await _runBatchEdit(
+      items: selected,
+      edit: chosen.edit,
+      toneId: chosen.toneId,
+      toneIntensity: chosen.toneIntensity,
+      stockEffects: chosen.stockEffects,
+      film: chosen.film,
+    );
+  }
+
+  Widget _batchChoiceTile({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+    bool accent = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: accent
+                ? AppTheme.cinemaAmber.withValues(alpha: 0.14)
+                : AppTheme.cardDark,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: accent ? AppTheme.cinemaAmber : AppTheme.hairline,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                size: 18,
+                color: accent ? AppTheme.cinemaAmber : AppTheme.textSecondary,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: accent
+                            ? AppTheme.cinemaAmber
+                            : AppTheme.textPrimary,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (subtitle.isNotEmpty)
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppTheme.textSecondary,
+                          fontSize: 10.5,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.chevron_right_rounded,
+                color: AppTheme.textSecondary,
+                size: 18,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _runBatchEdit({
+    required List<CapturedMedia> items,
+    required PhotoEdit edit,
+    required String toneId,
+    required double toneIntensity,
+    required bool stockEffects,
+    required FilmLook? film,
+  }) async {
+    final s = AppStrings.of(context);
+    final tones = ref.read(cinemaCameraProvider).valueOrNull?.tones ??
+        const <CinemaTone>[];
+    CinemaTone? matchedTone;
+    for (final t in tones) {
+      if (t.id == toneId) {
+        matchedTone = t;
+        break;
+      }
+    }
+
+    final payload = <String, dynamic>{
+      'edit': edit.toParameters(),
+      'toneId': (matchedTone != null &&
+              (matchedTone.isLutTone || matchedTone.isCustom))
+          ? null
+          : (toneId == 'standard' ? null : toneId),
+      'intensity': toneIntensity,
+      if (matchedTone != null && !matchedTone.isLutTone && matchedTone.isCustom)
+        'matrix': matchedTone.blendedMatrix(toneIntensity),
+    };
+    if (matchedTone != null && matchedTone.isLutTone) {
+      payload['look'] = (film ?? const FilmLook())
+          .copyWith(useStockEffects: false)
+          .toNative(
+            lutPath: matchedTone.lutPath,
+            lutSize: matchedTone.lutSize,
+            mix: toneIntensity,
+          );
+    } else if (!stockEffects && film != null) {
+      payload['look'] = film.copyWith(useStockEffects: false).toNative();
+    }
+
+    final editorRepo = ref.read(photoEditorRepositoryProvider);
+    final camRepo = ref.read(cinemaCameraRepositoryProvider);
+    final toneLabel = matchedTone?.name ?? 'Edited';
+    var doneCount = 0;
+
+    setState(() {
+      _batchBusy = true;
+      _batchProgressText = s.batchRendering(0, items.length);
+    });
+
+    for (var i = 0; i < items.length; i++) {
+      final item = items[i];
+      if (mounted) {
+        setState(() {
+          _batchProgressText = s.batchRendering(i + 1, items.length);
+        });
+      }
+      try {
+        if (item.isVideo) {
+          final exportedPath = await editorRepo.exportVideo(
+            path: item.path,
+            payload: payload,
+          );
+          await camRepo.storeVideo(
+            sourcePath: exportedPath,
+            toneId: toneId,
+            toneName: toneLabel,
+            intensity: toneIntensity,
+            isAnamorphic: item.isAnamorphic,
+          );
+        } else {
+          final bytes = await editorRepo.exportPhoto(
+            path: item.path,
+            payload: payload,
+          );
+          await camRepo.storePhoto(
+            jpegBytes: bytes,
+            toneId: toneId,
+            toneName: toneLabel,
+            intensity: toneIntensity,
+            isAnamorphic: item.isAnamorphic,
+          );
+        }
+        doneCount++;
+      } catch (_) {
+        // Continue remaining items if one fails.
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _batchBusy = false;
+      _batchProgressText = null;
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+    await _loadMedia();
+    if (mounted) _snack(s.batchDone(doneCount));
   }
 
   void _snack(String message) {
@@ -466,33 +770,71 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
           ),
           const Spacer(),
           if (_batchBusy)
-            const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: AppTheme.cinemaAmber,
-              ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppTheme.cinemaAmber,
+                  ),
+                ),
+                if (_batchProgressText != null) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    _batchProgressText!,
+                    style: AppTheme.monoStyle(
+                      color: AppTheme.cinemaAmber,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ],
             )
           else ...[
+            OutlinedButton.icon(
+              onPressed: count == 0 ? null : _openBatchEditSheet,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppTheme.cinemaAmber,
+                side: BorderSide(
+                  color: count == 0
+                      ? AppTheme.hairline
+                      : AppTheme.cinemaAmber.withValues(alpha: 0.7),
+                ),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              ),
+              icon: const Icon(Icons.auto_fix_high_rounded, size: 14),
+              label: Text(
+                s.batchEdit,
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
             OutlinedButton.icon(
               onPressed: count == 0 ? null : _batchSaveToPhotos,
               style: OutlinedButton.styleFrom(
                 foregroundColor: AppTheme.textPrimary,
                 side: const BorderSide(color: AppTheme.hairline),
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               ),
-              icon: const Icon(Icons.ios_share_rounded, size: 15),
+              icon: const Icon(Icons.ios_share_rounded, size: 14),
               label: Text(
                 s.save,
                 style: const TextStyle(
-                  fontSize: 11,
+                  fontSize: 10.5,
                   fontWeight: FontWeight.w700,
                 ),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
             FilledButton.icon(
               onPressed: count == 0 ? null : _confirmBatchDelete,
               style: FilledButton.styleFrom(
@@ -501,13 +843,13 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
                     AppTheme.cinemaRed.withValues(alpha: 0.25),
                 foregroundColor: Colors.white,
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
               ),
-              icon: const Icon(Icons.delete_outline_rounded, size: 16),
+              icon: const Icon(Icons.delete_outline_rounded, size: 15),
               label: Text(
                 count > 0 ? '${s.delete} ($count)' : s.delete,
                 style: const TextStyle(
-                  fontSize: 11,
+                  fontSize: 10.5,
                   fontWeight: FontWeight.w800,
                 ),
               ),
@@ -593,16 +935,7 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
           fit: StackFit.expand,
           children: [
             if (media.isVideo)
-              const ColoredBox(
-                color: Color(0xFF141418),
-                child: Center(
-                  child: Icon(
-                    Icons.play_circle_fill_rounded,
-                    color: Colors.white70,
-                    size: 32,
-                  ),
-                ),
-              )
+              _VideoPosterTile(path: media.path)
             else
               Image.file(
                 File(media.path),
@@ -715,6 +1048,112 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Fetches & caches a native video poster thumbnail + duration pill so videos
+/// in the gallery show real first-frame previews instead of grey boxes.
+class _VideoPosterTile extends ConsumerStatefulWidget {
+  final String path;
+  const _VideoPosterTile({required this.path});
+
+  @override
+  ConsumerState<_VideoPosterTile> createState() => _VideoPosterTileState();
+}
+
+class _VideoPosterTileState extends ConsumerState<_VideoPosterTile> {
+  String? _thumbPath;
+  double _durationSeconds = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadThumb();
+  }
+
+  @override
+  void didUpdateWidget(covariant _VideoPosterTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path) {
+      _thumbPath = null;
+      _durationSeconds = 0;
+      _loadThumb();
+    }
+  }
+
+  Future<void> _loadThumb() async {
+    final res = await ref
+        .read(cinemaCameraRepositoryProvider)
+        .generateVideoThumbnail(widget.path);
+    if (!mounted || res == null) return;
+    setState(() {
+      _thumbPath = res.thumbnailPath;
+      _durationSeconds = res.durationSeconds;
+    });
+  }
+
+  String _fmtDuration(double sec) {
+    final total = sec.round().clamp(0, 35999);
+    final m = (total ~/ 60).toString().padLeft(2, '0');
+    final s = (total % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final path = _thumbPath;
+    final hasFile = path != null && path.isNotEmpty && File(path).existsSync();
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (hasFile)
+          Image.file(
+            File(path),
+            fit: BoxFit.cover,
+            cacheWidth: 340,
+            errorBuilder: (_, __, ___) =>
+                const ColoredBox(color: Color(0xFF141418)),
+          )
+        else
+          const ColoredBox(color: Color(0xFF141418)),
+        Center(
+          child: Container(
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.48),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.play_arrow_rounded,
+              color: Colors.white,
+              size: 20,
+            ),
+          ),
+        ),
+        if (_durationSeconds > 0.2)
+          Positioned(
+            top: 5,
+            left: 5,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.65),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                _fmtDuration(_durationSeconds),
+                style: AppTheme.monoStyle(
+                  color: Colors.white,
+                  fontSize: 8.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

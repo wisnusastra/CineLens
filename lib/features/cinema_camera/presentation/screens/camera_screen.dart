@@ -45,6 +45,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   double _scaleStartZoom = 1.0;
   bool _isSwitchingQuality = false;
 
+  int _countdownRemaining = 0;
+  Timer? _countdownTimer;
+
   CinemaCameraNotifier get _notifier => ref.read(cinemaCameraProvider.notifier);
 
   @override
@@ -62,6 +65,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   @override
   void dispose() {
     _zoomIndicatorTimer?.cancel();
+    _countdownTimer?.cancel();
     if (_orientationLocked) {
       SystemChrome.setPreferredOrientations(
         AppConstants.supportedOrientations,
@@ -74,6 +78,22 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   Widget build(BuildContext context) {
     final asyncState = ref.watch(cinemaCameraProvider);
     final options = ref.watch(cameraOptionsProvider);
+
+    ref.listen<AsyncValue<CinemaCameraState>>(cinemaCameraProvider,
+        (prev, next) {
+      final prevTick = prev?.valueOrNull?.hardwareShutterTick ?? 0;
+      final nextState = next.valueOrNull;
+      if (nextState == null || nextState.hardwareShutterTick == prevTick) {
+        return;
+      }
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      final isVideo = nextState.captureMode == CinemaCaptureMode.video24fps;
+      if (isVideo) {
+        _handleVideoToggle(options.hapticFeedback);
+      } else {
+        _triggerPhotoWithTimer(options.hapticFeedback);
+      }
+    });
 
     return Scaffold(
       backgroundColor: AppTheme.backgroundBlack,
@@ -356,6 +376,26 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           child: _buildViewfinderBottomRow(state, options.hapticFeedback),
         ),
 
+        // Self-Timer countdown overlay
+        if (_countdownRemaining > 0)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: ColoredBox(
+                color: Colors.black.withValues(alpha: 0.25),
+                child: Center(
+                  child: Text(
+                    '$_countdownRemaining',
+                    style: AppTheme.monoStyle(
+                      color: AppTheme.cinemaAmber,
+                      fontSize: 84,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+
         // Processing overlay
         if (state.isProcessingVideo) _buildProcessingOverlay(state),
       ],
@@ -434,6 +474,12 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       if (state.processZeroEnabled &&
           state.captureMode == CinemaCaptureMode.photo)
         state.saveDngRaw ? 'RAW+DNG' : 'RAW',
+      if (state.processZeroEnabled &&
+          state.nightStack &&
+          state.captureMode == CinemaCaptureMode.photo)
+        'STACK',
+      if (state.heif10Bit && state.captureMode == CinemaCaptureMode.photo)
+        '10B',
       if (state.proResEnabled &&
           state.captureMode == CinemaCaptureMode.video24fps)
         'PRORES',
@@ -496,6 +542,15 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           onTap: () {
             if (haptics) HapticFeedback.selectionClick();
             _notifier.cycleFlashMode();
+          },
+        ),
+        const SizedBox(width: 6),
+        _GlassTextChip(
+          label: state.timerSeconds == 0 ? '⏱' : '${state.timerSeconds}s',
+          active: state.timerSeconds > 0,
+          onTap: () {
+            if (haptics) HapticFeedback.selectionClick();
+            _notifier.cycleTimerSeconds();
           },
         ),
         const Spacer(),
@@ -883,7 +938,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           ? null
           : () => isVideo
               ? _handleVideoToggle(haptics)
-              : _handlePhotoCapture(haptics),
+              : _triggerPhotoWithTimer(haptics),
       child: Container(
         width: 74,
         height: 74,
@@ -1045,6 +1100,37 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     } finally {
       if (mounted) setState(() => _isSwitchingQuality = false);
     }
+  }
+
+  void _triggerPhotoWithTimer(bool haptics) {
+    if (_countdownRemaining > 0) {
+      _countdownTimer?.cancel();
+      setState(() => _countdownRemaining = 0);
+      return;
+    }
+    final timerSeconds =
+        ref.read(cinemaCameraProvider).valueOrNull?.timerSeconds ?? 0;
+    if (timerSeconds <= 0) {
+      unawaited(_handlePhotoCapture(haptics));
+      return;
+    }
+    if (haptics) HapticFeedback.selectionClick();
+    setState(() => _countdownRemaining = timerSeconds);
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_countdownRemaining <= 1) {
+        timer.cancel();
+        setState(() => _countdownRemaining = 0);
+        unawaited(_handlePhotoCapture(haptics));
+      } else {
+        if (haptics) HapticFeedback.selectionClick();
+        setState(() => _countdownRemaining -= 1);
+      }
+    });
   }
 
   Future<void> _handlePhotoCapture(bool haptics) async {

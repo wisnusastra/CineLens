@@ -4,365 +4,443 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../../../core/l10n/app_strings.dart';
+import '../../../../core/theme/app_theme.dart';
+
 class AboutScreen extends StatelessWidget {
   const AboutScreen({super.key});
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '1.2.2';
+  static const String appVersion = '2.3.0 PRO';
 
-  void _copyEmail(BuildContext context) {
+  void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
     HapticFeedback.mediumImpact();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Email $supportEmail berhasil disalin'),
-        behavior: SnackBarBehavior.floating,
-      ),
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            '${s.emailCopied}: $supportEmail',
+            style: const TextStyle(fontSize: 12),
+          ),
+          backgroundColor: AppTheme.cardDark,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+  }
+
+  void _sendFeedback(AppStrings s) {
+    Share.share(
+      s.isId
+          ? 'Halo $developerName,\n\nMasukan untuk CineLens iOS ($appVersion):\n\n(Tulis pesan Anda)\n\nKontak: $supportEmail'
+          : 'Hi $developerName,\n\nFeedback for CineLens iOS ($appVersion):\n\n(Write your message)\n\nContact: $supportEmail',
+      subject: 'CineLens iOS $appVersion — Feedback',
     );
   }
 
-  void _sendFeedback() {
-    Share.share(
-      'Halo $developerName,\n\n'
-      'Saya ingin memberikan masukan / dukungan untuk aplikasi CineLens iOS:\n\n'
-      '(Tulis pesan Anda di sini)\n\n'
-      'Kirim ke: $supportEmail',
-      subject: 'CineLens iOS - Support & Masukan',
+  void _showChangelogSheet(BuildContext context, AppStrings s) {
+    HapticFeedback.selectionClick();
+    final isId = s.isId;
+
+    final releases = <({String version, String tag, List<String> items})>[
+      (
+        version: 'v2.3.0 PRO',
+        tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix Live Metal LUT layar hitam saat zoom 2× / pindah lensa',
+                'Ekspor Master 10-Bit Display P3 HEIF & ACES Filmic Highlight Roll-Off',
+                'Process Zero Night Stack (fusi 3× Bayer RAW 16-bit tanpa efek minyak)',
+                'Silver-Halide Grain berbasis luminansi, Color Density & Skin Protection',
+                'Offline Vision AI Smart Masking (+ Subject AI & + Sky / BG AI)',
+                'Ekspor 3D LUT (.cube 33³) dari Editor langsung ke Kamera atau Share',
+                'Bingkai Film Vintage (Leica, Dark Matte, 35mm, Polaroid) + EXIF & Tanggal',
+                'Gallery Video Poster Thumbnail, Edit Massal, Timeline Scrub & Info EXIF',
+                'Self-Timer (3s/10s), Shutter Tombol Volume/Bluetooth & Pemilih Mic Eksternal',
+              ]
+            : const [
+                'Fixed Live Metal LUT black screen when zooming 2× or switching lenses',
+                '10-Bit Display P3 HEIF export & ACES/AgX Filmic Highlight Roll-Off',
+                'Process Zero Night Stack (3× 16-bit Bayer RAW fusion, zero Smart HDR oil)',
+                'Luminance-weighted Silver-Halide Grain, Color Density & Skin Protection',
+                'Offline Vision AI Smart Masking (+ Subject AI & + Sky / BG AI)',
+                'Export 33³ .cube 3D LUT from Editor straight to Camera or Share',
+                'Vintage Film Borders (Leica, Dark Matte, 35mm, Polaroid) + EXIF & Date Stamp',
+                'Gallery Video Poster Thumbnails, Batch Edit, Live Video Scrub & EXIF Specs',
+                'Self-Timer (3s/10s), Volume/Bluetooth Remote Shutter & External Mic Picker',
+              ],
+      ),
+      (
+        version: 'v2.2.0 PRO',
+        tag: 'UI & OPENFILM',
+        items: isId
+            ? const [
+                'Rombak UI Pro Obsidian Matte × Cinema Amber & auto-bahasa OS (ID/EN)',
+                'Multi-Select Gallery (Hapus & Simpan Massal) & Rasio Frame Vintage (1:1–XPan)',
+                'Live Metal 60fps LUT Viewfinder, Direct HEVC LUT Rec & Simpan RAW DNG',
+                'Multi-Log IDT (Apple/S-Log3/D-Log M/C-Log3/F-Log2), Color Match & 3-Mode Scopes',
+                'DOP Overlays (Focus Peaking, Zebra, False Color, Horizon, Audio dB, Live Scope)',
+              ]
+            : const [
+                'Pro Obsidian Matte × Cinema Amber UI redesign with OS language detection',
+                'Gallery Multi-Select Batch Delete/Save & Vintage Frame Ratios (1:1–XPan)',
+                'Live Metal 60fps LUT Viewfinder, Direct HEVC LUT Rec & Save DNG RAW',
+                'Multi-Log IDT (Apple/S-Log3/D-Log M/C-Log3/F-Log2), Color Match & 3-Mode Scopes',
+                'DOP Overlays (Focus Peaking, Zebra, False Color, Horizon, Audio dB, Live Scope)',
+              ],
+      ),
+      (
+        version: 'v2.1.0 PRO',
+        tag: 'EDITOR & RAW',
+        items: isId
+            ? const [
+                'Process Zero Bayer RAW pipeline anti oil-painting + Optical Multi-Lens',
+                'Editor 16-bit lengkap ala Lightroom (Kurva, 8-band HSL, 3-Way Grading, Bokeh, Mask)',
+                'Undo/Redo 40 langkah, Auto Tone, Copy/Paste Edit & Simpan Preset',
+              ]
+            : const [
+                'Process Zero Bayer RAW capture pipeline + Optical Multi-Lens switcher',
+                'Full 16-bit Lightroom-class editor (Curves, 8-band HSL, 3-Way Wheels, Bokeh, Masks)',
+                '40-step Undo/Redo, Auto Tone, Copy/Paste Settings & Saved Presets',
+              ],
+      ),
+      (
+        version: 'v2.0.0 PRO',
+        tag: 'CORE ENGINE',
+        items: isId
+            ? const [
+                '18 Stok Film 33³ Core Image native + Impor LUT .cube',
+                'Kontrol manual sensor penuh (Shutter, ISO, WB Kelvin, Focus) & 180° Rule',
+                'Apple Log, ProRes 422 10-bit, dan Impor Media dari Apple Photos',
+              ]
+            : const [
+                '18 Native 33³ Core Image Film Stocks + Custom .cube LUT Import',
+                'Full manual sensor controls (Shutter, ISO, WB Kelvin, Focus) & 180° Rule',
+                'Apple Log, ProRes 422 10-bit & Apple Photos Media Import',
+              ],
+      ),
+    ];
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppTheme.surfaceDark,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        top: false,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(sheetCtx).size.height * 0.78,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 10),
+              Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 14, 14, 10),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.history_rounded,
+                      color: AppTheme.cinemaAmber,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      s.changelogTitle,
+                      style: const TextStyle(
+                        color: AppTheme.textPrimary,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.1,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        color: AppTheme.textSecondary,
+                        size: 20,
+                      ),
+                      onPressed: () => Navigator.of(sheetCtx).pop(),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1, thickness: 0.7, color: AppTheme.hairline),
+              Flexible(
+                child: ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(18, 14, 18, 22),
+                  itemCount: releases.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 16),
+                  itemBuilder: (_, idx) {
+                    final rel = releases[idx];
+                    return Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppTheme.cardDark,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: idx == 0
+                              ? AppTheme.cinemaAmber.withValues(alpha: 0.45)
+                              : AppTheme.hairline,
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                rel.version,
+                                style: AppTheme.monoStyle(
+                                  color: idx == 0
+                                      ? AppTheme.cinemaAmber
+                                      : AppTheme.textPrimary,
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 7,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: idx == 0
+                                      ? AppTheme.cinemaAmber
+                                          .withValues(alpha: 0.16)
+                                      : Colors.white.withValues(alpha: 0.06),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  rel.tag,
+                                  style: TextStyle(
+                                    color: idx == 0
+                                        ? AppTheme.cinemaAmber
+                                        : AppTheme.textSecondary,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 0.6,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          for (final line in rel.items)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 5),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Padding(
+                                    padding: EdgeInsets.only(top: 5, right: 8),
+                                    child: Icon(
+                                      Icons.circle,
+                                      size: 4.5,
+                                      color: AppTheme.cinemaAmber,
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: Text(
+                                      line,
+                                      style: const TextStyle(
+                                        color: AppTheme.textSecondary,
+                                        fontSize: 11.5,
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final s = AppStrings.of(context);
+
     return Scaffold(
-      backgroundColor: const Color(0xFF0E0E10),
+      backgroundColor: AppTheme.backgroundBlack,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0E0E10),
-        foregroundColor: Colors.white,
-        elevation: 0,
-        title: const Text('About CineLens'),
+        backgroundColor: AppTheme.backgroundBlack,
+        title: Text(s.aboutApp.toUpperCase()),
       ),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.all(20),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
           children: [
-            // Header Logo & Nama Aplikasi
+            // Hero Brand Card
             Container(
-              padding: const EdgeInsets.all(24),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
               decoration: BoxDecoration(
-                color: const Color(0xFF18181C),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white12),
+                color: AppTheme.surfaceDark,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: AppTheme.hairline),
               ),
               child: Column(
                 children: [
                   Container(
-                    width: 72,
-                    height: 72,
+                    width: 64,
+                    height: 64,
                     decoration: BoxDecoration(
-                      color: Colors.amber.withOpacity(0.15),
+                      color: AppTheme.cinemaAmber.withValues(alpha: 0.14),
                       shape: BoxShape.circle,
-                      border: Border.all(color: Colors.amberAccent, width: 1.5),
+                      border: Border.all(
+                        color: AppTheme.cinemaAmber.withValues(alpha: 0.7),
+                        width: 1.4,
+                      ),
                     ),
                     child: const Icon(
                       Icons.camera_rounded,
-                      color: Colors.amberAccent,
-                      size: 38,
+                      color: AppTheme.cinemaAmber,
+                      size: 32,
                     ),
                   ),
                   const SizedBox(height: 14),
                   const Text(
                     'CineLens iOS',
                     style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
+                      color: AppTheme.textPrimary,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.4,
                     ),
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    'Cinematic Camera & Real-Time Color Grading',
+                  Text(
+                    s.isId
+                        ? 'Kamera Sinema 16-Bit & Studio Color Grading'
+                        : '16-Bit Cinema Camera & Color Grading Studio',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white60, fontSize: 13),
+                    style: const TextStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 12,
+                    ),
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 12),
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 4,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.white10,
-                      borderRadius: BorderRadius.circular(20),
+                      color: AppTheme.cinemaAmber.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: AppTheme.cinemaAmber.withValues(alpha: 0.45),
+                      ),
                     ),
-                    child: const Text(
-                      'Version $appVersion',
-                      style: TextStyle(
-                        color: Colors.amberAccent,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
+                    child: Text(
+                      'v$appVersion',
+                      style: AppTheme.monoStyle(
+                        color: AppTheme.cinemaAmber,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
                       ),
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 14),
 
-            // Daftar perbaikan rilis ini
-            // Container is not a const constructor, so the lint cannot apply.
-            // ignore: prefer_const_constructors
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: const Color(0xFF18181C),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white12),
-              ),
-              child: const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'PERUBAHAN TERBARU',
-                    style: TextStyle(
-                      color: Colors.white54,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1.1,
+            // Collapsible Changelog Action Button (details shown only on tap)
+            InkWell(
+              onTap: () => _showChangelogSheet(context, s),
+              borderRadius: BorderRadius.circular(14),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                decoration: BoxDecoration(
+                  color: AppTheme.surfaceDark,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: AppTheme.cinemaAmber.withValues(alpha: 0.4),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 34,
+                      height: 34,
+                      decoration: BoxDecoration(
+                        color: AppTheme.cinemaAmber.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: const Icon(
+                        Icons.history_rounded,
+                        color: AppTheme.cinemaAmber,
+                        size: 18,
+                      ),
                     ),
-                  ),
-                  SizedBox(height: 12),
-                  _ChangeEntry(
-                    title: 'Opening pertama kali install (tanpa suara)',
-                    detail:
-                        'Saat pertama kali membuka CineLens setelah install, '
-                        'video opening kini tampil lebih dulu. Audio sengaja '
-                        'dimatikan, video bisa dilewati atau ditunggu sampai '
-                        'selesai, lalu tidak muncul lagi pada peluncuran '
-                        'berikutnya.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Perbaikan warna rusak saat atur Cahaya',
-                    detail:
-                        'Slider contrast, shadow, highlight, white, black, '
-                        'dehaze, dan fade dulu memakai filter kurva yang salah '
-                        'membaca data 32-bit di iOS, sehingga foto dan video '
-                        'berubah jadi warna acak seperti TV rusak. Sekarang '
-                        'seluruh shaping itu dihitung sebagai color cube 33³ '
-                        'native yang sama untuk pratinjau dan ekspor, jadi '
-                        'hasilnya halus dan identik di foto maupun video.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Impor foto & video dari kamera iPhone',
-                    detail:
-                        'Tombol impor di Galeri CineLens membuka pemilih Photos '
-                        'dan menyalin foto maupun video ke galeri aplikasi. '
-                        'Pemilihnya berjalan di luar proses aplikasi, jadi tidak '
-                        'ada dialog izin foto. Foto HEIC otomatis dikonversi ke '
-                        'JPEG resolusi penuh dengan orientasi tetap benar.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Editor lengkap ala Lightroom',
-                    detail:
-                        'Setiap media di galeri bisa diedit lewat tab Cahaya '
-                        '(exposure, contrast, highlights, shadows, whites, '
-                        'blacks), Warna (suhu, tint, vibrance, saturation), '
-                        'Kurva (RGB/R/G/B point curve), Campur (8 band HSL: '
-                        'hue, saturasi, luminans), Efek (clarity, texture, '
-                        'dehaze, fade, grain, vignette), dan Detail (sharpen, '
-                        'noise reduction). Tahan tombol ASLI untuk '
-                        'membandingkan sebelum/sesudah.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Tone film CineLens bisa dipakai di hasil impor',
-                    detail:
-                        'Tab Film di editor memuat semua stok CineLens dan LUT '
-                        '.cube yang sudah diimpor, lengkap dengan slider '
-                        'intensitas. Efek bawaan stok (grain, halation, bloom, '
-                        'vignette) aktif secara default dan bisa diganti manual. '
-                        'Foto dan video memakai cube 33³ yang sama dengan '
-                        'kamera, jadi tampilan editor dan hasil ekspor identik.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Simpan hasil edit & kirim ke Apple Photos',
-                    detail:
-                        'Hasil edit masuk ke galeri CineLens sebagai entri baru '
-                        '(file asli tidak ditimpa), dengan opsi sekaligus '
-                        'menyalinnya ke aplikasi Photos. Video dirender ulang '
-                        'per frame dengan audio tetap utuh. Tekan lama kartu di '
-                        'galeri untuk menu Edit, Simpan ke Photos, atau Hapus.',
-                  ),
-                  _ChangeEntry(
-                    title: '18 stok film baru',
-                    detail:
-                        'Expired & cult: Agfacolor XRS 200 (exp. 1991), Agfa '
-                        'Chrome RSX II 200 (exp. 2006), CineStill 50D, CineStill '
-                        '800T, Eterna Vivid 500 & 500D dengan print Kodak 2383 '
-                        'atau Fuji 3513, Provia 100F, Velvia 50 + 2383, dan '
-                        'Fujicolor C200 + Endura. Plus Kodak Portra 400, Gold '
-                        '200, Ektar 100, Vision3 250D, Fuji Pro 400H, Superia '
-                        '400, dan Ilford HP5 Plus. Semua memakai mesin emulasi '
-                        'CineLens sendiri: cube 33³ native untuk hasil foto/'
-                        'video, plus matriks preview yang di-fit dari cube yang '
-                        'sama agar viewfinder mendekati hasil akhir.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Karakter expired & print film',
-                    detail:
-                        'Agfa expired mempertahankan cast hijau-cyan dengan '
-                        'black terangkat dan kontras lembut, CineStill memakai '
-                        'shadow teal dan highlight hangat, sedangkan pasangan '
-                        'Eterna dibedakan lewat print: 2383 hangat ala Kodak, '
-                        '3513 lebih dingin ala Fuji. Untuk menebalkan karakter '
-                        'halasi khas CineStill, naikkan slider Halation di '
-                        'panel FILM LOOK.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Simpan ProRes tidak lagi berputar selamanya',
-                    detail:
-                        'Bake look ProRes kini memakai AVAssetExportSession '
-                        'dengan pengaman waktu. Audio ikut tersimpan, dan '
-                        'kalau ekspor gagal aplikasi tetap menjawab: master '
-                        'flat dipakai plus peringatan, bukan spinner tanpa ujung.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Simpan video jauh lebih cepat',
-                    detail:
-                        'Halation & bloom digabung dalam satu pass resolusi '
-                        'seperempat dan grain dibuat di resolusi setengah. '
-                        'Beban render turun drastis, jadi ekspor 4K selesai '
-                        'jauh lebih cepat tanpa mengubah tampilan look.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Progres simpan tampil dalam persen',
-                    detail:
-                        'Overlay pemrosesan kini menunjukkan persentase dari '
-                        'mesin ekspor iOS, sehingga proses panjang tidak '
-                        'terlihat seperti macet.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Tone tampil penuh & pratinjau ikut berubah',
-                    detail: 'Intensitas tone default kini 100% (nilai lama 85% '
-                        'diangkat sekali), efek halation/bloom bawaan '
-                        'diringankan agar warna tone lebih tegas, dan draft '
-                        'custom tone tidak lagi tertinggal sehingga slider '
-                        'intensitas serta pilihan tone langsung terlihat di '
-                        'viewfinder maupun hasil.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Tone & LUT benar-benar terlihat di hasil',
-                    detail:
-                        'Foto dan video kini memakai matriks tone yang sama '
-                        'dengan viewfinder, jadi perubahan tone langsung '
-                        'terasa di file — bukan hanya grain-nya. LUT 3D juga '
-                        'dipakai apa adanya oleh renderer native.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Grain film lebih halus',
-                    detail:
-                        'Grain lama yang kasar diganti grain luminansi 1 px '
-                        'dengan skala 1.0–2.2 px, sehingga teksturnya terbaca '
-                        'seperti film 16mm, bukan noise digital blok.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Impor LUT .cube',
-                    detail: 'Buka opsi kamera, pilih IMPOR .CUBE, dan LUT 3D '
-                        'milik Anda langsung aktif. Look disimpan lokal dan '
-                        'dipakai untuk foto, video, maupun ProRes.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Film emulation: grain, halation, bloom, vignette',
-                    detail: 'Intensitas tiap efek bisa diatur di panel FILM '
-                        'EMULATION. Pratinjau menampilkan tone, grain, dan '
-                        'vignette; halation & bloom dirender saat disimpan.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Opsi sertakan look di ProRes',
-                    detail: 'Sakelar "Sertakan look di ProRes" merekam ulang '
-                        'master ProRes 422 dengan tone + efek dibakar. '
-                        'Nonaktif = master tetap flat untuk grading manual.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Profil datar "CineLens Flat"',
-                    detail:
-                        'Tone baru bergaya Log untuk perangkat tanpa Apple Log: '
-                        'gamma datar dengan highlight lembut dan shadow '
-                        'terangkat, supaya hasilnya tetap fleksibel di-grading '
-                        '— termasuk saat dipakai bersama master ProRes 10-bit.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Kontrol pro manual: shutter, ISO, WB, focus',
-                    detail:
-                        'Shutter dan ISO kini dikunci langsung di sensor (bukan '
-                        'sekadar EV), plus white balance Kelvin/tint dan focus '
-                        'pull manual. Batas tiap kontrol dibaca dari format aktif, '
-                        'dan statusnya tampil di viewfinder.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Apple Log & deteksi ProRes',
-                    detail:
-                        'iPhone 15 Pro ke atas bisa merekam gamma Apple Log '
-                        '(10-bit) dari panel opsi. Apple Log butuh chip A17 Pro, '
-                        'jadi iPhone 14 Pro Max menampilkan penjelasan dan '
-                        'jalur ProRes sebagai gantinya.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Perekam Apple ProRes 422',
-                    detail: 'Tombol ProRes merekam master .mov 10-bit 4:2:2 di '
-                        'sesi kamera yang sama. Look bisa dibakar lewat opsi '
-                        'di panel film emulation. '
-                        'Sensor kembali ke format normal setelah tiap take.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Foto resolusi penuh',
-                    detail: 'Foto kini memakai sensor penuh (bukan 1080p) dan '
-                        'di-grading native sebagai JPEG kualitas 0.98.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Pilihan 1080p / 4K & 24 / 30 / 60 FPS',
-                    detail:
-                        'Profil video dibatasi 4K agar encoder iOS tetap stabil, '
-                        'dengan bitrate 30–90 Mbps dan audio 192 kbps.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Stabilizer video aktif otomatis',
-                    detail:
-                        'iOS memilih mode stabilisasi terbaik yang didukung '
-                        'format aktif (Cinematic / Standard). Statusnya tampil '
-                        'di viewfinder dan menu opsi.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Preset lebih menyatu dengan hasil',
-                    detail:
-                        'Grading LUT kini dihitung di ruang warna sRGB yang sama '
-                        'dengan pratinjau, jadi warna hasil foto dan video tidak '
-                        'lagi berbeda dari layar.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Pinch zoom & galeri dalam aplikasi',
-                    detail:
-                        'Cubit layar untuk zoom dengan indikator, dan galeri '
-                        'lokal untuk melihat atau menghapus hasil tanpa izin '
-                        'Apple Photos.',
-                  ),
-                  _ChangeEntry(
-                    title: 'Tray preset landscape bisa disembunyikan',
-                    detail: 'Di mode landscape tray otomatis mengecil dan bisa '
-                        'dibuka kembali lewat tombol palet.',
-                    isLast: true,
-                  ),
-                ],
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            s.changelogBtn,
+                            style: const TextStyle(
+                              color: AppTheme.textPrimary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'v$appVersion · ${s.isId ? 'Ketuk untuk detail pembaruan' : 'Tap to view release notes'}',
+                            style: const TextStyle(
+                              color: AppTheme.textSecondary,
+                              fontSize: 10.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(
+                      Icons.chevron_right_rounded,
+                      color: AppTheme.cinemaAmber,
+                      size: 20,
+                    ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 14),
 
-            // Kartu Kredit Developer
+            // Developer Card
             Container(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: const Color(0xFF18181C),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white12),
+                color: AppTheme.surfaceDark,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AppTheme.hairline),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -370,9 +448,9 @@ class AboutScreen extends StatelessWidget {
                   const Text(
                     'DEVELOPER',
                     style: TextStyle(
-                      color: Colors.white54,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
+                      color: AppTheme.textSecondary,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
                       letterSpacing: 1.1,
                     ),
                   ),
@@ -380,36 +458,39 @@ class AboutScreen extends StatelessWidget {
                   Row(
                     children: [
                       CircleAvatar(
-                        radius: 24,
-                        backgroundColor: Colors.amber.withOpacity(0.2),
-                        child: const Text(
+                        radius: 21,
+                        backgroundColor:
+                            AppTheme.cinemaAmber.withValues(alpha: 0.16),
+                        child: Text(
                           'WS',
-                          style: TextStyle(
-                            color: Colors.amberAccent,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
+                          style: AppTheme.monoStyle(
+                            color: AppTheme.cinemaAmber,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
                           ),
                         ),
                       ),
-                      const SizedBox(width: 14),
-                      const Expanded(
+                      const SizedBox(width: 12),
+                      Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
+                            const Text(
                               developerName,
                               style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 17,
-                                fontWeight: FontWeight.bold,
+                                color: AppTheme.textPrimary,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
                               ),
                             ),
-                            SizedBox(height: 2),
+                            const SizedBox(height: 2),
                             Text(
-                              'Lead iOS & Flutter Developer',
-                              style: TextStyle(
-                                color: Colors.white60,
-                                fontSize: 13,
+                              s.isId
+                                  ? 'Kreator & Pengembang CineLens iOS'
+                                  : 'Creator & Developer of CineLens iOS',
+                              style: const TextStyle(
+                                color: AppTheme.textSecondary,
+                                fontSize: 11.5,
                               ),
                             ),
                           ],
@@ -420,111 +501,84 @@ class AboutScreen extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 14),
 
-            // Kartu Support & Masukan
+            // Support & Feedback Card
             Container(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: const Color(0xFF18181C),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white12),
+                color: AppTheme.surfaceDark,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AppTheme.hairline),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'SUPPORT & MASUKAN',
-                    style: TextStyle(
-                      color: Colors.white54,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
+                  Text(
+                    s.supportTitle,
+                    style: const TextStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
                       letterSpacing: 1.1,
                     ),
                   ),
                   const SizedBox(height: 10),
-                  const Text(
-                    'Punya ide fitur baru, laporan bug, atau ingin memberikan dukungan untuk pengembangan CineLens? Hubungi developer langsung melalui email di bawah ini:',
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 13.5,
-                      height: 1.45,
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF232329),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.email_outlined,
-                          color: Colors.amberAccent,
-                          size: 20,
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.mail_outline_rounded,
+                        color: AppTheme.cinemaAmber,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        supportEmail,
+                        style: AppTheme.monoStyle(
+                          color: AppTheme.textPrimary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
                         ),
-                        const SizedBox(width: 10),
-                        const Expanded(
-                          child: SelectableText(
-                            supportEmail,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: 'Salin Email',
-                          onPressed: () => _copyEmail(context),
-                          icon: const Icon(
-                            Icons.copy_rounded,
-                            color: Colors.white70,
-                            size: 19,
-                          ),
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 14),
                   Row(
                     children: [
                       Expanded(
                         child: OutlinedButton.icon(
+                          onPressed: () => _copyEmail(context, s),
                           style: OutlinedButton.styleFrom(
-                            foregroundColor: Colors.white,
-                            side: const BorderSide(color: Colors.white24),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                            foregroundColor: AppTheme.textPrimary,
+                            side: const BorderSide(color: AppTheme.hairline),
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                          ),
+                          icon: const Icon(Icons.copy_rounded, size: 15),
+                          label: Text(
+                            s.copyEmail,
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
-                          onPressed: () => _copyEmail(context),
-                          icon: const Icon(Icons.copy_rounded, size: 18),
-                          label: const Text('Salin Email'),
                         ),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 10),
                       Expanded(
-                        child: ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.amber,
+                        child: FilledButton.icon(
+                          onPressed: () => _sendFeedback(s),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: AppTheme.cinemaAmber,
                             foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 10),
                           ),
-                          onPressed: _sendFeedback,
-                          icon: const Icon(Icons.send_rounded, size: 18),
-                          label: const Text(
-                            'Kirim Masukan',
-                            style: TextStyle(fontWeight: FontWeight.bold),
+                          icon: const Icon(Icons.send_rounded, size: 15),
+                          label: Text(
+                            s.sendFeedback,
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w800,
+                            ),
                           ),
                         ),
                       ),
@@ -535,64 +589,6 @@ class AboutScreen extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-/// One line of the in-app changelog on the About screen.
-class _ChangeEntry extends StatelessWidget {
-  final String title;
-  final String detail;
-  final bool isLast;
-
-  const _ChangeEntry({
-    required this.title,
-    required this.detail,
-    this.isLast = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(bottom: isLast ? 0 : 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Padding(
-            padding: EdgeInsets.only(top: 4),
-            child: Icon(
-              Icons.check_circle_rounded,
-              color: Colors.amberAccent,
-              size: 14,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  detail,
-                  style: const TextStyle(
-                    color: Colors.white60,
-                    fontSize: 11.5,
-                    height: 1.4,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }

@@ -1,23 +1,26 @@
 import 'dart:io';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../../core/l10n/app_strings.dart';
 import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../widgets/media_specs_sheet.dart';
 
-class CapturedPreviewScreen extends StatefulWidget {
+class CapturedPreviewScreen extends ConsumerStatefulWidget {
   final CapturedPreviewArgs args;
 
   const CapturedPreviewScreen({super.key, required this.args});
 
   @override
-  State<CapturedPreviewScreen> createState() => _CapturedPreviewScreenState();
+  ConsumerState<CapturedPreviewScreen> createState() =>
+      _CapturedPreviewScreenState();
 }
 
-class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
+class _CapturedPreviewScreenState extends ConsumerState<CapturedPreviewScreen> {
   VideoPlayerController? _videoController;
   bool _isVideoReady = false;
   bool _isInitializingVideo = false;
@@ -144,7 +147,21 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
         ),
         title: Text(_isVideo ? s.video : s.photo),
         actions: [
-          if (_editablePath != null)
+          if (_editablePath != null) ...[
+            IconButton(
+              icon: const Icon(
+                Icons.info_outline_rounded,
+                color: AppTheme.textSecondary,
+                size: 20,
+              ),
+              tooltip: s.mediaInfo,
+              onPressed: () => showMediaSpecsSheet(
+                context,
+                ref,
+                path: _editablePath!,
+                isVideo: _isVideo,
+              ),
+            ),
             TextButton.icon(
               onPressed: _openEditor,
               icon: const Icon(
@@ -162,6 +179,7 @@ class _CapturedPreviewScreenState extends State<CapturedPreviewScreen> {
                 ),
               ),
             ),
+          ],
         ],
       ),
       body: SafeArea(

@@ -104,6 +104,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       onExportProgress: _handleExportProgress,
       onDopTelemetry: _handleDopTelemetry,
       onLiveScope: _handleLiveScope,
+      onHardwareShutter: _handleHardwareShutter,
     );
 
     final mediaLibrary = await repository.loadCapturedMedia();
@@ -162,6 +163,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final capabilities = await _probeProCapabilities();
     final frameFormat = CameraFrameFormat.fromName(proImaging.frameFormat);
     unawaited(repository.setDopTelemetry(horizon: true, audio: false));
+    unawaited(repository.setVolumeShutterEnabled(proImaging.volumeShutter));
 
     return CinemaCameraState(
       tones: tones,
@@ -183,6 +185,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       bakeLookIntoProRes: bakeLook,
       processZeroEnabled: proImaging.processZero,
       saveDngRaw: proImaging.saveDngRaw,
+      nightStack: proImaging.nightStack,
+      heif10Bit: proImaging.heif10Bit,
+      volumeShutterEnabled: proImaging.volumeShutter,
+      timerSeconds: proImaging.timerSeconds,
       highlightMeteringEnabled: proImaging.highlightMetering,
       anamorphicCrop: proImaging.anamorphicCrop,
       anamorphicDesqueeze: proImaging.desqueeze,
@@ -305,6 +311,15 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final current = state.valueOrNull;
     if (current == null || !current.liveScopeEnabled) return;
     state = AsyncData(current.copyWith(liveScopeData: scope));
+  }
+
+  void _handleHardwareShutter() {
+    if (_disposed) return;
+    final current = state.valueOrNull;
+    if (current == null || !current.volumeShutterEnabled) return;
+    state = AsyncData(
+      current.copyWith(hardwareShutterTick: current.hardwareShutterTick + 1),
+    );
   }
 
   Map<String, dynamic> _liveMetalConfigFor(CinemaCameraState s) {
@@ -703,6 +718,61 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     unawaited(ref.read(cinemaCameraRepositoryProvider).saveSaveDngRaw(enabled));
   }
 
+  void setNightStack(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(nightStack: enabled));
+    unawaited(ref.read(cinemaCameraRepositoryProvider).saveNightStack(enabled));
+  }
+
+  void setHeif10Bit(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(heif10Bit: enabled));
+    unawaited(ref.read(cinemaCameraRepositoryProvider).saveHeif10Bit(enabled));
+  }
+
+  void setVolumeShutterEnabled(bool enabled) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(volumeShutterEnabled: enabled));
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    unawaited(repo.saveVolumeShutter(enabled));
+    unawaited(repo.setVolumeShutterEnabled(enabled));
+  }
+
+  void cycleTimerSeconds() {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final next = switch (current.timerSeconds) {
+      0 => 3,
+      3 => 10,
+      _ => 0,
+    };
+    state = AsyncData(current.copyWith(timerSeconds: next));
+    unawaited(ref.read(cinemaCameraRepositoryProvider).saveTimerSeconds(next));
+  }
+
+  Future<bool> importCubeFromPath(String path) async {
+    final current = state.valueOrNull;
+    if (current == null) return false;
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    final added = await repo.importCubeFileFromPath(path);
+    if (added == null || _disposed) return false;
+    final updatedTones = await repo.getAllTones();
+    final latest = state.valueOrNull ?? current;
+    state = AsyncData(
+      latest.copyWith(
+        tones: updatedTones,
+        selectedTone: added,
+        intensity: 1.0,
+        clearLiveDraft: true,
+      ),
+    );
+    await repo.savePreferences(toneId: added.id, intensity: 1.0);
+    return true;
+  }
+
   void setDirectLutRecordingEnabled(bool enabled) {
     final current = state.valueOrNull;
     if (current == null || current.isRecordingVideo) return;
@@ -952,6 +1022,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         ),
       );
       await _refreshProCapabilities();
+      await _rebindLiveMetalIfNeeded();
     } finally {
       _isSwitchingProfile = false;
     }
@@ -1546,8 +1617,24 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         ),
       );
       await _refreshProCapabilities();
+      await _rebindLiveMetalIfNeeded();
     } finally {
       _isSwitchingProfile = false;
+    }
+  }
+
+  /// Re-syncs the Live Metal LUT texture pipeline after a physical lens or
+  /// camera switch so switching to 2×/TEL or front camera never leaves a blank
+  /// preview texture.
+  Future<void> _rebindLiveMetalIfNeeded() async {
+    if (_disposed) return;
+    final synced = state.valueOrNull;
+    if (synced == null || !synced.liveMetalEnabled) return;
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    final tid = await repo.enableLiveMetalPreview(_liveMetalConfigFor(synced));
+    if (!_disposed && tid != null) {
+      final now = state.valueOrNull ?? synced;
+      state = AsyncData(now.copyWith(liveMetalTextureId: tid));
     }
   }
 
@@ -1577,6 +1664,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           anamorphicCrop: current.anamorphicCrop,
           frameAspectRatio: current.effectiveFrameAspectRatio,
           saveDngRaw: current.saveDngRaw,
+          nightStack: current.nightStack,
+          heif10Bit: current.heif10Bit,
           desqueeze: current.anamorphicDesqueeze,
           look: current.nativeLook,
           toneId: toneId,
@@ -1595,6 +1684,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           frameAspectRatio: current.effectiveFrameAspectRatio,
           desqueeze: current.anamorphicDesqueeze,
           appleLogInput: current.appleLogEnabled,
+          heif10Bit: current.heif10Bit,
           look: current.nativeLook,
           toneId: toneId,
           intensity: current.intensity,

@@ -161,6 +161,11 @@ class CinemaCameraState {
 
   /// Also writes original 12-bit Bayer `.dng` negative when shooting Process Zero RAW.
   final bool saveDngRaw;
+  final bool nightStack;
+  final bool heif10Bit;
+  final bool volumeShutterEnabled;
+  final int timerSeconds;
+  final int hardwareShutterTick;
 
   /// Tahap 2 Cinema Pro: Live Metal 3D LUT Viewfinder (`FlutterTexture`),
   /// Direct-to-Disk HEVC Video LUT Recording, and Real-Time DOP Overlays.
@@ -235,6 +240,11 @@ class CinemaCameraState {
     this.activeBackLensIndex = 0,
     this.frameFormat = CameraFrameFormat.full,
     this.saveDngRaw = false,
+    this.nightStack = false,
+    this.heif10Bit = false,
+    this.volumeShutterEnabled = true,
+    this.timerSeconds = 0,
+    this.hardwareShutterTick = 0,
     this.liveMetalEnabled = false,
     this.liveMetalTextureId,
     this.directLutRecordingEnabled = false,
@@ -384,6 +394,11 @@ class CinemaCameraState {
     int? activeBackLensIndex,
     CameraFrameFormat? frameFormat,
     bool? saveDngRaw,
+    bool? nightStack,
+    bool? heif10Bit,
+    bool? volumeShutterEnabled,
+    int? timerSeconds,
+    int? hardwareShutterTick,
     bool? liveMetalEnabled,
     int? liveMetalTextureId,
     bool clearLiveMetalTexture = false,
@@ -457,6 +472,11 @@ class CinemaCameraState {
       activeBackLensIndex: activeBackLensIndex ?? this.activeBackLensIndex,
       frameFormat: frameFormat ?? this.frameFormat,
       saveDngRaw: saveDngRaw ?? this.saveDngRaw,
+      nightStack: nightStack ?? this.nightStack,
+      heif10Bit: heif10Bit ?? this.heif10Bit,
+      volumeShutterEnabled: volumeShutterEnabled ?? this.volumeShutterEnabled,
+      timerSeconds: timerSeconds ?? this.timerSeconds,
+      hardwareShutterTick: hardwareShutterTick ?? this.hardwareShutterTick,
       liveMetalEnabled: liveMetalEnabled ?? this.liveMetalEnabled,
       liveMetalTextureId: clearLiveMetalTexture
           ? null

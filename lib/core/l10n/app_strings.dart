@@ -175,4 +175,40 @@ class AppStrings {
       _t('CineLens + Apple Photos', 'Galeri + Apple Photos');
   String get renderingPhoto => _t('Rendering photo...', 'Merender foto...');
   String get renderingVideo => _t('Rendering video...', 'Merender video...');
+
+  // v2.3.0 Output Engine, Hardware, AI Mask, Borders & About
+  String get heif10Bit => _t('10-BIT P3 HEIF', 'HEIF 10-BIT P3');
+  String get heif10BitSub => _t('Wide color master', 'Master warna lebar');
+  String get nightStack => _t('NIGHT STACK', 'NIGHT STACK');
+  String get nightStackSub => _t('3× Bayer RAW fusion', 'Fusi 3× Bayer RAW');
+  String get filmicRollOff => _t('FILMIC ROLL-OFF', 'ROLL-OFF FILMIK');
+  String get colorDensity => _t('Color Density', 'Densitas Film');
+  String get skinProtect => _t('Skin Protection', 'Pelindung Kulit');
+  String get volumeShutter => _t('VOLUME SHUTTER', 'SHUTTER VOLUME');
+  String get volumeShutterSub => _t('Buttons & BT remote', 'Tombol & remote BT');
+  String get selfTimer => _t('TIMER', 'TIMER');
+  String get audioInput => _t('MIC INPUT', 'INPUT MIKROFON');
+  String get subjectAi => _t('+ SUBJECT AI', '+ SUBJEK AI');
+  String get skyBgAi => _t('+ SKY / BG AI', '+ LANGIT / BG AI');
+  String get generatingMask => _t('Detecting subject...', 'Mendeteksi subjek...');
+  String get exportCubeLut => _t('Export .cube LUT', 'Ekspor LUT .cube');
+  String get useLutInCamera => _t('Add to Camera LUTs', 'Tambah ke LUT Kamera');
+  String get shareCubeFile => _t('Share .cube File', 'Bagikan File .cube');
+  String get lutAddedToCamera => _t('3D LUT added to Camera!', 'LUT 3D masuk ke Kamera!');
+  String get frameBorder => _t('FRAME & STAMP', 'BINGKAI & TANGGAL');
+  String get exifCaption => _t('EXIF Caption', 'Keterangan EXIF');
+  String get dateStamp => _t("Date Stamp ('YY MM DD)", "Cap Tanggal ('YY MM DD)");
+  String get batchEdit => _t('Batch Edit', 'Edit Massal');
+  String get applyClipboard => _t('Paste Copied Edit', 'Tempel Edit Tersalin');
+  String batchRendering(int done, int total) =>
+      isId ? 'Memproses $done / $total...' : 'Processing $done / $total...';
+  String batchDone(int count) =>
+      isId ? '$count item selesai diedit.' : '$count items processed.';
+  String get mediaInfo => _t('MEDIA SPECS', 'INFO TEKNIS');
+  String get changelogBtn => _t('View Changelog', 'Lihat Riwayat Versi');
+  String get changelogTitle => _t('VERSION HISTORY', 'RIWAYAT VERSI');
+  String get supportTitle => _t('SUPPORT & FEEDBACK', 'DUKUNGAN & MASUKAN');
+  String get copyEmail => _t('Copy Email', 'Salin Email');
+  String get sendFeedback => _t('Send Feedback', 'Kirim Masukan');
+  String get emailCopied => _t('Email copied', 'Email disalin');
 }

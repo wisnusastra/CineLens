@@ -31,6 +31,9 @@ class FilmLook {
   /// Optical micro-contrast / prime-lens acutance sharpness (0…1).
   final double acutance;
 
+  /// ACES / AgX filmic highlight roll-off (0…1).
+  final double filmicRollOff;
+
   /// Strength of an imported `.cube` LUT (ignored by matrix tones).
   final double lutMix;
 
@@ -43,6 +46,7 @@ class FilmLook {
     this.vignette = 0.16,
     this.shadowDepth = 0.0,
     this.acutance = 0.0,
+    this.filmicRollOff = 0.25,
     this.lutMix = 1.0,
   });
 
@@ -55,6 +59,7 @@ class FilmLook {
     vignette: 0,
     shadowDepth: 0,
     acutance: 0,
+    filmicRollOff: 0,
     lutMix: 1,
   );
 
@@ -65,7 +70,8 @@ class FilmLook {
       bloom <= 0.001 &&
       vignette <= 0.001 &&
       shadowDepth <= 0.001 &&
-      acutance <= 0.001;
+      acutance <= 0.001 &&
+      filmicRollOff <= 0.001;
 
   FilmLook copyWith({
     bool? useStockEffects,
@@ -76,6 +82,7 @@ class FilmLook {
     double? vignette,
     double? shadowDepth,
     double? acutance,
+    double? filmicRollOff,
     double? lutMix,
   }) {
     return FilmLook(
@@ -87,12 +94,13 @@ class FilmLook {
       vignette: vignette ?? this.vignette,
       shadowDepth: shadowDepth ?? this.shadowDepth,
       acutance: acutance ?? this.acutance,
+      filmicRollOff: filmicRollOff ?? this.filmicRollOff,
       lutMix: lutMix ?? this.lutMix,
     );
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'v': 4,
+        'v': 5,
         'useStockEffects': useStockEffects,
         'grain': grain,
         'grainSize': grainSize,
@@ -101,6 +109,7 @@ class FilmLook {
         'vignette': vignette,
         'shadowDepth': shadowDepth,
         'acutance': acutance,
+        'filmicRollOff': filmicRollOff,
         'lutMix': lutMix,
       };
 
@@ -146,6 +155,7 @@ class FilmLook {
       vignette: vignette,
       shadowDepth: shadowDepth,
       acutance: acutance,
+      filmicRollOff: read('filmicRollOff', 0.25),
       lutMix: read('lutMix', 1.0),
     );
   }
@@ -168,6 +178,7 @@ class FilmLook {
       'vignette': vignette,
       'shadowDepth': shadowDepth,
       'acutance': acutance,
+      'filmicRollOff': filmicRollOff,
     };
   }
 }

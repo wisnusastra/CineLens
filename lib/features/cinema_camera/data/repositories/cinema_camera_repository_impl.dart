@@ -200,6 +200,45 @@ class CinemaCameraRepository {
     return imported;
   }
 
+  /// Registers a `.cube` file generated on-device (e.g. from the Gallery Editor)
+  /// directly into the Camera custom LUT list.
+  Future<CinemaTone?> importCubeFileFromPath(String filePath) async {
+    final file = File(filePath);
+    if (!await file.exists()) return null;
+    final text = await file.readAsString();
+    final cube = parseCubeLut(text);
+    final directory = await _lutDirectory();
+    final id = 'cube_${DateTime.now().microsecondsSinceEpoch}';
+    final payload = File('${directory.path}/$id.rgba');
+    await payload.writeAsBytes(cube.toRgbaCube().buffer.asUint8List(),
+        flush: true);
+
+    final prefs = await SharedPreferences.getInstance();
+    final existing = await loadCustomTones();
+    final existingNames = existing.map((t) => t.name.toUpperCase()).toSet();
+    var name =
+        (cube.title ?? _baseName(file.uri.pathSegments.last)).toUpperCase();
+    if (existingNames.contains(name)) name = '$name (EDIT)';
+
+    final tone = CinemaTone(
+      id: id,
+      name: name,
+      filmReference: 'LUT 3D ${cube.size}³',
+      description: ' CineLens 3D LUT',
+      accentColorHex: 0xFFE5A93B,
+      matrix: fitCubeToMatrix(cube),
+      isCustom: true,
+      lutPath: payload.path,
+      lutSize: cube.size,
+    );
+    final merged = [...existing, tone];
+    await prefs.setString(
+      AppConstants.prefCustomTonesJson,
+      jsonEncode(merged.map((t) => t.toJson()).toList()),
+    );
+    return tone;
+  }
+
   Future<Directory> _lutDirectory() async {
     final documents = await getApplicationDocumentsDirectory();
     final directory =
@@ -263,6 +302,10 @@ class CinemaCameraRepository {
       ({
         bool processZero,
         bool saveDngRaw,
+        bool nightStack,
+        bool heif10Bit,
+        bool volumeShutter,
+        int timerSeconds,
         bool anamorphicCrop,
         double desqueeze,
         bool highlightMetering,
@@ -274,6 +317,10 @@ class CinemaCameraRepository {
     return (
       processZero: prefs.getBool(AppConstants.prefProcessZeroRaw) ?? false,
       saveDngRaw: prefs.getBool(AppConstants.prefSaveDngRaw) ?? false,
+      nightStack: prefs.getBool(AppConstants.prefNightStack) ?? false,
+      heif10Bit: prefs.getBool(AppConstants.prefHeif10Bit) ?? false,
+      volumeShutter: prefs.getBool(AppConstants.prefVolumeShutter) ?? true,
+      timerSeconds: prefs.getInt(AppConstants.prefTimerSeconds) ?? 0,
       anamorphicCrop: prefs.getBool(AppConstants.prefAnamorphicCrop) ?? false,
       desqueeze: prefs.getDouble(AppConstants.prefAnamorphicDesqueeze) ?? 1.0,
       highlightMetering:
@@ -284,6 +331,26 @@ class CinemaCameraRepository {
       liveMetalPreview:
           prefs.getBool(AppConstants.prefLiveMetalPreview) ?? false,
     );
+  }
+
+  Future<void> saveHeif10Bit(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefHeif10Bit, enabled);
+  }
+
+  Future<void> saveNightStack(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefNightStack, enabled);
+  }
+
+  Future<void> saveVolumeShutter(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConstants.prefVolumeShutter, enabled);
+  }
+
+  Future<void> saveTimerSeconds(int seconds) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(AppConstants.prefTimerSeconds, seconds);
   }
 
   Future<void> saveFrameFormat(String formatName) async {
@@ -335,6 +402,8 @@ class CinemaCameraRepository {
     bool anamorphicCrop = false,
     double frameAspectRatio = 0.0,
     bool saveDngRaw = false,
+    bool nightStack = false,
+    bool heif10Bit = false,
     double desqueeze = 1.0,
     String? toneId,
     double intensity = 1.0,
@@ -351,11 +420,13 @@ class CinemaCameraRepository {
           'anamorphicCrop': anamorphicCrop,
           'frameAspectRatio': frameAspectRatio,
           'saveDngRaw': saveDngRaw,
+          'nightStack': nightStack,
+          'heif10Bit': heif10Bit,
           'desqueeze': desqueeze,
           'quality': 0.98,
           if (look != null) 'look': look,
         },
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 18));
       if (graded != null && graded.isNotEmpty) return graded;
     } on MissingPluginException {
       return null;
@@ -434,6 +505,7 @@ class CinemaCameraRepository {
     double frameAspectRatio = 0.0,
     double desqueeze = 1.0,
     bool appleLogInput = false,
+    bool heif10Bit = false,
     String? toneId,
     double intensity = 1.0,
     Map<String, dynamic>? look,
@@ -451,6 +523,7 @@ class CinemaCameraRepository {
           'frameAspectRatio': frameAspectRatio,
           'desqueeze': desqueeze,
           'appleLogInput': appleLogInput,
+          'heif10Bit': heif10Bit,
           'quality': 0.98,
           if (look != null) 'look': look,
         },
@@ -625,8 +698,14 @@ class CinemaCameraRepository {
     void Function(double progress)? onExportProgress,
     void Function(double? horizonDegrees, double? audioPeakDb)? onDopTelemetry,
     void Function(Map<String, dynamic> scope)? onLiveScope,
+    VoidCallback? onHardwareShutter,
   }) {
     _videoChannel.setMethodCallHandler((call) async {
+      if (call.method == 'hardwareShutterPressed') {
+        onHardwareShutter?.call();
+        return null;
+      }
+
       if (call.method == 'dopTelemetry') {
         final map = call.arguments is Map
             ? call.arguments as Map<Object?, Object?>
@@ -1069,6 +1148,82 @@ class CinemaCameraRepository {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(AppConstants.prefCaptureResolution, resolution);
     await prefs.setInt(AppConstants.prefCaptureFrameRate, frameRate);
+  }
+
+  Future<Map<String, dynamic>> generateVideoThumbnail(String path) async {
+    try {
+      final raw = await _videoChannel.invokeMapMethod<Object?, Object?>(
+        'generateVideoThumbnail',
+        <String, dynamic>{'path': path},
+      );
+      if (raw == null) return const <String, dynamic>{};
+      final out = <String, dynamic>{};
+      raw.forEach((k, v) {
+        if (k is String) out[k] = v;
+      });
+      return out;
+    } on MissingPluginException {
+      return const <String, dynamic>{};
+    }
+  }
+
+  Future<Map<String, dynamic>> inspectMediaMetadata(
+    String path, {
+    required bool isVideo,
+  }) async {
+    try {
+      final raw = await _videoChannel.invokeMapMethod<Object?, Object?>(
+        'inspectMediaMetadata',
+        <String, dynamic>{'path': path, 'isVideo': isVideo},
+      );
+      if (raw == null) return const <String, dynamic>{};
+      final out = <String, dynamic>{};
+      raw.forEach((k, v) {
+        if (k is String) out[k] = v;
+      });
+      return out;
+    } on MissingPluginException {
+      return const <String, dynamic>{};
+    }
+  }
+
+  Future<void> setVolumeShutterEnabled(bool enabled) async {
+    try {
+      await _videoChannel.invokeMethod<bool>(
+        'setVolumeShutterEnabled',
+        <String, dynamic>{'enabled': enabled},
+      );
+    } on MissingPluginException {
+      // Ignored off iOS.
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> listAudioInputs() async {
+    try {
+      final raw = await _videoChannel.invokeListMethod<Object?>('listAudioInputs');
+      if (raw == null) return const <Map<String, dynamic>>[];
+      return raw.whereType<Map>().map((m) {
+        final out = <String, dynamic>{};
+        m.forEach((k, v) {
+          if (k is String) out[k] = v;
+        });
+        return out;
+      }).toList();
+    } on MissingPluginException {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
+  Future<bool> selectAudioInput(String? portUID) async {
+    try {
+      return (await _videoChannel.invokeMethod<bool>(
+            'selectAudioInput',
+            <String, dynamic>{'portUID': portUID},
+          )) ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
   }
 
   Future<void> _ensureGalleryPermission() async {

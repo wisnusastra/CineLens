@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../../../core/l10n/app_strings.dart';
 import '../../../../core/routing/capture_args.dart';
@@ -15,6 +16,7 @@ import '../../../cinema_camera/domain/entities/captured_media.dart';
 import '../../../cinema_camera/domain/entities/cinema_tone.dart';
 import '../../../cinema_camera/domain/entities/film_look.dart';
 import '../../../cinema_camera/presentation/providers/cinema_camera_provider.dart';
+import '../../../cinema_camera/presentation/widgets/media_specs_sheet.dart';
 import '../../../cinema_camera/presentation/widgets/tone_selector_strip.dart';
 import '../../data/edit_clipboard_store.dart';
 import '../../data/photo_editor_repository.dart';
@@ -130,12 +132,18 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
   bool _rendering = false;
   bool _autoToning = false;
   bool _matchingColor = false;
+  bool _generatingMask = false;
+  bool _exportingCube = false;
   bool _exporting = false;
   bool _showOriginal = false;
   bool _splitCompare = false;
   bool _showHistogram = true;
   String? _error;
   String? _renderError;
+
+  double _videoDurationSeconds = 0.0;
+  double _videoScrubSeconds = 0.0;
+  Timer? _scrubDebounce;
 
   static const FilmLook _neutralFilm = FilmLook(
     grain: 0,
@@ -178,6 +186,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
   @override
   void dispose() {
     _debounce?.cancel();
+    _scrubDebounce?.cancel();
     super.dispose();
   }
 
@@ -288,6 +297,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
         path: widget.args.path,
         isVideo: _isVideo,
         maxDimension: 1400,
+        timestampSeconds: _videoScrubSeconds,
       );
       if (!mounted) return;
       setState(() {
@@ -297,12 +307,175 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
         _error = null;
       });
       unawaited(_refreshHistogram(original));
+      if (_isVideo) {
+        unawaited(_loadVideoDuration());
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _loading = false;
         _error = _describe(error);
       });
+    }
+  }
+
+  Future<void> _loadVideoDuration() async {
+    final meta = await ref
+        .read(cinemaCameraRepositoryProvider)
+        .inspectMediaMetadata(widget.args.path, isVideo: true);
+    final dur = (meta['durationSeconds'] as num?)?.toDouble() ?? 0.0;
+    if (mounted && dur > 0.2) {
+      setState(() => _videoDurationSeconds = dur);
+    }
+  }
+
+  void _onVideoScrubChanged(double seconds) {
+    setState(() => _videoScrubSeconds = seconds);
+    _scrubDebounce?.cancel();
+    _scrubDebounce = Timer(const Duration(milliseconds: 120), () async {
+      try {
+        final orig = await ref.read(photoEditorRepositoryProvider).loadPreview(
+              path: widget.args.path,
+              isVideo: true,
+              maxDimension: 1400,
+              timestampSeconds: _videoScrubSeconds,
+            );
+        if (!mounted) return;
+        setState(() => _original = orig);
+        await _render();
+      } catch (_) {}
+    });
+  }
+
+  Future<void> _generateAiMask(String target) async {
+    if (_generatingMask) return;
+    setState(() => _generatingMask = true);
+    try {
+      final maskPath = await ref
+          .read(photoEditorRepositoryProvider)
+          .generateAiMask(
+            path: widget.args.path,
+            isVideo: _isVideo,
+            target: target,
+          );
+      if (!mounted) return;
+      setState(() => _generatingMask = false);
+      if (maskPath == null) {
+        _toast('AI Mask unavailable on this media');
+        return;
+      }
+      final isSky = target == 'sky';
+      final index = _edit.masks.length + 1;
+      final mask = SelectiveMask(
+        id: 'ai_${DateTime.now().microsecondsSinceEpoch}',
+        name: isSky ? 'Sky AI $index' : 'Subject AI $index',
+        type: isSky ? 'ai_sky' : 'ai_subject',
+        maskImagePath: maskPath,
+        feather: 0.25,
+        exposure: isSky ? -0.35 : 0.25,
+      );
+      _update(
+        _edit.copyWith(masks: <SelectiveMask>[..._edit.masks, mask]),
+        immediateUndo: true,
+      );
+      setState(() => _selectedMaskId = mask.id);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _generatingMask = false);
+      _toast(_describe(error));
+    }
+  }
+
+  Future<void> _exportCubeLut() async {
+    if (_exportingCube) return;
+    final s = AppStrings.of(context);
+    setState(() => _exportingCube = true);
+    try {
+      final tone = _resolveTone();
+      final title = tone.id == 'standard'
+          ? 'CineLens_Grade'
+          : 'CineLens_${tone.name.replaceAll(' ', '_')}';
+      final cubePath = await ref
+          .read(photoEditorRepositoryProvider)
+          .exportCubeLut(payload: _payload(), title: title);
+      if (!mounted) return;
+      setState(() => _exportingCube = false);
+      if (cubePath == null) {
+        _toast('Failed to export .cube LUT');
+        return;
+      }
+      await showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: AppTheme.surfaceDark,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+        ),
+        builder: (sheetCtx) => SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  s.exportCubeLut.toUpperCase(),
+                  style: const TextStyle(
+                    color: AppTheme.cinemaAmber,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppTheme.cinemaAmber,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  onPressed: () async {
+                    Navigator.of(sheetCtx).pop();
+                    final ok = await ref
+                        .read(cinemaCameraProvider.notifier)
+                        .importCubeFromPath(cubePath);
+                    if (mounted && ok) _toast(s.lutAddedToCamera);
+                  },
+                  icon: const Icon(Icons.camera_alt_rounded, size: 17),
+                  label: Text(
+                    s.useLutInCamera,
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.textPrimary,
+                    side: const BorderSide(color: AppTheme.hairline),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  onPressed: () async {
+                    Navigator.of(sheetCtx).pop();
+                    await Share.shareXFiles(
+                      [XFile(cubePath)],
+                      subject: '$title.cube',
+                    );
+                  },
+                  icon: const Icon(Icons.ios_share_rounded, size: 17),
+                  label: Text(
+                    s.shareCubeFile,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _exportingCube = false);
+      _toast(_describe(error));
     }
   }
 
@@ -440,8 +613,13 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
 
   Map<String, dynamic> _payload() {
     final tone = _resolveTone();
+    final editMap = _edit.toParameters();
+    if ((editMap['frameCustomText'] as String? ?? '').isEmpty &&
+        tone.id != 'standard') {
+      editMap['frameCustomText'] = tone.name;
+    }
     final payload = <String, dynamic>{
-      'edit': _edit.toParameters(),
+      'edit': editMap,
       'toneId': (tone.isLutTone || tone.isCustom) ? null : tone.id,
       'intensity': _toneIntensity,
       if (!tone.isLutTone && tone.isCustom)
@@ -511,6 +689,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
         isVideo: _isVideo,
         payload: _payload(),
         maxDimension: 1400,
+        timestampSeconds: _videoScrubSeconds,
       );
       if (!mounted || token != _renderToken) return;
       setState(() {
@@ -891,6 +1070,15 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                   _pasteSettings();
                 case 'save_preset':
                   _promptSavePreset();
+                case 'export_cube':
+                  _exportCubeLut();
+                case 'media_info':
+                  showMediaSpecsSheet(
+                    context,
+                    ref,
+                    path: widget.args.path,
+                    isVideo: _isVideo,
+                  );
                 case 'histogram':
                   setState(() => _showHistogram = !_showHistogram);
                   if (_showHistogram && (_preview ?? _original) != null) {
@@ -931,6 +1119,23 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                     color: AppTheme.cinemaAmber,
                     fontSize: 12,
                   ),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'export_cube',
+                child: Text(
+                  s.exportCubeLut,
+                  style: const TextStyle(
+                    color: AppTheme.cinemaAmber,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'media_info',
+                child: Text(
+                  s.mediaInfo,
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
                 ),
               ),
               const PopupMenuDivider(),
@@ -1043,6 +1248,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
     return Column(
       children: [
         Expanded(child: _buildPreview()),
+        if (_isVideo && _videoDurationSeconds > 0.2) _buildVideoScrubBar(),
         if (_renderError != null)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -1056,10 +1262,69 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
     );
   }
 
+  Widget _buildVideoScrubBar() {
+    String fmt(double sec) {
+      final total = sec.round().clamp(0, 35999);
+      final m = (total ~/ 60).toString().padLeft(2, '0');
+      final s = (total % 60).toString().padLeft(2, '0');
+      return '$m:$s';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      child: Row(
+        children: [
+          Text(
+            fmt(_videoScrubSeconds),
+            style: AppTheme.monoStyle(
+              color: AppTheme.cinemaAmber,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          Expanded(
+            child: SizedBox(
+              height: 24,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 2,
+                  activeTrackColor: AppTheme.cinemaAmber,
+                  inactiveTrackColor: Colors.white12,
+                  thumbColor: AppTheme.cinemaAmber,
+                  thumbShape:
+                      const RoundSliderThumbShape(enabledThumbRadius: 5.5),
+                  overlayShape:
+                      const RoundSliderOverlayShape(overlayRadius: 11),
+                ),
+                child: Slider(
+                  value: _videoScrubSeconds.clamp(0.0, _videoDurationSeconds),
+                  min: 0.0,
+                  max: _videoDurationSeconds,
+                  onChanged: _onVideoScrubChanged,
+                ),
+              ),
+            ),
+          ),
+          Text(
+            fmt(_videoDurationSeconds),
+            style: AppTheme.monoStyle(
+              color: AppTheme.textSecondary,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPreview() {
     final original = _original;
     final edited = _preview ?? original;
-    final showMaskGuide = _tab == 9 && _selectedMask != null && !_splitCompare;
+    final showMaskGuide = _tab == 9 &&
+        _selectedMask != null &&
+        !_selectedMask!.isAiMask &&
+        !_splitCompare;
     final showBlurGuide =
         _tab == 8 && _edit.blurAmount > 0.005 && !_splitCompare;
 
@@ -1388,6 +1653,14 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
         format: EditValueFormat.signed,
         onChanged: (value) => _update(_edit.copyWith(blacks: value)),
       ),
+      EditSlider(
+        label: AppStrings.of(context).filmicRollOff,
+        value: _edit.filmicRollOff,
+        min: 0,
+        max: 1,
+        format: EditValueFormat.percent,
+        onChanged: (value) => _update(_edit.copyWith(filmicRollOff: value)),
+      ),
     ]);
   }
 
@@ -1597,6 +1870,20 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
         value: _edit.saturation,
         format: EditValueFormat.signed,
         onChanged: (value) => _update(_edit.copyWith(saturation: value)),
+      ),
+      EditSlider(
+        label: AppStrings.of(context).colorDensity,
+        value: _edit.colorDensity,
+        format: EditValueFormat.signed,
+        onChanged: (value) => _update(_edit.copyWith(colorDensity: value)),
+      ),
+      EditSlider(
+        label: AppStrings.of(context).skinProtect,
+        value: _edit.skinProtection,
+        min: 0,
+        max: 1,
+        format: EditValueFormat.percent,
+        onChanged: (value) => _update(_edit.copyWith(skinProtection: value)),
       ),
     ]);
   }
@@ -2129,6 +2416,35 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                   ),
                 ),
               ),
+              const SizedBox(width: 6),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.textPrimary,
+                  side: const BorderSide(color: AppTheme.hairline),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: _exportingCube ? null : _exportCubeLut,
+                icon: _exportingCube
+                    ? const SizedBox(
+                        width: 11,
+                        height: 11,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.8,
+                          color: AppTheme.cinemaAmber,
+                        ),
+                      )
+                    : const Icon(Icons.file_download_outlined, size: 13),
+                label: const Text(
+                  '.CUBE',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -2609,6 +2925,55 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                   style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
                 ),
               ),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppTheme.cinemaAmber,
+                  foregroundColor: Colors.black,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed:
+                    _generatingMask ? null : () => _generateAiMask('subject'),
+                icon: _generatingMask
+                    ? const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.8,
+                          color: Colors.black,
+                        ),
+                      )
+                    : const Icon(Icons.person_search_rounded, size: 14),
+                label: Text(
+                  AppStrings.of(context).subjectAi,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.cinemaAmber,
+                  side: const BorderSide(color: AppTheme.cinemaAmber),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed:
+                    _generatingMask ? null : () => _generateAiMask('sky'),
+                icon: const Icon(Icons.wb_cloudy_outlined, size: 14),
+                label: Text(
+                  AppStrings.of(context).skyBgAi,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -2923,6 +3288,88 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
         format: EditValueFormat.percent,
         onChanged: (v) => _update(_edit.copyWith(defringe: v)),
       ),
+      if (!_isVideo) ...[
+        _sectionLabel(s.frameBorder),
+        SizedBox(
+          height: 36,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            itemCount: 5,
+            separatorBuilder: (_, __) => const SizedBox(width: 6),
+            itemBuilder: (_, idx) {
+              const styles = <(String, String)>[
+                ('none', 'None'),
+                ('leica_white', 'Leica White'),
+                ('dark_matte', 'Dark Matte'),
+                ('film_35mm', '35mm Film'),
+                ('polaroid', 'Polaroid'),
+              ];
+              final (id, label) = styles[idx];
+              final selected = _edit.frameStyle == id;
+              return ChoiceChip(
+                label: Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                selected: selected,
+                selectedColor: AppTheme.cinemaAmber,
+                backgroundColor: Colors.white.withValues(alpha: 0.08),
+                labelStyle: TextStyle(
+                  color: selected ? Colors.black : Colors.white70,
+                ),
+                onSelected: (_) => _update(
+                  _edit.copyWith(frameStyle: id),
+                  immediateUndo: true,
+                ),
+              );
+            },
+          ),
+        ),
+        if (_edit.frameStyle != 'none')
+          SwitchListTile(
+            dense: true,
+            value: _edit.frameExifCaption,
+            activeThumbColor: AppTheme.cinemaAmber,
+            title: Text(
+              s.exifCaption,
+              style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12),
+            ),
+            onChanged: (v) => _update(
+              _edit.copyWith(frameExifCaption: v),
+              immediateUndo: true,
+            ),
+          ),
+        SwitchListTile(
+          dense: true,
+          value: _edit.frameDateStamp,
+          activeThumbColor: AppTheme.cinemaAmber,
+          title: Text(
+            s.dateStamp,
+            style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12),
+          ),
+          onChanged: (v) => _update(
+            _edit.copyWith(frameDateStamp: v),
+            immediateUndo: true,
+          ),
+        ),
+        SwitchListTile(
+          dense: true,
+          value: _edit.heif10Bit,
+          activeThumbColor: AppTheme.cinemaAmber,
+          title: Text(
+            s.heif10Bit,
+            style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12),
+          ),
+          onChanged: (v) => _update(
+            _edit.copyWith(heif10Bit: v),
+            immediateUndo: true,
+          ),
+        ),
+      ],
     ]);
   }
 

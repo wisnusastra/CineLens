@@ -22,6 +22,10 @@ class AppConstants {
   static const String prefSaveDngRaw = 'save_dng_raw_v1';
   static const String prefDirectLutRecording = 'direct_lut_recording_v1';
   static const String prefLiveMetalPreview = 'live_metal_preview_v1';
+  static const String prefHeif10Bit = 'heif_10bit_p3_v1';
+  static const String prefNightStack = 'process_zero_night_stack_v1';
+  static const String prefVolumeShutter = 'hardware_volume_shutter_v1';
+  static const String prefTimerSeconds = 'camera_timer_seconds_v1';
 
   /// Set once the first-install opening clip has been shown. Keeping this as a
   /// versioned key means a future opening can be shown again if needed.

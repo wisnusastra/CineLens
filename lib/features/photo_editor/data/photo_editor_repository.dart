@@ -42,6 +42,7 @@ class PhotoEditorRepository {
     required String path,
     required bool isVideo,
     int maxDimension = 1600,
+    double timestampSeconds = 0.0,
   }) async {
     try {
       final bytes = await _channel.invokeMethod<Uint8List>(
@@ -50,6 +51,7 @@ class PhotoEditorRepository {
           'path': path,
           'isVideo': isVideo,
           'maxDimension': maxDimension,
+          'timestampSeconds': timestampSeconds,
         },
       ).timeout(const Duration(seconds: 90));
       if (bytes == null || bytes.isEmpty) {
@@ -73,6 +75,7 @@ class PhotoEditorRepository {
     required bool isVideo,
     required Map<String, dynamic> payload,
     int maxDimension = 1600,
+    double timestampSeconds = 0.0,
   }) async {
     final bytes = await _channel.invokeMethod<Uint8List>(
       'editorRenderPreview',
@@ -80,6 +83,7 @@ class PhotoEditorRepository {
         'path': path,
         'isVideo': isVideo,
         'maxDimension': maxDimension,
+        'timestampSeconds': timestampSeconds,
         ...payload,
       },
     ).timeout(const Duration(seconds: 60));
@@ -237,6 +241,48 @@ class PhotoEditorRepository {
       return out;
     } on MissingPluginException {
       return const <String, dynamic>{};
+    }
+  }
+
+  /// Offline Vision Neural Engine segmentation (`target`: `'subject'` or `'sky'`).
+  /// Returns the generated PNG matte file path, or `null` if unavailable.
+  Future<String?> generateAiMask({
+    required String path,
+    required bool isVideo,
+    required String target,
+  }) async {
+    try {
+      final maskPath = await _channel.invokeMethod<String>(
+        'editorGenerateAiMask',
+        <String, dynamic>{
+          'path': path,
+          'isVideo': isVideo,
+          'target': target,
+        },
+      ).timeout(const Duration(seconds: 45));
+      return (maskPath != null && maskPath.isNotEmpty) ? maskPath : null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  /// Bakes the active editor color grade into a standard 33×33×33 `.cube` 3D LUT
+  /// file and returns its local file path.
+  Future<String?> exportCubeLut({
+    required Map<String, dynamic> payload,
+    String title = 'CineLens_Grade',
+  }) async {
+    try {
+      final path = await _channel.invokeMethod<String>(
+        'editorExportCubeLut',
+        <String, dynamic>{
+          ...payload,
+          'title': title,
+        },
+      ).timeout(const Duration(seconds: 45));
+      return (path != null && path.isNotEmpty) ? path : null;
+    } on MissingPluginException {
+      return null;
     }
   }
 

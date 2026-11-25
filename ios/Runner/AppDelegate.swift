@@ -5,10 +5,13 @@ import CoreMotion
 import CoreVideo
 import Flutter
 import ImageIO
+import MediaPlayer
 import Metal
+import Photos
 import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
+import Vision
 
 /// Sends a Flutter method result exactly once.
 ///
@@ -147,8 +150,30 @@ final class ExportProgressReporter {
     return CIContext(options: options)
   }()
 
+  /// Wide-Gamut Display P3 16-bit half-float context for 10-bit HEIF & P3 exports.
+  static let p3GradingContext: CIContext = {
+    let p3 = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpace(name: CGColorSpace.sRGB)
+    var options: [CIContextOption: Any] = [
+      .useSoftwareRenderer: false,
+      .workingFormat: CIFormat.RGBAh,
+      .highQualityDownsample: true,
+    ]
+    if let p3 = p3 {
+      options[.workingColorSpace] = p3
+      options[.outputColorSpace] = p3
+    }
+    return CIContext(options: options)
+  }()
+
   /// Active Process Zero RAW capture delegate held for the duration of one shot.
   private var rawPhotoDelegate: ProcessZeroPhotoDelegate?
+  private var rawBurstDelegate: ProcessZeroBurstDelegate?
+
+  /// Hardware volume-button / Bluetooth remote shutter listener.
+  private var volumeObservation: NSKeyValueObservation?
+  private var hiddenVolumeView: MPVolumeView?
+  private var lastVolumeShutterTime: TimeInterval = 0
+  private var suppressingVolumeReset = false
 
   /// Flutter texture registry + live Metal 3D LUT viewfinder & direct-to-disk
   /// video LUT pipeline (Tahap 2 Cinema Pro).
@@ -258,6 +283,7 @@ final class ExportProgressReporter {
         let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
         let appleLogInput = (args["appleLogInput"] as? Bool) ?? false
         let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.98
+        let heif10Bit = (args["heif10Bit"] as? Bool) ?? false
         let toneId = args["toneId"] as? String
         let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
         self?.exportGradedPhoto(
@@ -273,6 +299,7 @@ final class ExportProgressReporter {
           desqueeze: desqueeze,
           appleLogInput: appleLogInput,
           quality: quality,
+          heif10Bit: heif10Bit,
           result: result
         )
 
@@ -374,10 +401,12 @@ final class ExportProgressReporter {
         }
         let isVideo = (args["isVideo"] as? Bool) ?? false
         let maxDimension = (args["maxDimension"] as? NSNumber)?.intValue ?? 1600
+        let timestampSeconds = (args["timestampSeconds"] as? NSNumber)?.doubleValue ?? 0.0
         self?.editorLoadPreview(
           path: path,
           isVideo: isVideo,
           maxDimension: maxDimension,
+          timestampSeconds: timestampSeconds,
           result: result
         )
 
@@ -389,11 +418,13 @@ final class ExportProgressReporter {
         }
         let isVideo = (args["isVideo"] as? Bool) ?? false
         let maxDimension = (args["maxDimension"] as? NSNumber)?.intValue ?? 1600
+        let timestampSeconds = (args["timestampSeconds"] as? NSNumber)?.doubleValue ?? 0.0
         self?.editorRenderPreview(
           args: args,
           path: path,
           isVideo: isVideo,
           maxDimension: maxDimension,
+          timestampSeconds: timestampSeconds,
           result: result
         )
 
@@ -480,6 +511,51 @@ final class ExportProgressReporter {
         let audio = (args["audio"] as? Bool) ?? false
         self?.configureDopTelemetry(horizon: horizon, audio: audio)
         result(true)
+
+      case "generateVideoThumbnail":
+        guard let args = call.arguments as? [String: Any],
+              let path = args["path"] as? String else {
+          result(nil)
+          return
+        }
+        self?.generateVideoThumbnail(path: path, result: result)
+
+      case "inspectMediaMetadata":
+        guard let args = call.arguments as? [String: Any],
+              let path = args["path"] as? String else {
+          result([:])
+          return
+        }
+        let isVideo = (args["isVideo"] as? Bool) ?? false
+        self?.inspectMediaMetadata(path: path, isVideo: isVideo, result: result)
+
+      case "editorGenerateAiMask":
+        guard let args = call.arguments as? [String: Any],
+              let path = args["path"] as? String else {
+          result(nil)
+          return
+        }
+        let isVideo = (args["isVideo"] as? Bool) ?? false
+        let target = (args["target"] as? String) ?? "subject"
+        self?.editorGenerateAiMask(path: path, isVideo: isVideo, target: target, result: result)
+
+      case "editorExportCubeLut":
+        let args = call.arguments as? [String: Any] ?? [:]
+        self?.editorExportCubeLut(args: args, result: result)
+
+      case "setVolumeShutterEnabled":
+        let args = call.arguments as? [String: Any] ?? [:]
+        let enabled = (args["enabled"] as? Bool) ?? false
+        self?.setVolumeShutterEnabled(enabled)
+        result(true)
+
+      case "listAudioInputs":
+        result(self?.listAudioInputs() ?? [])
+
+      case "selectAudioInput":
+        let args = call.arguments as? [String: Any] ?? [:]
+        let portUID = args["portUID"] as? String
+        result(self?.selectAudioInput(portUID: portUID) ?? false)
 
       case "importMediaFromPhotos":
         let args = call.arguments as? [String: Any] ?? [:]
@@ -597,9 +673,13 @@ final class ExportProgressReporter {
     let changed = activeDevice !== device
     activeDevice = device
     disableAutomaticVideoHDRIfNeeded(on: device)
+    // Keep the existing FlutterTexture alive across optical 2x/TEL lens switches
+    // and session reconfigurations instead of unregistering it (which caused a
+    // blank black viewfinder when zooming with Live Metal LUT enabled!).
+    if let existing = liveMetalPipeline {
+      existing.rebind(to: session)
+    }
     if changed {
-      liveMetalPipeline?.detach()
-      liveMetalPipeline = nil
       reapplyManualControls()
     }
   }
@@ -1687,12 +1767,124 @@ final class ExportProgressReporter {
     let anamorphicCrop = (args["anamorphicCrop"] as? Bool) ?? false
     let frameAspectRatio = (args["frameAspectRatio"] as? NSNumber)?.doubleValue ?? 0.0
     let saveDngRaw = (args["saveDngRaw"] as? Bool) ?? false
+    let nightStack = (args["nightStack"] as? Bool) ?? false
+    let heif10Bit = (args["heif10Bit"] as? Bool) ?? false
     let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
     let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.98
     let toneId = args["toneId"] as? String
     let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
     let effects = FilmEffects.from(args)
     let importedLut = ImportedLut.from(args)
+
+    func decodeRawFrame(_ rawData: Data) -> CIImage? {
+      if let rawFilter = CIRAWFilter(imageData: rawData, identifierHint: nil) {
+        if rawFilter.isLocalToneMapSupported {
+          rawFilter.localToneMapAmount = 0.0
+        }
+        rawFilter.boostAmount = 0.72
+        rawFilter.boostShadowAmount = 0.0
+        if rawFilter.isLuminanceNoiseReductionSupported {
+          rawFilter.luminanceNoiseReductionAmount = nightStack ? 0.05 : 0.02
+        }
+        if rawFilter.isColorNoiseReductionSupported {
+          rawFilter.colorNoiseReductionAmount = nightStack ? 0.24 : 0.15
+        }
+        if rawFilter.isSharpnessSupported {
+          rawFilter.sharpnessAmount = 0.10
+        }
+        return rawFilter.outputImage
+      }
+      return CIImage(data: rawData, options: [.applyOrientationProperty: true])
+    }
+
+    if nightStack {
+      let frameTarget = 3
+      let burstDelegate = ProcessZeroBurstDelegate(expectedCount: frameTarget) { [weak self] frames in
+        self?.rawBurstDelegate = nil
+        guard let self = self, !frames.isEmpty else {
+          done.send(nil)
+          return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+          let primaryData = frames[0]
+          if saveDngRaw {
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let rawDir = docs.appendingPathComponent("cinelens_raw", isDirectory: true)
+            try? FileManager.default.createDirectory(at: rawDir, withIntermediateDirectories: true)
+            let dngUrl = rawDir.appendingPathComponent("CINELENS_RAW_STACK_\(Int(Date().timeIntervalSince1970)).dng")
+            try? primaryData.write(to: dngUrl, options: .atomic)
+          }
+
+          let decodedFrames = frames.compactMap { decodeRawFrame($0) }
+          guard let firstImg = decodedFrames.first else {
+            DispatchQueue.main.async { done.send(nil) }
+            return
+          }
+          let baseExtent = firstImg.extent
+          let weight = CGFloat(1.0 / Double(decodedFrames.count))
+
+          var fused: CIImage?
+          for img in decodedFrames {
+            let aligned = img.cropped(to: baseExtent)
+            let weighted = aligned.applyingFilter(
+              "CIColorMatrix",
+              parameters: [
+                "inputRVector": CIVector(x: weight, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: weight, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: weight, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: weight)
+              ]
+            )
+            if let acc = fused {
+              fused = weighted.applyingFilter(
+                "CIAdditionCompositing",
+                parameters: [kCIInputBackgroundImageKey: acc]
+              ).cropped(to: baseExtent)
+            } else {
+              fused = weighted
+            }
+          }
+
+          let finalSource = (fused ?? firstImg).settingAlphaOne(in: baseExtent)
+          let jpegData = self.renderGradedStill(
+            source: finalSource,
+            sourceMetadataBytes: primaryData,
+            matrix: matrix,
+            toneId: toneId,
+            intensity: intensity,
+            effects: effects,
+            importedLut: importedLut,
+            anamorphic: anamorphic,
+            anamorphicCrop: anamorphicCrop,
+            frameAspectRatio: frameAspectRatio,
+            desqueeze: desqueeze,
+            appleLogInput: false,
+            quality: quality,
+            heif10Bit: heif10Bit
+          )
+          DispatchQueue.main.async {
+            if let data = jpegData {
+              done.send(FlutterStandardTypedData(bytes: data))
+            } else {
+              done.send(nil)
+            }
+          }
+        }
+      }
+      self.rawBurstDelegate = burstDelegate
+      for _ in 0..<frameTarget {
+        let s = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+        s.photoQualityPrioritization = .speed
+        photoOutput.capturePhoto(with: s, delegate: burstDelegate)
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) { [weak self] in
+        if self?.rawBurstDelegate === burstDelegate {
+          self?.rawBurstDelegate = nil
+          burstDelegate.forceFinish()
+        }
+      }
+      return
+    }
 
     let settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
     settings.photoQualityPrioritization = .speed
@@ -1711,31 +1903,7 @@ final class ExportProgressReporter {
           let dngUrl = rawDir.appendingPathComponent("CINELENS_RAW_\(Int(Date().timeIntervalSince1970)).dng")
           try? rawData.write(to: dngUrl, options: .atomic)
         }
-        let decoded: CIImage?
-        if let rawFilter = CIRAWFilter(imageData: rawData, identifierHint: nil) {
-          if rawFilter.isLocalToneMapSupported {
-            rawFilter.localToneMapAmount = 0.0
-          }
-          // Keep natural photographic tone curve while disabling Smart HDR shadow
-          // boosting. Near-zero luminance NR prevents watercolor/oil-painting
-          // smearing on foliage and fine textures.
-          rawFilter.boostAmount = 0.72
-          rawFilter.boostShadowAmount = 0.0
-          if rawFilter.isLuminanceNoiseReductionSupported {
-            rawFilter.luminanceNoiseReductionAmount = 0.02
-          }
-          if rawFilter.isColorNoiseReductionSupported {
-            rawFilter.colorNoiseReductionAmount = 0.15
-          }
-          if rawFilter.isSharpnessSupported {
-            rawFilter.sharpnessAmount = 0.10
-          }
-          decoded = rawFilter.outputImage
-        } else {
-          decoded = CIImage(data: rawData, options: [.applyOrientationProperty: true])
-        }
-
-        guard let source = decoded else {
+        guard let source = decodeRawFrame(rawData) else {
           DispatchQueue.main.async { done.send(nil) }
           return
         }
@@ -1753,7 +1921,8 @@ final class ExportProgressReporter {
           frameAspectRatio: frameAspectRatio,
           desqueeze: desqueeze,
           appleLogInput: false,
-          quality: quality
+          quality: quality,
+          heif10Bit: heif10Bit
         )
         DispatchQueue.main.async {
           if let data = jpegData {
@@ -1792,6 +1961,7 @@ final class ExportProgressReporter {
     desqueeze: Double = 1.0,
     appleLogInput: Bool = false,
     quality: Double,
+    heif10Bit: Bool = false,
     result: @escaping FlutterResult
   ) {
     guard matrix.count == 20 else {
@@ -1836,7 +2006,8 @@ final class ExportProgressReporter {
         frameAspectRatio: frameAspectRatio,
         desqueeze: desqueeze,
         appleLogInput: appleLogInput,
-        quality: quality
+        quality: quality,
+        heif10Bit: heif10Bit
       )
 
       DispatchQueue.main.async {
@@ -1870,7 +2041,8 @@ final class ExportProgressReporter {
     frameAspectRatio: Double = 0.0,
     desqueeze: Double,
     appleLogInput: Bool,
-    quality: Double
+    quality: Double,
+    heif10Bit: Bool = false
   ) -> Data? {
     var working = source
     if appleLogInput {
@@ -1950,12 +2122,33 @@ final class ExportProgressReporter {
       )
     }
 
-    guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+    guard let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)
+      ?? CGColorSpace(name: CGColorSpace.sRGB) else {
       return nil
     }
 
-    let context = AppDelegate.gradingContext
+    let context = AppDelegate.p3GradingContext
     let clampedQuality = min(max(quality, 0.5), 1.0)
+
+    // When 10-bit HEIF is enabled, archive a true 10-bit Display P3 `.heic`
+    // master on disk AND write it directly to Apple Photos (preserving 10-bit
+    // smooth sky/shadow gradients without UIImage 8-bit truncation!).
+    if heif10Bit,
+       let heifData = try? context.heif10Representation(
+         of: output,
+         colorSpace: colorSpace,
+         options: [
+           kCIImageRepresentationLossyCompressionQuality as CIImageRepresentationOption:
+             CGFloat(clampedQuality)
+         ]
+       ) {
+      let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+      let dir = docs.appendingPathComponent("cinelens_10bit", isDirectory: true)
+      try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      let heicUrl = dir.appendingPathComponent("CINELENS_10BIT_\(Int(Date().timeIntervalSince1970)).heic")
+      try? heifData.write(to: heicUrl, options: .atomic)
+      AppDelegate.saveRawHeifToPhotosIfAuthorized(heifData)
+    }
 
     guard let cgImage = context.createCGImage(
       output,
@@ -2603,17 +2796,28 @@ final class ExportProgressReporter {
     MediaImporter.shared.present(from: presenter, limit: limit, result: result)
   }
 
+  private static func saveRawHeifToPhotosIfAuthorized(_ data: Data) {
+    let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+    guard status == .authorized || status == .limited else { return }
+    PHPhotoLibrary.shared().performChanges({
+      let req = PHAssetCreationRequest.forAsset()
+      req.addResource(with: .photo, data: data, options: nil)
+    }, completionHandler: nil)
+  }
+
   private func editorLoadPreview(
     path: String,
     isVideo: Bool,
     maxDimension: Int,
+    timestampSeconds: Double = 0.0,
     result: @escaping FlutterResult
   ) {
     DispatchQueue.global(qos: .userInitiated).async {
       let image = PhotoEditor.previewImage(
         path: path,
         isVideo: isVideo,
-        maxDimension: maxDimension
+        maxDimension: maxDimension,
+        timestampSeconds: timestampSeconds
       )
       let data = image.flatMap { PhotoEditor.jpegData(from: $0, quality: 0.9) }
       DispatchQueue.main.async {
@@ -2637,6 +2841,7 @@ final class ExportProgressReporter {
     path: String,
     isVideo: Bool,
     maxDimension: Int,
+    timestampSeconds: Double = 0.0,
     result: @escaping FlutterResult
   ) {
     let params = PhotoEditor.Params.from(args)
@@ -2648,13 +2853,15 @@ final class ExportProgressReporter {
       if let source = PhotoEditor.previewImage(
         path: path,
         isVideo: isVideo,
-        maxDimension: maxDimension
+        maxDimension: maxDimension,
+        timestampSeconds: timestampSeconds
       ) {
         output = PhotoEditor.render(
           params,
           look: filmLook ?? effectLook,
           matrix: filmLook == nil ? matrix : nil,
-          source: source
+          source: source,
+          sourcePath: path
         )
       }
       let data = output.flatMap { PhotoEditor.jpegData(from: $0, quality: 0.9) }
@@ -2691,8 +2898,27 @@ final class ExportProgressReporter {
           params,
           look: filmLook ?? effectLook,
           matrix: filmLook == nil ? matrix : nil,
-          source: source
+          source: source,
+          sourcePath: path
         )
+      }
+      if params.heif10Bit,
+         let outImg = output,
+         let p3 = CGColorSpace(name: CGColorSpace.displayP3),
+         let heifData = try? AppDelegate.p3GradingContext.heif10Representation(
+           of: outImg,
+           colorSpace: p3,
+           options: [
+             kCIImageRepresentationLossyCompressionQuality as CIImageRepresentationOption:
+               CGFloat(min(max(quality, 0.5), 1.0))
+           ]
+         ) {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = docs.appendingPathComponent("cinelens_10bit", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let heicUrl = dir.appendingPathComponent("CINELENS_EDIT_10BIT_\(Int(Date().timeIntervalSince1970)).heic")
+        try? heifData.write(to: heicUrl, options: .atomic)
+        AppDelegate.saveRawHeifToPhotosIfAuthorized(heifData)
       }
       let data = output.flatMap {
         PhotoEditor.jpegData(from: $0, quality: quality)
@@ -3043,6 +3269,334 @@ final class ExportProgressReporter {
     }
     if !payload.isEmpty {
       nativeChannel?.invokeMethod("dopTelemetry", arguments: payload)
+    }
+  }
+
+  // MARK: - v2.3.0 Pro Hardware, Metadata, Video Poster, Vision AI Mask & .cube Export
+
+  private func generateVideoThumbnail(path: String, result: @escaping FlutterResult) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      let url = URL(fileURLWithPath: path)
+      let asset = AVURLAsset(url: url)
+      let duration = max(0.0, asset.duration.seconds.isFinite ? asset.duration.seconds : 0.0)
+
+      let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+      let dir = caches.appendingPathComponent("cinelens_vthumbs", isDirectory: true)
+      try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      let safeName = url.lastPathComponent.replacingOccurrences(of: "[^A-Za-z0-9_.-]", with: "_", options: .regularExpression)
+      let thumbURL = dir.appendingPathComponent("\(safeName)_thumb.jpg")
+
+      if FileManager.default.fileExists(atPath: thumbURL.path) {
+        DispatchQueue.main.async {
+          result(["thumbPath": thumbURL.path, "durationSeconds": duration])
+        }
+        return
+      }
+
+      let generator = AVAssetImageGenerator(asset: asset)
+      generator.appliesPreferredTrackTransform = true
+      generator.maximumSize = CGSize(width: 480, height: 480)
+      let sampleTime = CMTime(seconds: min(0.15, duration * 0.1), preferredTimescale: 600)
+      if let cg = try? generator.copyCGImage(at: sampleTime, actualTime: nil) {
+        let ui = UIImage(cgImage: cg)
+        if let jpg = ui.jpegData(compressionQuality: 0.82) {
+          try? jpg.write(to: thumbURL, options: .atomic)
+          DispatchQueue.main.async {
+            result(["thumbPath": thumbURL.path, "durationSeconds": duration])
+          }
+          return
+        }
+      }
+      DispatchQueue.main.async {
+        result(["durationSeconds": duration])
+      }
+    }
+  }
+
+  private func inspectMediaMetadata(path: String, isVideo: Bool, result: @escaping FlutterResult) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      var info: [String: Any] = [:]
+      let url = URL(fileURLWithPath: path)
+      if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+         let size = attrs[.size] as? NSNumber {
+        info["fileSizeKB"] = Int(round(size.doubleValue / 1024.0))
+      }
+
+      if isVideo {
+        let asset = AVURLAsset(url: url)
+        let dur = asset.duration.seconds
+        if dur.isFinite { info["durationSeconds"] = (dur * 10.0).rounded() / 10.0 }
+        if let track = asset.tracks(withMediaType: .video).first {
+          let rect = CGRect(origin: .zero, size: track.naturalSize).applying(track.preferredTransform)
+          info["width"] = Int(abs(rect.width).rounded())
+          info["height"] = Int(abs(rect.height).rounded())
+          info["fps"] = Int(track.nominalFrameRate.rounded())
+          let mbps = Double(track.estimatedDataRate) / 1_000_000.0
+          if mbps > 0.05 { info["bitrateMbps"] = (mbps * 10.0).rounded() / 10.0 }
+          if let desc = track.formatDescriptions.first {
+            let fmt = desc as! CMFormatDescription
+            let sub = CMFormatDescriptionGetMediaSubType(fmt)
+            let chars: [Character] = [
+              Character(UnicodeScalar((sub >> 24) & 0xFF) ?? "?"),
+              Character(UnicodeScalar((sub >> 16) & 0xFF) ?? "?"),
+              Character(UnicodeScalar((sub >> 8) & 0xFF) ?? "?"),
+              Character(UnicodeScalar(sub & 0xFF) ?? "?")
+            ]
+            info["codec"] = String(chars).trimmingCharacters(in: .whitespaces)
+          }
+        }
+      } else if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+        let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        info["width"] = w
+        info["height"] = h
+        if w > 0 && h > 0 {
+          info["megapixels"] = (Double(w * h) / 1_000_000.0 * 10.0).rounded() / 10.0
+        }
+        if let profile = props[kCGImagePropertyProfileName] as? String {
+          info["colorSpace"] = profile
+        }
+        if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+          if let model = tiff[kCGImagePropertyTIFFModel] as? String {
+            info["cameraModel"] = model
+          }
+        }
+        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+          if let fl35 = (exif[kCGImagePropertyExifFocalLenIn35mmFilm] as? NSNumber)?.intValue {
+            info["focalLength"] = "\(fl35)mm"
+          } else if let fl = (exif[kCGImagePropertyExifFocalLength] as? NSNumber)?.doubleValue {
+            info["focalLength"] = String(format: "%.1fmm", fl)
+          }
+          if let fn = (exif[kCGImagePropertyExifFNumber] as? NSNumber)?.doubleValue {
+            info["fNumber"] = String(format: "f/%.1f", fn)
+          }
+          if let exp = (exif[kCGImagePropertyExifExposureTime] as? NSNumber)?.doubleValue, exp > 0 {
+            if exp < 1.0 {
+              info["shutter"] = "1/\(max(1, Int((1.0 / exp).rounded())))s"
+            } else {
+              info["shutter"] = String(format: "%.1fs", exp)
+            }
+          }
+          if let isos = exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber], let iso = isos.first {
+            info["iso"] = "ISO \(iso.intValue)"
+          }
+          if let dt = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
+            info["dateTime"] = dt
+          }
+        }
+      }
+      DispatchQueue.main.async { result(info) }
+    }
+  }
+
+  /// Offline iOS Vision Neural Engine Smart Masking (`subject` or `sky`/`background`).
+  private func editorGenerateAiMask(
+    path: String,
+    isVideo: Bool,
+    target: String,
+    result: @escaping FlutterResult
+  ) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      guard let preview = PhotoEditor.previewImage(path: path, isVideo: isVideo, maxDimension: 1024),
+            let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+            let cgImg = AppDelegate.gradingContext.createCGImage(preview, from: preview.extent, format: .RGBA8, colorSpace: srgb) else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+
+      var maskCI: CIImage?
+
+      // 1. Try iOS 17+ Foreground Instance Segmentation first (works on people, pets, cars, objects!).
+      if target != "sky", #available(iOS 17.0, *) {
+        let req = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImg, options: [:])
+        if (try? handler.perform([req])) != nil,
+           let obs = req.results?.first,
+           let buf = try? obs.generateScaledMaskForImage(forInstances: obs.allInstances, from: handler) {
+          maskCI = CIImage(cvPixelBuffer: buf)
+        }
+      }
+
+      // 2. Fallback to iOS 15+ Person Segmentation.
+      if maskCI == nil && target != "sky" {
+        let req = VNGeneratePersonSegmentationRequest()
+        req.qualityLevel = .balanced
+        req.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        let handler = VNImageRequestHandler(cgImage: cgImg, options: [:])
+        if (try? handler.perform([req])) != nil,
+           let buf = req.results?.first?.pixelBuffer {
+          maskCI = CIImage(cvPixelBuffer: buf)
+        }
+      }
+
+      // 3. Sky / Fallback atmospheric upper-luminance matte.
+      if maskCI == nil {
+        let ext = preview.extent
+        let topGrad = CIFilter(
+          name: "CILinearGradient",
+          parameters: [
+            "inputPoint0": CIVector(x: ext.midX, y: ext.maxY * 0.85),
+            "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 1),
+            "inputPoint1": CIVector(x: ext.midX, y: ext.maxY * 0.32),
+            "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+          ]
+        )?.outputImage?.cropped(to: ext)
+        let bright = preview.applyingFilter(
+          "CIColorMatrix",
+          parameters: [
+            "inputRVector": CIVector(x: 0.4, y: 0.8, z: 1.2, w: 0),
+            "inputGVector": CIVector(x: 0.4, y: 0.8, z: 1.2, w: 0),
+            "inputBVector": CIVector(x: 0.4, y: 0.8, z: 1.2, w: 0),
+            "inputBiasVector": CIVector(x: -0.65, y: -0.65, z: -0.65, w: 0)
+          ]
+        ).applyingFilter("CIColorClamp")
+        if let g = topGrad {
+          maskCI = bright.applyingFilter(
+            "CIMultiplyCompositing",
+            parameters: [kCIInputBackgroundImageKey: g]
+          ).cropped(to: ext)
+        }
+      }
+
+      guard var finalMask = maskCI else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      if finalMask.extent.origin != .zero {
+        finalMask = finalMask.transformed(
+          by: CGAffineTransform(translationX: -finalMask.extent.origin.x, y: -finalMask.extent.origin.y)
+        )
+      }
+      if target == "background" {
+        finalMask = finalMask.applyingFilter("CIColorInvert").cropped(to: finalMask.extent)
+      }
+
+      guard let outCG = AppDelegate.gradingContext.createCGImage(
+        finalMask,
+        from: finalMask.extent,
+        format: .RGBA8,
+        colorSpace: srgb
+      ),
+      let png = UIImage(cgImage: outCG).pngData() else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+
+      let outURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("cinelens_aimask_\(UUID().uuidString.prefix(8)).png")
+      do {
+        try png.write(to: outURL, options: .atomic)
+        DispatchQueue.main.async { result(outURL.path) }
+      } catch {
+        DispatchQueue.main.async { result(nil) }
+      }
+    }
+  }
+
+  /// Exports the active Editor colour pipeline into an industry-standard 33×33×33 `.cube` 3D LUT file.
+  private func editorExportCubeLut(args: [String: Any], result: @escaping FlutterResult) {
+    let params = PhotoEditor.Params.from(args)
+    let (filmLook, effectLook) = AppDelegate.editorLooks(args: args)
+    let matrix = args["matrix"] as? [Double]
+    let title = (args["title"] as? String) ?? "CineLens_Grade"
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      guard let cubePath = PhotoEditor.exportCubeFile(
+        params: params,
+        look: filmLook ?? effectLook,
+        matrix: filmLook == nil ? matrix : nil,
+        title: title
+      ) else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      DispatchQueue.main.async { result(cubePath) }
+    }
+  }
+
+  /// Enables/disables physical iPhone Volume Up/Down & Bluetooth clicker shutter.
+  private func setVolumeShutterEnabled(_ enabled: Bool) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self else { return }
+      if !enabled {
+        self.volumeObservation?.invalidate()
+        self.volumeObservation = nil
+        self.hiddenVolumeView?.removeFromSuperview()
+        self.hiddenVolumeView = nil
+        return
+      }
+      guard self.volumeObservation == nil else { return }
+
+      let session = AVAudioSession.sharedInstance()
+      try? session.setActive(true)
+
+      if self.hiddenVolumeView == nil,
+         let win = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .flatMap({ $0.windows })
+           .first(where: { $0.isKeyWindow }) {
+        let vv = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
+        vv.alpha = 0.01
+        win.addSubview(vv)
+        self.hiddenVolumeView = vv
+      }
+
+      self.volumeObservation = session.observe(\.outputVolume, options: [.old, .new]) { [weak self] _, change in
+        guard let self = self, !self.suppressingVolumeReset else { return }
+        guard let oldV = change.oldValue, let newV = change.newValue, abs(newV - oldV) > 0.001 else { return }
+        let now = Date().timeIntervalSince1970
+        guard now - self.lastVolumeShutterTime > 0.45 else { return }
+        self.lastVolumeShutterTime = now
+
+        // Keep system volume away from 0.0 / 1.0 limits so subsequent presses still emit KVO.
+        if newV <= 0.06 || newV >= 0.94 {
+          if let slider = self.hiddenVolumeView?.subviews.compactMap({ $0 as? UISlider }).first {
+            self.suppressingVolumeReset = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+              slider.value = 0.5
+              DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.suppressingVolumeReset = false
+              }
+            }
+          }
+        }
+        DispatchQueue.main.async {
+          self.nativeChannel?.invokeMethod("hardwareShutterPressed", arguments: nil)
+        }
+      }
+    }
+  }
+
+  private func listAudioInputs() -> [[String: Any]] {
+    let session = AVAudioSession.sharedInstance()
+    try? session.setCategory(.playAndRecord, mode: .videoRecording, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth])
+    let currentUID = session.preferredInput?.uid ?? session.currentRoute.inputs.first?.uid
+    let inputs = session.availableInputs ?? []
+    return inputs.map { port in
+      [
+        "uid": port.uid,
+        "name": port.portName,
+        "type": port.portType.rawValue,
+        "selected": port.uid == currentUID
+      ]
+    }
+  }
+
+  private func selectAudioInput(portUID: String?) -> Bool {
+    let session = AVAudioSession.sharedInstance()
+    guard let uid = portUID, !uid.isEmpty else {
+      try? session.setPreferredInput(nil)
+      return true
+    }
+    guard let match = session.availableInputs?.first(where: { $0.uid == uid }) else {
+      return false
+    }
+    do {
+      try session.setPreferredInput(match)
+      return true
+    } catch {
+      return false
     }
   }
 }
@@ -3440,6 +3994,8 @@ struct FilmEffects {
   let shadowDepth: Double
   /// Optical film micro-contrast / edge sharpness (0…1).
   let acutance: Double
+  /// ACES / AgX filmic highlight shoulder roll-off (0…1).
+  let filmicRollOff: Double
 
   /// True when every manual effect is off, so the renderer can skip the passes.
   var isNeutral: Bool {
@@ -3449,6 +4005,7 @@ struct FilmEffects {
       && vignette <= 0.001
       && shadowDepth <= 0.001
       && acutance <= 0.001
+      && filmicRollOff <= 0.001
   }
 
   static func from(_ args: [String: Any]) -> FilmEffects? {
@@ -3469,7 +4026,8 @@ struct FilmEffects {
       vignette: unit("vignette"),
       useStockEffects: useStock,
       shadowDepth: unit("shadowDepth"),
-      acutance: unit("acutance")
+      acutance: unit("acutance"),
+      filmicRollOff: unit("filmicRollOff")
     )
   }
 }
@@ -3597,6 +4155,9 @@ struct FilmLook {
   /// lens optical detail is never double-sharpened into oily halos.
   var acutance: Double = 0.0
 
+  /// ACES / AgX filmic highlight roll-off (0…1).
+  var filmicRollOff: Double = 0.0
+
   /// Renders the full look: colour cube, deep shadow toe, optional micro-radius
   /// acutance, specular-only halation/bloom, full-resolution fine grain and vignette.
   func apply(to image: CIImage, frameIndex: Int, isVideo: Bool = false) -> CIImage {
@@ -3641,6 +4202,12 @@ struct FilmLook {
     //     shadows without crushing sunlit highlights.
     if shadowDepth > 0.005 {
       output = FilmEngine.applyShadowDepth(to: output, strength: shadowDepth)
+        .cropped(to: extent)
+    }
+
+    // 1c. ACES / AgX Filmic Highlight Roll-Off: smooth creamy shoulder above 0.56 luma.
+    if filmicRollOff > 0.005 {
+      output = FilmEngine.applyFilmicRollOff(to: output, strength: filmicRollOff)
         .cropped(to: extent)
     }
 
@@ -3889,7 +4456,44 @@ struct FilmLook {
       ]
     )
 
-    return limited
+    // Luminance-weighted Silver-Halide modulation: peaks organically in midtones
+    // (0.20..0.75) while attenuating grain in ink-black shadows & pure specular
+    // whites, matching physical film emulsion response with zero shadow blotches!
+    let lumaWeight = base.applyingFilter(
+      "CIColorMatrix",
+      parameters: [
+        "inputRVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
+        "inputGVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
+        "inputBVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
+        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+      ]
+    ).applyingFilter(
+      "CIColorPolynomial",
+      parameters: [
+        "inputRedCoefficients": CIVector(x: 0.20, y: 3.10, z: -2.95, w: 0),
+        "inputGreenCoefficients": CIVector(x: 0.20, y: 3.10, z: -2.95, w: 0),
+        "inputBlueCoefficients": CIVector(x: 0.20, y: 3.10, z: -2.95, w: 0),
+        "inputAlphaCoefficients": CIVector(x: 1, y: 0, z: 0, w: 0)
+      ]
+    ).applyingFilter(
+      "CIColorClamp",
+      parameters: [
+        "inputMinComponents": CIVector(x: 0.18, y: 0.18, z: 0.18, w: 1),
+        "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
+      ]
+    ).cropped(to: extent)
+
+    let neutralGrey = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1))
+      .cropped(to: extent)
+    let weightedGrain = limited.applyingFilter(
+      "CIBlendWithMask",
+      parameters: [
+        kCIInputBackgroundImageKey: neutralGrey,
+        kCIInputMaskImageKey: lumaWeight
+      ]
+    ).cropped(to: extent)
+
+    return weightedGrain
       .applyingFilter(
         "CISoftLightBlendMode",
         parameters: [kCIInputBackgroundImageKey: base]
@@ -3959,6 +4563,7 @@ enum FilmEngine {
     let params = effects.map { stock.withEffects($0) } ?? stock
     let shadowDepth = effects?.shadowDepth ?? 0.0
     let acutance = effects?.acutance ?? 0.0
+    let filmicRollOff = effects?.filmicRollOff ?? 0.0
 
     let key = "\(toneId)-\(Int((clamped * 100.0).rounded()))"
 
@@ -3980,7 +4585,8 @@ enum FilmEngine {
       cubeData: cube,
       effectScale: useStock ? nil : 1.0,
       shadowDepth: shadowDepth,
-      acutance: acutance
+      acutance: acutance,
+      filmicRollOff: filmicRollOff
     )
   }
 
@@ -4008,7 +4614,8 @@ enum FilmEngine {
       usesCube: true,
       effectScale: effects == nil ? nil : 1.0,
       shadowDepth: effects?.shadowDepth ?? 0.0,
-      acutance: effects?.acutance ?? 0.0
+      acutance: effects?.acutance ?? 0.0,
+      filmicRollOff: effects?.filmicRollOff ?? 0.0
     )
   }
 
@@ -4021,7 +4628,8 @@ enum FilmEngine {
       usesCube: false,
       effectScale: 1.0,
       shadowDepth: effects.shadowDepth,
-      acutance: effects.acutance
+      acutance: effects.acutance,
+      filmicRollOff: effects.filmicRollOff
     )
   }
 
@@ -4179,6 +4787,82 @@ enum FilmEngine {
 
   private static var appleLogCubeCache: Data?
   private static var shadowDepthCubeCache: [Int: Data] = [:]
+  private static var filmicRollOffCubeCache: [Int: Data] = [:]
+
+  /// ACES / AgX-inspired Filmic Highlight Roll-Off: smoothly compresses bright
+  /// highlights above luma 0.56 while gently desaturating clipped neon peaks
+  /// toward creamy organic film white (eliminating harsh digital highlight clip).
+  static func applyFilmicRollOff(to image: CIImage, strength: Double) -> CIImage {
+    let clamped = min(max(strength, 0.0), 1.0)
+    guard clamped > 0.005 else { return image }
+    let bucket = Int((clamped * 40.0).rounded())
+
+    cacheLock.lock()
+    var cube = filmicRollOffCubeCache[bucket]
+    cacheLock.unlock()
+
+    if cube == nil {
+      let s = Double(bucket) / 40.0
+      let n = 33
+      let last = Double(n - 1)
+      var values = [Float]()
+      values.reserveCapacity(n * n * n * 4)
+      let knee = 0.54
+      for bi in 0..<n {
+        for gi in 0..<n {
+          for ri in 0..<n {
+            var r = Double(ri) / last
+            var g = Double(gi) / last
+            var b = Double(bi) / last
+            func compress(_ c: Double) -> Double {
+              guard c > knee else { return c }
+              let over = c - knee
+              let span = 1.0 - knee
+              let k = 0.8 + s * 2.1
+              let rolled = knee + span * ((1.0 - exp(-k * over / span)) / (1.0 - exp(-k)))
+              return c + (rolled - c) * s
+            }
+            r = compress(r)
+            g = compress(g)
+            b = compress(b)
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            // Creamy AgX highlight desaturation above 0.68 luma
+            let desat = smoothstep(0.66, 1.0, y) * 0.42 * s
+            r = y + (r - y) * (1.0 - desat)
+            g = y + (g - y) * (1.0 - desat)
+            b = y + (b - y) * (1.0 - desat)
+            values.append(Float(min(max(r, 0.0), 1.0)))
+            values.append(Float(min(max(g, 0.0), 1.0)))
+            values.append(Float(min(max(b, 0.0), 1.0)))
+            values.append(1.0)
+          }
+        }
+      }
+      let built = values.withUnsafeBufferPointer { Data(buffer: $0) }
+      cacheLock.lock()
+      if filmicRollOffCubeCache.count > 16 { filmicRollOffCubeCache.removeAll() }
+      filmicRollOffCubeCache[bucket] = built
+      cacheLock.unlock()
+      cube = built
+    }
+
+    guard let cubeData = cube else { return image }
+    if let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
+       let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+      filter.setValue(image, forKey: kCIInputImageKey)
+      filter.setValue(33, forKey: "inputCubeDimension")
+      filter.setValue(cubeData, forKey: "inputCubeData")
+      filter.setValue(srgb, forKey: "inputColorSpace")
+      if let out = filter.outputImage {
+        return out.cropped(to: image.extent)
+      }
+    }
+    guard let filter = CIFilter(name: "CIColorCube") else { return image }
+    filter.setValue(image, forKey: kCIInputImageKey)
+    filter.setValue(33, forKey: "inputCubeDimension")
+    filter.setValue(cubeData, forKey: "inputCubeData")
+    return filter.outputImage?.cropped(to: image.extent) ?? image
+  }
 
   /// Decodes Apple Log (per Apple Log Profile White Paper) into display-ready
   /// sRGB/Rec.709 with smooth highlight roll-off so 3D film LUTs grade properly
@@ -4702,6 +5386,7 @@ enum PhotoEditor {
 
   struct MaskParams {
     var isLinear: Bool = false
+    var maskImagePath: String? = nil
     var startX: Double = 0.5
     var startY: Double = 0.5
     var endX: Double = 0.82
@@ -4735,6 +5420,9 @@ enum PhotoEditor {
       }
       var m = MaskParams()
       m.isLinear = (map["type"] as? String) == "linear"
+      if let mp = map["maskImagePath"] as? String, !mp.isEmpty {
+        m.maskImagePath = mp
+      }
       m.startX = min(max(num("startX", fallback: 0.5), 0), 1)
       m.startY = min(max(num("startY", fallback: m.isLinear ? 0.15 : 0.5), 0), 1)
       m.endX = min(max(num("endX", fallback: m.isLinear ? 0.5 : 0.82), 0), 1)
@@ -4814,6 +5502,15 @@ enum PhotoEditor {
     var trimStart: Double = 0.0
     var trimEnd: Double = 1.0
     var normalizeAudio: Bool = false
+    /// v2.3.0 Output Engine & Editorial Frame upgrades:
+    var filmicRollOff: Double = 0.0
+    var colorDensity: Double = 0.0
+    var skinProtection: Double = 0.0
+    var heif10Bit: Bool = false
+    var frameStyle: String = "none"
+    var frameExifCaption: Bool = false
+    var frameDateStamp: Bool = false
+    var frameCustomText: String = ""
 
     var isCdlNeutral: Bool {
       abs(cdlSlope[0] - 1) < 0.002 && abs(cdlSlope[1] - 1) < 0.002 && abs(cdlSlope[2] - 1) < 0.002
@@ -4939,6 +5636,14 @@ enum PhotoEditor {
       params.trimStart = min(max(number("trimStart", fallback: 0.0), 0.0), 0.98)
       params.trimEnd = min(max(number("trimEnd", fallback: 1.0), params.trimStart + 0.02), 1.0)
       params.normalizeAudio = (raw["normalizeAudio"] as? Bool) ?? false
+      params.filmicRollOff = positive("filmicRollOff")
+      params.colorDensity = signed("colorDensity")
+      params.skinProtection = positive("skinProtection")
+      params.heif10Bit = (raw["heif10Bit"] as? Bool) ?? false
+      params.frameStyle = (raw["frameStyle"] as? String) ?? "none"
+      params.frameExifCaption = (raw["frameExifCaption"] as? Bool) ?? false
+      params.frameDateStamp = (raw["frameDateStamp"] as? Bool) ?? false
+      params.frameCustomText = (raw["frameCustomText"] as? String) ?? ""
       return params
     }
   }
@@ -5209,8 +5914,19 @@ enum PhotoEditor {
       output = applyCube(cube, dimension: 33, to: output)
     }
 
+    // 3b. ACES / AgX Filmic Highlight Roll-Off.
+    if params.filmicRollOff > 0.005 {
+      output = FilmEngine.applyFilmicRollOff(to: output, strength: params.filmicRollOff)
+    }
+
     // 4. Colour Mix (HSL) as a 17³ cube (also drives B&W tonal luminance mix!).
     if let cube = hslCube(params) {
+      output = applyCube(cube, dimension: 17, to: output)
+    }
+
+    // 4a. Subtractive Film Dye Density & Skin-Tone Vector Protection.
+    if !params.blackAndWhite && (abs(params.colorDensity) > 0.005 || params.skinProtection > 0.005),
+       let cube = subtractiveSkinCube(density: params.colorDensity, skinProtection: params.skinProtection) {
       output = applyCube(cube, dimension: 17, to: output)
     }
 
@@ -5348,7 +6064,28 @@ enum PhotoEditor {
       let ey = extent.minY + CGFloat(1.0 - mask.endY) * h
 
       var matte: CIImage?
-      if mask.isLinear {
+      if let mp = mask.maskImagePath,
+         !mp.isEmpty,
+         FileManager.default.fileExists(atPath: mp),
+         var aiImg = CIImage(contentsOf: URL(fileURLWithPath: mp)) {
+        if aiImg.extent.origin != .zero {
+          aiImg = aiImg.transformed(
+            by: CGAffineTransform(translationX: -aiImg.extent.origin.x, y: -aiImg.extent.origin.y)
+          )
+        }
+        let sxScale = w / max(aiImg.extent.width, 1)
+        let syScale = h / max(aiImg.extent.height, 1)
+        aiImg = aiImg.transformed(by: CGAffineTransform(scaleX: sxScale, y: syScale))
+          .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+          .cropped(to: extent)
+        if mask.feather > 0.06 {
+          let sigma = Double(mask.feather) * 6.0 * (Double(max(w, h)) / 1920.0)
+          aiImg = aiImg.clampedToExtent()
+            .applyingGaussianBlur(sigma: max(0.5, sigma))
+            .cropped(to: extent)
+        }
+        matte = aiImg
+      } else if mask.isLinear {
         let dx = ex - sx
         let dy = ey - sy
         let midX = (sx + ex) * 0.5
@@ -5603,6 +6340,7 @@ enum PhotoEditor {
     look: FilmLook?,
     matrix: [Double]?,
     source: CIImage,
+    sourcePath: String? = nil,
     frameIndex: Int = 0
   ) -> CIImage {
     var output = applyGeometryAndOptics(params, to: source)
@@ -5623,7 +6361,402 @@ enum PhotoEditor {
 
     output = applyLensBlur(params, to: output)
     output = applyFinish(params, to: output, frameIndex: frameIndex)
-    return output.cropped(to: workingExtent)
+    var cropped = output.cropped(to: workingExtent)
+    if params.frameStyle != "none" || params.frameDateStamp {
+      cropped = applyFrameBorder(params, to: cropped, sourcePath: sourcePath)
+    }
+    return cropped
+  }
+
+  // MARK: v2.3.0 Subtractive Color, Skin Protection, Film Borders & .cube Export
+
+  private static var subtractiveSkinCache: [String: Data] = [:]
+
+  /// Beer-Lambert subtractive film saturation (saturated colors deepen rather
+  /// than glowing neon) + automatic human skin-hue protection (12°–48°).
+  private static func subtractiveSkinCube(
+    density: Double,
+    skinProtection: Double
+  ) -> Data? {
+    let key = String(format: "%.2f|%.2f", density, skinProtection)
+    gradingLock.lock()
+    let cached = subtractiveSkinCache[key]
+    gradingLock.unlock()
+    if let cached = cached { return cached }
+
+    let n = 17
+    let last = Double(n - 1)
+    var values = [Float](repeating: 0, count: n * n * n * 4)
+
+    for bi in 0..<n {
+      for gi in 0..<n {
+        for ri in 0..<n {
+          let r = Double(ri) / last
+          let g = Double(gi) / last
+          let b = Double(bi) / last
+          var (hue, sat, lum) = rgbToHsl(r, g, b)
+
+          // Skin-tone vector protection around ~26° warm skin axis.
+          var skinWeight = 0.0
+          if skinProtection > 0.005 {
+            let dHue = min(abs(hue - 26.0), 360.0 - abs(hue - 26.0))
+            let wH = exp(-(dHue * dHue) / (2.0 * 17.0 * 17.0))
+            let wS = smoothstep(0.08, 0.22, sat) * (1.0 - smoothstep(0.62, 0.85, sat))
+            let wL = smoothstep(0.12, 0.28, lum) * (1.0 - smoothstep(0.84, 0.96, lum))
+            skinWeight = wH * wS * wL * skinProtection
+            if skinWeight > 0.001 {
+              // Gently pull skewed cyan/green/magenta casts on skin back toward 26°.
+              var delta = 26.0 - hue
+              if delta > 180 { delta -= 360 }
+              if delta < -180 { delta += 360 }
+              hue = (hue + delta * skinWeight * 0.45).truncatingRemainder(dividingBy: 360.0)
+              if hue < 0 { hue += 360.0 }
+              if sat > 0.48 {
+                sat = sat - (sat - 0.48) * skinWeight * 0.55
+              }
+            }
+          }
+
+          // Subtractive film dye density: saturated colors absorb light & deepen!
+          if abs(density) > 0.005 {
+            let effectiveDensity = density * (1.0 - skinWeight * 0.65)
+            sat = min(max(sat * (1.0 + effectiveDensity * 0.34), 0.0), 1.0)
+            let absorb = sat * effectiveDensity * 0.24 * smoothstep(0.08, 0.45, lum)
+            lum = min(max(lum * (1.0 - absorb), 0.0), 1.0)
+          }
+
+          let (nr, ng, nb) = hslToRgb(hue, sat, lum)
+          let offset = ((bi * n + gi) * n + ri) * 4
+          values[offset] = Float(min(max(nr, 0), 1))
+          values[offset + 1] = Float(min(max(ng, 0), 1))
+          values[offset + 2] = Float(min(max(nb, 0), 1))
+          values[offset + 3] = 1
+        }
+      }
+    }
+
+    let data = values.withUnsafeBytes { Data($0) }
+    gradingLock.lock()
+    if subtractiveSkinCache.count > 16 { subtractiveSkinCache.removeAll() }
+    subtractiveSkinCache[key] = data
+    gradingLock.unlock()
+    return data
+  }
+
+  /// Renders Leica Gallery White, Dark Matte, 35mm Film Sprocket, or Polaroid
+  /// frames plus optional EXIF lens/exposure line and vintage `'YY MM DD` stamp.
+  static func applyFrameBorder(
+    _ params: Params,
+    to image: CIImage,
+    sourcePath: String?
+  ) -> CIImage {
+    let clean = reorigin(image)
+    let ext = clean.extent
+    guard ext.width > 8, ext.height > 8,
+          let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+          let cgImg = AppDelegate.gradingContext.createCGImage(
+            clean,
+            from: ext,
+            format: .RGBA8,
+            colorSpace: srgb
+          ) else {
+      return image
+    }
+
+    let imgW = ext.width
+    let imgH = ext.height
+    let shortSide = min(imgW, imgH)
+
+    // Read EXIF & date from original file if available.
+    var exifParts: [String] = []
+    var dateStampText = ""
+    let fallbackDate: Date = {
+      if let p = sourcePath,
+         let attrs = try? FileManager.default.attributesOfItem(atPath: p),
+         let d = attrs[.creationDate] as? Date {
+        return d
+      }
+      return Date()
+    }()
+
+    if let p = sourcePath,
+       let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: p) as CFURL, nil),
+       let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+       let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+      if let fl35 = (exif[kCGImagePropertyExifFocalLenIn35mmFilm] as? NSNumber)?.intValue {
+        exifParts.append("\(fl35)mm")
+      } else if let fl = (exif[kCGImagePropertyExifFocalLength] as? NSNumber)?.doubleValue {
+        exifParts.append(String(format: "%.0fmm", fl))
+      }
+      if let fn = (exif[kCGImagePropertyExifFNumber] as? NSNumber)?.doubleValue {
+        exifParts.append(String(format: "f/%.1f", fn))
+      }
+      if let exp = (exif[kCGImagePropertyExifExposureTime] as? NSNumber)?.doubleValue, exp > 0 {
+        if exp < 1.0 {
+          exifParts.append("1/\(max(1, Int((1.0 / exp).rounded())))s")
+        } else {
+          exifParts.append(String(format: "%.1fs", exp))
+        }
+      }
+      if let isos = exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber], let iso = isos.first {
+        exifParts.append("ISO \(iso.intValue)")
+      }
+      if let dt = exif[kCGImagePropertyExifDateTimeOriginal] as? String, dt.count >= 10 {
+        // "YYYY:MM:DD HH:mm:ss" -> "'YY MM DD"
+        let yy = String(dt.dropFirst(2).prefix(2))
+        let mm = String(dt.dropFirst(5).prefix(2))
+        let dd = String(dt.dropFirst(8).prefix(2))
+        dateStampText = "'\(yy) \(mm) \(dd)"
+      }
+    }
+    if dateStampText.isEmpty {
+      let fmt = DateFormatter()
+      fmt.dateFormat = "''yy MM dd"
+      dateStampText = fmt.string(from: fallbackDate)
+    }
+    if !params.frameCustomText.isEmpty {
+      exifParts.append(params.frameCustomText.uppercased())
+    }
+    let captionLine = exifParts.isEmpty ? "CINELENS PRO" : exifParts.joined(separator: "  ·  ")
+
+    let style = params.frameStyle
+    let padSide: CGFloat
+    let padTop: CGFloat
+    let padBottom: CGFloat
+    let bgColor: UIColor
+    let primaryTextColor: UIColor
+    let accentDotColor = UIColor(red: 0.90, green: 0.22, blue: 0.18, alpha: 1.0)
+
+    switch style {
+    case "leica_white":
+      padSide = round(shortSide * 0.055)
+      padTop = padSide
+      padBottom = round(shortSide * (params.frameExifCaption ? 0.145 : 0.075))
+      bgColor = UIColor(white: 0.985, alpha: 1.0)
+      primaryTextColor = UIColor(white: 0.16, alpha: 1.0)
+    case "dark_matte":
+      padSide = round(shortSide * 0.055)
+      padTop = padSide
+      padBottom = round(shortSide * (params.frameExifCaption ? 0.145 : 0.075))
+      bgColor = UIColor(red: 0.045, green: 0.045, blue: 0.055, alpha: 1.0)
+      primaryTextColor = UIColor(white: 0.88, alpha: 1.0)
+    case "film_35mm":
+      padSide = round(shortSide * 0.075)
+      padTop = round(shortSide * 0.065)
+      padBottom = round(shortSide * 0.085)
+      bgColor = UIColor(white: 0.03, alpha: 1.0)
+      primaryTextColor = UIColor(red: 0.90, green: 0.66, blue: 0.23, alpha: 0.92)
+    case "polaroid":
+      padSide = round(shortSide * 0.065)
+      padTop = round(shortSide * 0.065)
+      padBottom = round(shortSide * 0.22)
+      bgColor = UIColor(red: 0.975, green: 0.968, blue: 0.945, alpha: 1.0)
+      primaryTextColor = UIColor(white: 0.22, alpha: 1.0)
+    default:
+      padSide = 0
+      padTop = 0
+      padBottom = 0
+      bgColor = .black
+      primaryTextColor = .white
+    }
+
+    let totalW = imgW + padSide * 2
+    let totalH = imgH + padTop + padBottom
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1.0
+    format.opaque = true
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: totalW, height: totalH), format: format)
+
+    let rendered = renderer.image { ctx in
+      bgColor.setFill()
+      ctx.fill(CGRect(x: 0, y: 0, width: totalW, height: totalH))
+
+      let photoRect = CGRect(x: padSide, y: padTop, width: imgW, height: imgH)
+      UIImage(cgImage: cgImg).draw(in: photoRect)
+
+      // 35mm film sprocket holes along left & right borders
+      if style == "film_35mm" {
+        let holeW = max(4.0, padSide * 0.34)
+        let holeH = holeW * 1.42
+        let step = holeH * 2.15
+        UIColor(white: 0.92, alpha: 1.0).setFill()
+        var y = padTop
+        while y + holeH < totalH - padBottom * 0.5 {
+          let leftHole = UIBezierPath(
+            roundedRect: CGRect(x: (padSide - holeW) * 0.5, y: y, width: holeW, height: holeH),
+            cornerRadius: holeW * 0.22
+          )
+          let rightHole = UIBezierPath(
+            roundedRect: CGRect(x: totalW - (padSide + holeW) * 0.5, y: y, width: holeW, height: holeH),
+            cornerRadius: holeW * 0.22
+          )
+          leftHole.fill()
+          rightHole.fill()
+          y += step
+        }
+      }
+
+      // Vintage quartz date stamp ('YY MM DD) in bottom-right corner of photo
+      if params.frameDateStamp {
+        let fontSize = max(11.0, shortSide * 0.028)
+        let font = UIFont(name: "Menlo-Bold", size: fontSize) ?? UIFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .bold)
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor(red: 1.0, green: 0.32, blue: 0.05, alpha: 0.65)
+        shadow.shadowBlurRadius = fontSize * 0.35
+        let attrs: [NSAttributedString.Key: Any] = [
+          .font: font,
+          .foregroundColor: UIColor(red: 1.0, green: 0.58, blue: 0.16, alpha: 0.92),
+          .shadow: shadow
+        ]
+        let ns = dateStampText as NSString
+        let sz = ns.size(withAttributes: attrs)
+        let dx = photoRect.maxX - sz.width - shortSide * 0.038
+        let dy = photoRect.maxY - sz.height - shortSide * 0.032
+        ns.draw(at: CGPoint(x: dx, y: dy), withAttributes: attrs)
+      }
+
+      // Editorial EXIF caption bar below photo
+      if style != "none" && (params.frameExifCaption || style == "film_35mm") {
+        let fontSize = max(10.0, shortSide * 0.020)
+        let font = UIFont(name: "Menlo-Bold", size: fontSize) ?? UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [
+          .font: font,
+          .foregroundColor: primaryTextColor,
+          .kern: 1.2
+        ]
+        let ns = captionLine as NSString
+        let sz = ns.size(withAttributes: attrs)
+        let cy = photoRect.maxY + (padBottom - sz.height) * 0.52
+        if style == "leica_white" || style == "dark_matte" {
+          let dotR = fontSize * 0.32
+          accentDotColor.setFill()
+          UIBezierPath(
+            ovalIn: CGRect(
+              x: (totalW - sz.width) * 0.5 - dotR * 3.6,
+              y: cy + (sz.height - dotR * 2) * 0.5,
+              width: dotR * 2,
+              height: dotR * 2
+            )
+          ).fill()
+        }
+        ns.draw(at: CGPoint(x: (totalW - sz.width) * 0.5, y: cy), withAttributes: attrs)
+      }
+    }
+
+    guard let outCG = rendered.cgImage else { return clean }
+    return CIImage(cgImage: outCG)
+  }
+
+  /// Bakes the active colour-only grade into an industry-standard 33³ `.cube` file.
+  static func exportCubeFile(
+    params: Params,
+    look: FilmLook?,
+    matrix: [Double]?,
+    title: String
+  ) -> String? {
+    let n = 33
+    let width = n
+    let height = n * n // 1089
+    let last = Double(n - 1)
+    guard let srgb = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+
+    var inFloats = [Float](repeating: 1.0, count: width * height * 4)
+    for bi in 0..<n {
+      for gi in 0..<n {
+        let row = bi * n + gi
+        for ri in 0..<n {
+          let idx = (row * width + ri) * 4
+          inFloats[idx] = Float(Double(ri) / last)
+          inFloats[idx + 1] = Float(Double(gi) / last)
+          inFloats[idx + 2] = Float(Double(bi) / last)
+          inFloats[idx + 3] = 1.0
+        }
+      }
+    }
+
+    let rawData = inFloats.withUnsafeBufferPointer { Data(buffer: $0) }
+    let latticeExtent = CGRect(x: 0, y: 0, width: width, height: height)
+    var ci = CIImage(
+      bitmapData: rawData,
+      bytesPerRow: width * 16,
+      size: CGSize(width: width, height: height),
+      format: .RGBAf,
+      colorSpace: srgb
+    )
+
+    // Strip spatial-only filters so the 3D LUT lattice has zero neighbour bleed!
+    var colorOnly = params
+    colorOnly.clarity = 0
+    colorOnly.texture = 0
+    colorOnly.sharpen = 0
+    colorOnly.noiseReduction = 0
+    colorOnly.colorNoiseReduction = 0
+    ci = applyColor(colorOnly, to: ci)
+
+    if let look = look {
+      if look.usesCube, let cube = CIFilter(name: "CIColorCubeWithColorSpace") {
+        cube.setValue(ci, forKey: kCIInputImageKey)
+        cube.setValue(look.cubeSize, forKey: "inputCubeDimension")
+        cube.setValue(look.cubeData, forKey: "inputCubeData")
+        cube.setValue(srgb, forKey: "inputColorSpace")
+        if let out = cube.outputImage {
+          ci = out.cropped(to: latticeExtent)
+        }
+      }
+      if look.shadowDepth > 0.005 {
+        ci = FilmEngine.applyShadowDepth(to: ci, strength: look.shadowDepth).cropped(to: latticeExtent)
+      }
+      if look.filmicRollOff > 0.005 {
+        ci = FilmEngine.applyFilmicRollOff(to: ci, strength: look.filmicRollOff).cropped(to: latticeExtent)
+      }
+    } else if let matrix = matrix, matrix.count == 20 {
+      ci = AppDelegate.colorMatrixImage(matrix, to: ci)
+    }
+
+    var outFloats = [Float](repeating: 0, count: width * height * 4)
+    AppDelegate.gradingContext.render(
+      ci,
+      toBitmap: &outFloats,
+      rowBytes: width * 16,
+      bounds: latticeExtent,
+      format: .RGBAf,
+      colorSpace: srgb
+    )
+
+    let safeTitle = title
+      .replacingOccurrences(of: "\"", with: "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    var lines: [String] = []
+    lines.reserveCapacity(n * n * n + 6)
+    lines.append("# Generated by CineLens Pro")
+    lines.append("TITLE \"\(safeTitle.isEmpty ? "CineLens_Grade" : safeTitle)\"")
+    lines.append("LUT_3D_SIZE 33")
+    lines.append("DOMAIN_MIN 0.0 0.0 0.0")
+    lines.append("DOMAIN_MAX 1.0 1.0 1.0")
+
+    for bi in 0..<n {
+      for gi in 0..<n {
+        let row = bi * n + gi
+        for ri in 0..<n {
+          let idx = (row * width + ri) * 4
+          let r = min(max(outFloats[idx], 0.0), 1.0)
+          let g = min(max(outFloats[idx + 1], 0.0), 1.0)
+          let b = min(max(outFloats[idx + 2], 0.0), 1.0)
+          lines.append(String(format: "%.6f %.6f %.6f", r, g, b))
+        }
+      }
+    }
+
+    let fileSlug = (safeTitle.isEmpty ? "CineLens_Grade" : safeTitle)
+      .replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "_", options: .regularExpression)
+    let outURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("\(fileSlug).cube")
+    do {
+      try lines.joined(separator: "\n").write(to: outURL, atomically: true, encoding: .utf8)
+      return outURL.path
+    } catch {
+      return nil
+    }
   }
 
   // MARK: 3-Way Color Grading & Defringe Cubes
@@ -6542,9 +7675,11 @@ enum PhotoEditor {
   static func previewImage(
     path: String,
     isVideo: Bool,
-    maxDimension: Int
+    maxDimension: Int,
+    timestampSeconds: Double = 0.0
   ) -> CIImage? {
-    let key = "\(path)|\(isVideo)|\(maxDimension)"
+    let bucketMs = Int((max(0.0, timestampSeconds) * 10.0).rounded())
+    let key = "\(path)|\(isVideo)|\(maxDimension)|\(bucketMs)"
 
     previewLock.lock()
     let cached = previewCache[key]
@@ -6556,12 +7691,19 @@ enum PhotoEditor {
       let asset = AVURLAsset(url: URL(fileURLWithPath: path))
       let generator = AVAssetImageGenerator(asset: asset)
       generator.appliesPreferredTrackTransform = true
+      generator.requestedTimeToleranceBefore = CMTime(seconds: 0.08, preferredTimescale: 600)
+      generator.requestedTimeToleranceAfter = CMTime(seconds: 0.08, preferredTimescale: 600)
       generator.maximumSize = CGSize(
         width: maxDimension,
         height: maxDimension
       )
-      if let frame = try? generator.copyCGImage(at: .zero, actualTime: nil) {
+      let reqTime = timestampSeconds > 0.01
+        ? CMTime(seconds: timestampSeconds, preferredTimescale: 600)
+        : .zero
+      if let frame = try? generator.copyCGImage(at: reqTime, actualTime: nil) {
         image = CIImage(cgImage: frame)
+      } else if let fallback = try? generator.copyCGImage(at: .zero, actualTime: nil) {
+        image = CIImage(cgImage: fallback)
       } else {
         image = nil
       }
@@ -6599,8 +7741,9 @@ enum PhotoEditor {
   static func jpegData(from image: CIImage, quality: Double) -> Data? {
     let extent = image.extent
     guard extent.width > 1, extent.height > 1,
-          let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-          let cgImage = AppDelegate.gradingContext.createCGImage(
+          let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)
+            ?? CGColorSpace(name: CGColorSpace.sRGB),
+          let cgImage = AppDelegate.p3GradingContext.createCGImage(
             image,
             from: extent,
             format: .RGBA8,
@@ -6836,6 +7979,59 @@ final class ProcessZeroPhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
   }
 }
 
+/// Captures multiple back-to-back Bayer RAW frames for Process Zero Night Stack.
+final class ProcessZeroBurstDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+  private let lock = NSLock()
+  private let expectedCount: Int
+  private var receivedCount = 0
+  private var frames: [Data] = []
+  private var finished = false
+  private let completion: ([Data]) -> Void
+
+  init(expectedCount: Int, completion: @escaping ([Data]) -> Void) {
+    self.expectedCount = max(1, expectedCount)
+    self.completion = completion
+    super.init()
+  }
+
+  func forceFinish() {
+    lock.lock()
+    if finished {
+      lock.unlock()
+      return
+    }
+    finished = true
+    let captured = frames
+    lock.unlock()
+    completion(captured)
+  }
+
+  func photoOutput(
+    _ output: AVCapturePhotoOutput,
+    didFinishProcessingPhoto photo: AVCapturePhoto,
+    error: Error?
+  ) {
+    let data = error == nil ? photo.fileDataRepresentation() : nil
+    lock.lock()
+    if finished {
+      lock.unlock()
+      return
+    }
+    receivedCount += 1
+    if let data = data {
+      frames.append(data)
+    }
+    if receivedCount >= expectedCount {
+      finished = true
+      let captured = frames
+      lock.unlock()
+      completion(captured)
+      return
+    }
+    lock.unlock()
+  }
+}
+
 // MARK: - Tahap 2: Live Metal 3D LUT Viewfinder & Direct-to-Disk HEVC Video LUT Recorder
 
 /// Taps the running camera session's `AVCaptureVideoDataOutput`, grades every
@@ -6861,6 +8057,9 @@ final class LiveMetalViewfinderPipeline: NSObject,
   private var latestPixelBuffer: CVPixelBuffer?
   private var pool: CVPixelBufferPool?
   private var poolSize: (Int, Int) = (0, 0)
+  private let renderQueue = DispatchQueue(label: "cinelens.metal.preview", qos: .userInteractive)
+  private var isRenderingFrame = false
+  private var watchdogTimer: Timer?
 
   // Live grading & DOP overlay config
   private var activeLook: FilmLook?
@@ -6913,23 +8112,83 @@ final class LiveMetalViewfinderPipeline: NSObject,
   }
 
   func attach() {
-    guard let dataOutput = dataOutput, let queue = originalQueue else { return }
-    dataOutput.setSampleBufferDelegate(self, queue: queue)
+    if let dataOutput = dataOutput, let queue = originalQueue {
+      dataOutput.setSampleBufferDelegate(self, queue: queue)
+    }
+    DispatchQueue.main.async { [weak self] in
+      self?.watchdogTimer?.invalidate()
+      self?.watchdogTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+        self?.ensureDelegateAttached()
+      }
+    }
+  }
+
+  /// Seamlessly re-hooks onto a new or reconfigured `AVCaptureSession` (e.g.
+  /// 2x/TEL lens switch or zoom format transition) while keeping `textureId`!
+  func rebind(to session: AVCaptureSession) {
+    guard let newOutput = session.outputs.compactMap({ $0 as? AVCaptureVideoDataOutput }).first else {
+      return
+    }
+    stateLock.lock()
+    if let prevOut = dataOutput, prevOut !== newOutput {
+      prevOut.setSampleBufferDelegate(originalDelegate, queue: originalQueue)
+    }
+    dataOutput = newOutput
+    if let del = newOutput.sampleBufferDelegate, del !== self {
+      originalDelegate = del
+    }
+    if let q = newOutput.sampleBufferCallbackQueue {
+      originalQueue = q
+    }
+    let queue = originalQueue ?? DispatchQueue(label: "cinelens.metal.fallback")
+    stateLock.unlock()
+    newOutput.setSampleBufferDelegate(self, queue: queue)
+  }
+
+  private func ensureDelegateAttached() {
+    stateLock.lock()
+    guard let out = dataOutput, textureId >= 0 else {
+      stateLock.unlock()
+      return
+    }
+    if out.sampleBufferDelegate !== self {
+      if let newDel = out.sampleBufferDelegate {
+        originalDelegate = newDel
+      }
+      if let newQ = out.sampleBufferCallbackQueue {
+        originalQueue = newQ
+      }
+      let q = originalQueue ?? DispatchQueue(label: "cinelens.metal.fallback")
+      stateLock.unlock()
+      out.setSampleBufferDelegate(self, queue: q)
+      return
+    }
+    stateLock.unlock()
   }
 
   func detach() {
-    if let dataOutput = dataOutput {
-      dataOutput.setSampleBufferDelegate(originalDelegate, queue: originalQueue)
+    DispatchQueue.main.async { [weak self] in
+      self?.watchdogTimer?.invalidate()
+      self?.watchdogTimer = nil
+    }
+    stateLock.lock()
+    let out = dataOutput
+    let origDel = originalDelegate
+    let origQ = originalQueue
+    dataOutput = nil
+    latestPixelBuffer = nil
+    pool = nil
+    isRenderingFrame = false
+    stateLock.unlock()
+
+    if let out = out {
+      out.setSampleBufferDelegate(origDel, queue: origQ)
     }
     stopAudioCapture()
     if textureId >= 0 {
       registry?.unregisterTexture(textureId)
       textureId = -1
     }
-    stateLock.lock()
-    latestPixelBuffer = nil
-    pool = nil
-    stateLock.unlock()
   }
 
   func updateConfig(args: [String: Any]) {
@@ -7108,19 +8367,167 @@ final class LiveMetalViewfinderPipeline: NSObject,
     let fColor = falseColor
     let wantScope = liveScopeEnabled
     let recording = isDirectRecording
+    if !recording && isRenderingFrame {
+      // Never queue multiple 12MP/48MP ISP buffers — return immediately so 2x/5x
+      // sensor-crop zoom transitions never starve AVFoundation's buffer pool!
+      stateLock.unlock()
+      return
+    }
+    if !recording {
+      isRenderingFrame = true
+    }
     frameCounter &+= 1
     let fIdx = frameCounter
     stateLock.unlock()
 
-    var ci = CIImage(cvPixelBuffer: srcBuffer)
-    let extent = ci.extent
-    guard extent.width > 1, extent.height > 1 else { return }
-
-    if isLog {
-      ci = FilmEngine.applyAppleLogIDT(to: ci)
+    let rawCI = CIImage(cvPixelBuffer: srcBuffer)
+    let rawExtent = rawCI.extent
+    guard rawExtent.width > 1, rawExtent.height > 1 else {
+      stateLock.lock()
+      isRenderingFrame = false
+      stateLock.unlock()
+      return
     }
 
-    // 1. Apply true 3D LUT / Film Stock color cube (skip heavy grain/glow in live preview for 60fps smoothness).
+    // If recording Direct-to-Disk 4K HEVC, grade & write full-res synchronously on writer pool.
+    if recording {
+      var fullCI = rawCI
+      if fullCI.extent.origin != .zero {
+        fullCI = fullCI.transformed(
+          by: CGAffineTransform(translationX: -fullCI.extent.origin.x, y: -fullCI.extent.origin.y)
+        )
+      }
+      if isLog { fullCI = FilmEngine.applyAppleLogIDT(to: fullCI) }
+      let fullGraded = Self.gradeLiveImage(fullCI, look: look, matrix: matrix)
+      let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+      appendDirectFrame(fullGraded, pts: pts)
+
+      stateLock.lock()
+      if isRenderingFrame {
+        stateLock.unlock()
+        return
+      }
+      isRenderingFrame = true
+      stateLock.unlock()
+    }
+
+    // Offload viewfinder GPU render to dedicated queue at <=1280px so live zoom
+    // (1x -> 2x -> 8x) stays butter-smooth 60fps with zero black-screen stalls.
+    renderQueue.async { [weak self] in
+      guard let self = self else { return }
+      defer {
+        self.stateLock.lock()
+        self.isRenderingFrame = false
+        self.stateLock.unlock()
+      }
+
+      var ci = rawCI
+      if ci.extent.origin != .zero {
+        ci = ci.transformed(
+          by: CGAffineTransform(translationX: -ci.extent.origin.x, y: -ci.extent.origin.y)
+        )
+      }
+      let maxSide = max(ci.extent.width, ci.extent.height)
+      if maxSide > 1280.0 {
+        let factor = 1280.0 / maxSide
+        ci = ci.transformed(by: CGAffineTransform(scaleX: factor, y: factor))
+      }
+      let w = max(2, Int(floor(ci.extent.width / 2.0) * 2.0))
+      let h = max(2, Int(floor(ci.extent.height / 2.0) * 2.0))
+      let extent = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
+      ci = ci.cropped(to: extent)
+
+      if isLog {
+        ci = FilmEngine.applyAppleLogIDT(to: ci)
+      }
+
+      let graded = Self.gradeLiveImage(ci, look: look, matrix: matrix)
+      var displayImage = graded
+
+      if fColor, let fcCube = LiveMetalViewfinderPipeline.falseColorCube() {
+        if let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
+           let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+          filter.setValue(displayImage, forKey: kCIInputImageKey)
+          filter.setValue(33, forKey: "inputCubeDimension")
+          filter.setValue(fcCube, forKey: "inputCubeData")
+          filter.setValue(srgb, forKey: "inputColorSpace")
+          displayImage = filter.outputImage?.cropped(to: extent) ?? displayImage
+        }
+      }
+      if zebra {
+        let hotMask = graded.applyingFilter(
+          "CIColorMatrix",
+          parameters: [
+            "inputRVector": CIVector(x: 4.5, y: 15.0, z: 1.5, w: 0),
+            "inputGVector": CIVector(x: 3.3, y: 11.0, z: 1.1, w: 0),
+            "inputBVector": CIVector(x: 0.9, y: 3.0, z: 0.3, w: 0),
+            "inputBiasVector": CIVector(x: -19.7, y: -14.5, z: -4.0, w: 0)
+          ]
+        ).applyingFilter(
+          "CIColorClamp",
+          parameters: [
+            "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+            "inputMaxComponents": CIVector(x: 0.9, y: 0.66, z: 0.22, w: 1)
+          ]
+        )
+        displayImage = hotMask.applyingFilter(
+          "CIScreenBlendMode",
+          parameters: [kCIInputBackgroundImageKey: displayImage]
+        ).cropped(to: extent)
+      }
+      if peaking {
+        let edges = graded.applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 3.5])
+          .applyingFilter(
+            "CIColorMatrix",
+            parameters: [
+              "inputRVector": CIVector(x: 0.95, y: 0, z: 0, w: 0),
+              "inputGVector": CIVector(x: 0, y: 0.68, z: 0, w: 0),
+              "inputBVector": CIVector(x: 0, y: 0, z: 0.20, w: 0)
+            ]
+          )
+        displayImage = edges.applyingFilter(
+          "CIAdditionCompositing",
+          parameters: [kCIInputBackgroundImageKey: displayImage]
+        ).cropped(to: extent)
+      }
+
+      guard let outBuf = self.nextPixelBuffer(width: w, height: h) else { return }
+      let srgb = CGColorSpace(name: CGColorSpace.sRGB)
+      AppDelegate.gradingContext.render(
+        displayImage,
+        to: outBuf,
+        bounds: extent,
+        colorSpace: srgb
+      )
+
+      self.stateLock.lock()
+      self.latestPixelBuffer = outBuf
+      let tid = self.textureId
+      self.stateLock.unlock()
+
+      if tid >= 0 {
+        DispatchQueue.main.async { [weak self] in
+          self?.registry?.textureFrameAvailable(tid)
+        }
+      }
+
+      if wantScope && (fIdx % 6 == 0) {
+        let scopes = PhotoEditor.computeScopes(for: graded)
+        if !scopes.isEmpty {
+          DispatchQueue.main.async { [weak self] in
+            self?.channel?.invokeMethod("liveCameraScope", arguments: scopes)
+          }
+        }
+      }
+    }
+  }
+
+  private static func gradeLiveImage(
+    _ ci: CIImage,
+    look: FilmLook?,
+    matrix: [Double]
+  ) -> CIImage {
+    let extent = ci.extent
     var graded: CIImage
     if let look = look {
       if look.usesCube,
@@ -7138,90 +8545,14 @@ final class LiveMetalViewfinderPipeline: NSObject,
         graded = FilmEngine.applyShadowDepth(to: graded, strength: look.shadowDepth)
           .cropped(to: extent)
       }
+      if look.filmicRollOff > 0.005 {
+        graded = FilmEngine.applyFilmicRollOff(to: graded, strength: look.filmicRollOff)
+          .cropped(to: extent)
+      }
     } else {
       graded = AppDelegate.colorMatrixImage(matrix, to: ci)
     }
-
-    // 2. If Direct-to-Disk Recording is active, write CLEAN graded frame (without DOP peaking/zebra!) to disk.
-    if recording {
-      let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-      appendDirectFrame(graded, pts: pts)
-    }
-
-    // 3. Apply live DOP Monitoring overlays ONLY to the viewfinder texture.
-    var displayImage = graded
-    if fColor, let fcCube = LiveMetalViewfinderPipeline.falseColorCube() {
-      if let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
-         let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
-        filter.setValue(displayImage, forKey: kCIInputImageKey)
-        filter.setValue(33, forKey: "inputCubeDimension")
-        filter.setValue(fcCube, forKey: "inputCubeData")
-        filter.setValue(srgb, forKey: "inputColorSpace")
-        displayImage = filter.outputImage?.cropped(to: extent) ?? displayImage
-      }
-    }
-    if zebra {
-      // Highlight pixels > 94 IRE with crisp cinema amber warning overlay.
-      let hotMask = graded.applyingFilter(
-        "CIColorMatrix",
-        parameters: [
-          "inputRVector": CIVector(x: 4.5, y: 15.0, z: 1.5, w: 0),
-          "inputGVector": CIVector(x: 3.3, y: 11.0, z: 1.1, w: 0),
-          "inputBVector": CIVector(x: 0.9, y: 3.0, z: 0.3, w: 0),
-          "inputBiasVector": CIVector(x: -19.7, y: -14.5, z: -4.0, w: 0)
-        ]
-      ).applyingFilter(
-        "CIColorClamp",
-        parameters: [
-          "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-          "inputMaxComponents": CIVector(x: 0.9, y: 0.66, z: 0.22, w: 1)
-        ]
-      )
-      displayImage = hotMask.applyingFilter(
-        "CIScreenBlendMode",
-        parameters: [kCIInputBackgroundImageKey: displayImage]
-      ).cropped(to: extent)
-    }
-    if peaking {
-      let edges = graded.applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 3.5])
-        .applyingFilter(
-          "CIColorMatrix",
-          parameters: [
-            "inputRVector": CIVector(x: 0.95, y: 0, z: 0, w: 0),
-            "inputGVector": CIVector(x: 0, y: 0.68, z: 0, w: 0),
-            "inputBVector": CIVector(x: 0, y: 0, z: 0.20, w: 0)
-          ]
-        )
-      displayImage = edges.applyingFilter(
-        "CIAdditionCompositing",
-        parameters: [kCIInputBackgroundImageKey: displayImage]
-      ).cropped(to: extent)
-    }
-
-    // 4. Render to reusable IOSurface BGRA pixel buffer for FlutterTexture.
-    let w = Int(extent.width)
-    let h = Int(extent.height)
-    guard let outBuf = nextPixelBuffer(width: w, height: h) else { return }
-    AppDelegate.gradingContext.render(displayImage, to: outBuf)
-
-    stateLock.lock()
-    latestPixelBuffer = outBuf
-    let tid = textureId
-    stateLock.unlock()
-
-    if tid >= 0 {
-      registry?.textureFrameAvailable(tid)
-    }
-
-    // 5. Optional throttled Live Camera Scope (~6 Hz) pushed cleanly to Dart.
-    if wantScope && (fIdx % 5 == 0) {
-      let scopes = PhotoEditor.computeScopes(for: graded)
-      if !scopes.isEmpty {
-        DispatchQueue.main.async { [weak self] in
-          self?.channel?.invokeMethod("liveCameraScope", arguments: scopes)
-        }
-      }
-    }
+    return graded
   }
 
   private func appendDirectFrame(_ graded: CIImage, pts: CMTime) {
