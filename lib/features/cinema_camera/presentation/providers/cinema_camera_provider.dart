@@ -77,12 +77,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     });
 
     final repository = ref.read(cinemaCameraRepositoryProvider);
-    final tones = await repository.getAllTones();
-    final savedPrefs = await repository.loadSavedPreferences();
-    final captureSettings = await repository.loadCaptureSettings();
-    final filmLook = await repository.loadFilmLook();
-    final bakeLook = await repository.loadBakeLookIntoProRes();
-    final proImaging = await repository.loadProImagingSettings();
 
     // Subscribe before the native session starts so stabilization & DOP
     // telemetry are captured immediately.
@@ -95,11 +89,23 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       onHardwareShutter: _handleHardwareShutter,
     );
 
-    final mediaLibrary = await repository.loadCapturedMedia();
-    final latestThumb = mediaLibrary
-        .where((m) => !m.isVideo)
-        .map((m) => m.path)
-        .firstOrNull;
+    // Load all local preferences in parallel for instant cold-launch camera boot
+    // (gallery thumbnail is hydrated lazily right after the viewfinder is live).
+    final (
+      tones,
+      savedPrefs,
+      captureSettings,
+      filmLook,
+      bakeLook,
+      proImaging,
+    ) = await (
+      repository.getAllTones(),
+      repository.loadSavedPreferences(),
+      repository.loadCaptureSettings(),
+      repository.loadFilmLook(),
+      repository.loadBakeLookIntoProRes(),
+      repository.loadProImagingSettings(),
+    ).wait;
 
     final selectedTone = tones.firstWhere(
       (t) => t.id == savedPrefs.toneId,
@@ -176,6 +182,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     unawaited(repository.setDopTelemetry(horizon: true, audio: false));
     unawaited(repository.setVolumeShutterEnabled(proImaging.volumeShutter));
+    // Hydrate gallery thumbnail right after camera viewfinder renders its first frame.
+    Future<void>.microtask(refreshLatestThumb);
 
     return CinemaCameraState(
       tones: tones,
@@ -214,7 +222,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       previewWidth: previewWidth,
       previewHeight: previewHeight,
       hasHardwareDepth: hasHardwareDepth,
-      latestGalleryThumbPath: latestThumb,
+      latestGalleryThumbPath: null,
       backLenses: backLenses,
       activeBackLensIndex: initialLensIdx,
       iso: 400.0.clamp(capabilities.minIso, capabilities.maxIso).toDouble(),

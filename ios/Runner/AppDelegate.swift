@@ -5292,11 +5292,17 @@ enum FilmEngine {
          options: [CIImageOption.applyOrientationProperty: true]
        ) {
       depthFilter.setValue(NSNumber(value: Float(clampedF)), forKey: "inputAperture")
+      depthFilter.setValue(NSNumber(value: Float(1.0)), forKey: "inputScaleFactor")
       depthFilter.setValue(NSNumber(value: Float(0.0)), forKey: "inputLumaNoiseScale")
-      let fx = min(max(focusX, 0.08), 0.92)
-      let fy = min(max(1.0 - focusY, 0.08), 0.92)
-      let focusRect = CGRect(x: fx - 0.06, y: fy - 0.06, width: 0.12, height: 0.12)
-      depthFilter.setValue(CIVector(cgRect: focusRect), forKey: "inputFocusRect")
+      // Only override Apple's native autofocus depth plane when the user explicitly
+      // tapped a focus point; otherwise let CIDepthBlurEffect use the real AF plane!
+      let hasExplicitTap = abs(focusX - 0.5) > 0.015 || abs(focusY - 0.5) > 0.015
+      if hasExplicitTap {
+        let fx = min(max(focusX, 0.08), 0.92)
+        let fy = min(max(1.0 - focusY, 0.08), 0.92)
+        let focusRect = CGRect(x: fx - 0.04, y: fy - 0.04, width: 0.08, height: 0.08)
+        depthFilter.setValue(CIVector(cgRect: focusRect), forKey: "inputFocusRect")
+      }
       if let depthOut = depthFilter.outputImage {
         let outExt = depthOut.extent
         if abs(outExt.width - extent.width) > 2 || abs(outExt.height - extent.height) > 2 {
@@ -9499,6 +9505,7 @@ final class NativeCinemaCameraEngine: NSObject,
   private let renderQueue = DispatchQueue(label: "cinelens.native.render", qos: .userInteractive)
   private let writerQueue = DispatchQueue(label: "cinelens.native.writer", qos: .userInitiated)
   private let visionQueue = DispatchQueue(label: "cinelens.native.vision", qos: .utility)
+  private let lutQueue = DispatchQueue(label: "cinelens.native.lut", qos: .userInitiated)
 
   private var videoInput: AVCaptureDeviceInput?
   private var audioInput: AVCaptureDeviceInput?
@@ -9555,11 +9562,15 @@ final class NativeCinemaCameraEngine: NSObject,
   private var apertureFStop: Double = 2.4
   private var targetFocusDisparity: Double = 0.55   // normalized 0..1 (1 = close, 0 = far)
   private var currentFocusDisparity: Double = 0.55
+  private var focusTargetX: Double = 0.5
+  private var focusTargetY: Double = 0.5
+  private var manualRackLockUntil: CFTimeInterval = 0.0
   private var targetRackToBg: Bool = false
   private var currentVisionRackMix: Double = 0.0
   private var lastRackTime: CFTimeInterval = CACurrentMediaTime()
   private var latestDisparityBuffer: CVPixelBuffer?
   private var latestVisionMatte: CIImage?
+  private var gradingGeneration: Int = 0
 
   // Single-session AVAssetWriter video recording state
   private var isRecording = false
@@ -9757,15 +9768,26 @@ final class NativeCinemaCameraEngine: NSObject,
         ?? AVCaptureDevice.default(for: .video)
     }
 
-    // Back camera: for Portrait & Cinematic, prefer hardware LiDAR / Triple / Dual depth camera!
+    // Back camera: for Portrait & Cinematic, prefer dedicated Hardware LiDAR Depth camera
+    // (24mm Wide + LiDAR Scanner — ZERO 14mm UltraWide macro hijack & true 30fps live depth!).
+    // If user explicitly chooses 3× Telephoto or 0.5× UltraWide in Portrait, use TripleCamera.
     if wantsDepth {
-      var depthTypes: [AVCaptureDevice.DeviceType] = [
-        .builtInTripleCamera,
-        .builtInDualWideCamera,
-        .builtInDualCamera,
-      ]
+      var wantsTeleOrUltra = false
+      if mode == "portrait", let rawId = requestedLensId, !rawId.hasSuffix("#2x") {
+        let baseId = rawId.components(separatedBy: "#").first ?? rawId
+        if let dev = AVCaptureDevice(uniqueID: baseId) {
+          wantsTeleOrUltra = (dev.deviceType == .builtInTelephotoCamera || dev.deviceType == .builtInUltraWideCamera)
+        }
+      }
+      var depthTypes: [AVCaptureDevice.DeviceType] = wantsTeleOrUltra
+        ? [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera]
+        : [.builtInDualWideCamera, .builtInTripleCamera, .builtInDualCamera]
       if #available(iOS 15.4, *) {
-        depthTypes.insert(.builtInLiDARDepthCamera, at: 1)
+        if wantsTeleOrUltra {
+          depthTypes.append(.builtInLiDARDepthCamera)
+        } else {
+          depthTypes.insert(.builtInLiDARDepthCamera, at: 0)
+        }
       }
       let disc = AVCaptureDevice.DiscoverySession(
         deviceTypes: depthTypes,
@@ -9848,9 +9870,11 @@ final class NativeCinemaCameraEngine: NSObject,
       let isCinematic = (mode == "cinematicVideo")
 
       // 1. Choose clean session preset
+      // For Cinematic Video, use `.inputPriority` so we can explicitly pick an
+      // AVCaptureDevice.Format that supports live hardware LiDAR DepthDataOutput!
       let preset: AVCaptureSession.Preset
       if isCinematic {
-        preset = .hd1920x1080
+        preset = .inputPriority
       } else if isVideo {
         if resolution == "fullHD" {
           preset = .hd1920x1080
@@ -9880,18 +9904,22 @@ final class NativeCinemaCameraEngine: NSObject,
       }
       self.activeDevice = targetDevice
 
-      // 3. Attach Audio input + Audio data output ONCE inside the SAME session!
-      if self.audioInput == nil,
-         let mic = AVCaptureDevice.default(for: .audio),
-         let aIn = try? AVCaptureDeviceInput(device: mic),
-         self.session.canAddInput(aIn) {
-        self.session.addInput(aIn)
-        self.audioInput = aIn
-      }
-      if !self.session.outputs.contains(self.audioOutput),
-         self.session.canAddOutput(self.audioOutput) {
-        self.session.addOutput(self.audioOutput)
-        self.audioOutput.setSampleBufferDelegate(self, queue: self.audioQueue)
+      // 3. Attach Audio input + output LAZILY only when entering Video / Cinematic mode!
+      // Avoiding CoreAudio / mic hardware spin-up on Photo cold launch cuts startup lag by ~500ms,
+      // while keeping Video + Audio inside ONE single AVCaptureSession once attached!
+      if isVideo {
+        if self.audioInput == nil,
+           let mic = AVCaptureDevice.default(for: .audio),
+           let aIn = try? AVCaptureDeviceInput(device: mic),
+           self.session.canAddInput(aIn) {
+          self.session.addInput(aIn)
+          self.audioInput = aIn
+        }
+        if !self.session.outputs.contains(self.audioOutput),
+           self.session.canAddOutput(self.audioOutput) {
+          self.session.addOutput(self.audioOutput)
+          self.audioOutput.setSampleBufferDelegate(self, queue: self.audioQueue)
+        }
       }
 
       // 4. Attach Video data output
@@ -9948,17 +9976,52 @@ final class NativeCinemaCameraEngine: NSObject,
       // 6. Attach / detach synchronized Hardware LiDAR Depth output for CINEMATIC Video
       var depthSynced = false
       if isCinematic {
-        let depthFormats = targetDevice.activeFormat.supportedDepthDataFormats.filter { fmt in
-          CMFormatDescriptionGetMediaSubType(fmt.formatDescription) == kCVPixelFormatType_DisparityFloat32 ||
-          CMFormatDescriptionGetMediaSubType(fmt.formatDescription) == kCVPixelFormatType_DisparityFloat16
+        // Explicitly select the best 1080p (or 1440×1080 / 1280×720) video format that
+        // exposes DisparityFloat32/16 (or DepthFloat32/16) hardware LiDAR depth streams!
+        var chosenVideoFmt: AVCaptureDevice.Format?
+        var chosenDepthFmt: AVCaptureDevice.Format?
+        var bestScore: Int = -1
+
+        for fmt in targetDevice.formats {
+          let depthCandidates = fmt.supportedDepthDataFormats.filter { df in
+            let sub = CMFormatDescriptionGetMediaSubType(df.formatDescription)
+            return sub == kCVPixelFormatType_DisparityFloat32 ||
+                   sub == kCVPixelFormatType_DisparityFloat16 ||
+                   sub == kCVPixelFormatType_DepthFloat32 ||
+                   sub == kCVPixelFormatType_DepthFloat16
+          }
+          guard !depthCandidates.isEmpty else { continue }
+          let vDims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+          let vw = Int(vDims.width)
+          let vh = Int(vDims.height)
+          guard vw >= 1280, vw <= 1920 else { continue }
+          let maxFps = fmt.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 0
+          guard maxFps >= 24.0 else { continue }
+          // Prefer 1920×1080 16:9 30fps with highest-resolution DisparityFloat32 depth map!
+          let is1080p = (vw == 1920 && vh == 1080) ? 5000 : 0
+          let is420f = CMFormatDescriptionGetMediaSubType(fmt.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ? 200 : 0
+          let bestDepth = depthCandidates.max(by: { a, b in
+            let aw = Int(CMVideoFormatDescriptionGetDimensions(a.formatDescription).width)
+            let bw = Int(CMVideoFormatDescriptionGetDimensions(b.formatDescription).width)
+            let aDisp = CMFormatDescriptionGetMediaSubType(a.formatDescription) == kCVPixelFormatType_DisparityFloat32 ? 1000 : 0
+            let bDisp = CMFormatDescriptionGetMediaSubType(b.formatDescription) == kCVPixelFormatType_DisparityFloat32 ? 1000 : 0
+            return (aw + aDisp) < (bw + bDisp)
+          })
+          guard let bd = bestDepth else { continue }
+          let dw = Int(CMVideoFormatDescriptionGetDimensions(bd.formatDescription).width)
+          let score = is1080p + is420f + vw + dw
+          if score > bestScore {
+            bestScore = score
+            chosenVideoFmt = fmt
+            chosenDepthFmt = bd
+          }
         }
-        if let bestDepthFmt = depthFormats.max(by: {
-          CMVideoFormatDescriptionGetDimensions($0.formatDescription).width <
-          CMVideoFormatDescriptionGetDimensions($1.formatDescription).width
-        }) {
+
+        if let vFmt = chosenVideoFmt, let dFmt = chosenDepthFmt {
           do {
             try targetDevice.lockForConfiguration()
-            targetDevice.activeDepthDataFormat = bestDepthFmt
+            targetDevice.activeFormat = vFmt
+            targetDevice.activeDepthDataFormat = dFmt
             targetDevice.unlockForConfiguration()
           } catch {}
           if !self.session.outputs.contains(self.depthOutput),
@@ -9981,6 +10044,8 @@ final class NativeCinemaCameraEngine: NSObject,
             self.synchronizer = sync
             depthSynced = true
           }
+        } else if self.session.canSetSessionPreset(.hd1920x1080) {
+          self.session.sessionPreset = .hd1920x1080
         }
       }
 
@@ -9994,11 +10059,20 @@ final class NativeCinemaCameraEngine: NSObject,
 
       self.session.commitConfiguration()
 
-      // 7. Lock video frame rate (for video modes), disable SDR->HLG auto HDR, & set stabilization
+      // 7. Lock video frame rate, disable SDR->HLG HDR, prevent 14mm macro hijack, & set ZERO-DELAY stabilization
       var stabActive = false
       var stabMode = 0
       do {
         try targetDevice.lockForConfiguration()
+        // Prevent TripleCamera/DualWide from silently hijacking to 14mm UltraWide macro on close subjects!
+        if (isPortrait || isCinematic) && targetDevice.isVirtualDevice {
+          if targetDevice.isPrimaryConstituentDeviceSwitchingBehaviorSupported(.restricted) {
+            targetDevice.setPrimaryConstituentDeviceSwitchingBehavior(
+              .restricted,
+              restrictedSwitchingBehaviorConditions: []
+            )
+          }
+        }
         if targetDevice.isVideoHDREnabled {
           targetDevice.automaticallyAdjustsVideoHDREnabled = false
           targetDevice.isVideoHDREnabled = false
@@ -10020,14 +10094,15 @@ final class NativeCinemaCameraEngine: NSObject,
       if let vConn = self.videoOutput.connection(with: .video),
          vConn.isVideoStabilizationSupported {
         if isVideo {
-          let wanted: AVCaptureVideoStabilizationMode = .cinematic
-          if targetDevice.activeFormat.isVideoStabilizationModeSupported(wanted) {
-            vConn.preferredVideoStabilizationMode = wanted
-          } else if targetDevice.activeFormat.isVideoStabilizationModeSupported(.standard) {
+          // Use `.standard` (hardware OIS + low-latency EIS = < 1 frame latency!).
+          // `.cinematic` stabilization buffers 15-30 frames (~0.8s lag in preview!).
+          if targetDevice.activeFormat.isVideoStabilizationModeSupported(.standard) {
             vConn.preferredVideoStabilizationMode = .standard
+          } else {
+            vConn.preferredVideoStabilizationMode = .off
           }
         } else {
-          // Zero-latency live viewfinder in Photo & Portrait modes (no multi-frame stabilization buffer!).
+          // Zero-latency live viewfinder in Photo & Portrait modes.
           vConn.preferredVideoStabilizationMode = .off
         }
         stabActive = vConn.activeVideoStabilizationMode != .off
@@ -10237,45 +10312,69 @@ final class NativeCinemaCameraEngine: NSObject,
     return triggerRackFocus(x: clampedX, y: clampedY, forceBackground: nil)
   }
 
+  /// Samples a clean 3×3 median/average normalized disparity (0.05..0.95) at `(x, y)`
+  /// from hardware LiDAR `DisparityFloat32` (1/meters). Returns nil if invalid/empty.
+  private static func sampleNormalizedDisparity(
+    from dispBuf: CVPixelBuffer,
+    x: Double,
+    y: Double
+  ) -> Double? {
+    CVPixelBufferLockBaseAddress(dispBuf, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(dispBuf, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(dispBuf) else { return nil }
+    let dw = CVPixelBufferGetWidth(dispBuf)
+    let dh = CVPixelBufferGetHeight(dispBuf)
+    let bpr = CVPixelBufferGetBytesPerRow(dispBuf)
+    guard dw > 2, dh > 2 else { return nil }
+    let fmt = CVPixelBufferGetPixelFormatType(dispBuf)
+    guard fmt == kCVPixelFormatType_DisparityFloat32 else { return nil }
+
+    let cx = min(max(Int(x * Double(dw)), 1), dw - 2)
+    let cy = min(max(Int(y * Double(dh)), 1), dh - 2)
+    var samples: [Double] = []
+    samples.reserveCapacity(9)
+    for dy in -1...1 {
+      let rowPtr = base.advanced(by: (cy + dy) * bpr).assumingMemoryBound(to: Float32.self)
+      for dx in -1...1 {
+        let v = Double(rowPtr[cx + dx])
+        if v.isFinite && v > 0.02 && v < 8.0 {
+          samples.append(v)
+        }
+      }
+    }
+    guard !samples.isEmpty else { return nil }
+    samples.sort()
+    let median = samples[samples.count / 2]
+    // Scale 1/distance (0.15..2.2 1/m ≈ 0.45m..6.5m) smoothly into 0.05..0.95.
+    return min(max(median * 0.45, 0.05), 0.95)
+  }
+
   /// Smooth Metric LiDAR Z-Depth Rack Focus:
   /// Samples the real hardware disparity float at `(x, y)` so tapping ANY
   /// object (bottle, bike, person, wall) smoothly pulls the focal plane there!
   func triggerRackFocus(x: Double, y: Double, forceBackground: Bool?) -> Bool {
     stateLock.lock()
     defer { stateLock.unlock() }
+    let now = CACurrentMediaTime()
     if let force = forceBackground {
       targetRackToBg = force
-      targetFocusDisparity = force ? 0.12 : 0.62
+      targetFocusDisparity = force ? 0.14 : 0.62
+      manualRackLockUntil = now + 6.0
       return force
     }
 
-    if let dispBuf = latestDisparityBuffer {
-      CVPixelBufferLockBaseAddress(dispBuf, .readOnly)
-      if let base = CVPixelBufferGetBaseAddress(dispBuf) {
-        let dw = CVPixelBufferGetWidth(dispBuf)
-        let dh = CVPixelBufferGetHeight(dispBuf)
-        let bpr = CVPixelBufferGetBytesPerRow(dispBuf)
-        let px = min(max(Int(x * Double(dw)), 0), max(0, dw - 1))
-        let py = min(max(Int(y * Double(dh)), 0), max(0, dh - 1))
-        let fmt = CVPixelBufferGetPixelFormatType(dispBuf)
-        var rawDisp: Double = 0.0
-        if fmt == kCVPixelFormatType_DisparityFloat32 {
-          let rowPtr = base.advanced(by: py * bpr).assumingMemoryBound(to: Float32.self)
-          let val = Double(rowPtr[px])
-          if val.isFinite && val > 0.0 { rawDisp = val }
-        }
-        if rawDisp > 0.01 {
-          // Normalize typical LiDAR disparity (0..2.5 1/m) into 0..1 space.
-          let norm = min(max(rawDisp * 0.40, 0.05), 0.95)
-          targetFocusDisparity = norm
-          targetRackToBg = norm < 0.30
-        }
-      }
-      CVPixelBufferUnlockBaseAddress(dispBuf, .readOnly)
+    focusTargetX = min(max(x, 0.05), 0.95)
+    focusTargetY = min(max(y, 0.05), 0.95)
+    if let dispBuf = latestDisparityBuffer,
+       let norm = Self.sampleNormalizedDisparity(from: dispBuf, x: focusTargetX, y: focusTargetY) {
+      targetFocusDisparity = norm
+      targetRackToBg = norm < 0.28
+      manualRackLockUntil = now + 4.5
       return targetRackToBg
     }
 
     targetRackToBg = !targetRackToBg
+    manualRackLockUntil = now + 4.5
     return targetRackToBg
   }
 
@@ -10284,19 +10383,11 @@ final class NativeCinemaCameraEngine: NSObject,
     let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
     let effects = FilmEffects.from(args)
     let imported = ImportedLut.from(args)
-    let matrix = (args["matrix"] as? [Double]) ?? activeMatrix
+    let matrix = (args["matrix"] as? [Double])
 
-    let look = imported.flatMap {
-      FilmEngine.importedLook($0, effects: effects)
-    } ?? FilmEngine.look(
-      toneId: toneId,
-      intensity: intensity,
-      effects: effects
-    )
-
+    // Update lightweight state immediately without blocking the Main Thread!
     stateLock.lock()
-    activeLook = look
-    if matrix.count == 20 { activeMatrix = matrix }
+    if let m = matrix, m.count == 20 { activeMatrix = m }
     if let v = args["liveMetal"] as? Bool { liveMetalEnabled = v }
     if let v = args["appleLogInput"] as? Bool { appleLogInput = v }
     if let v = args["focusPeaking"] as? Bool { focusPeaking = v }
@@ -10310,9 +10401,29 @@ final class NativeCinemaCameraEngine: NSObject,
     }
     if let v = args["rackToBackground"] as? Bool {
       targetRackToBg = v
-      targetFocusDisparity = v ? 0.12 : 0.62
+      targetFocusDisparity = v ? 0.14 : 0.62
     }
+    gradingGeneration &+= 1
+    let gen = gradingGeneration
     stateLock.unlock()
+
+    // Build the 33³ 3D LUT cube asynchronously on lutQueue so cold launch & tone
+    // swipes NEVER stall the UI thread!
+    lutQueue.async { [weak self] in
+      guard let self = self else { return }
+      let look = imported.flatMap {
+        FilmEngine.importedLook($0, effects: effects)
+      } ?? FilmEngine.look(
+        toneId: toneId,
+        intensity: intensity,
+        effects: effects
+      )
+      self.stateLock.lock()
+      if self.gradingGeneration == gen {
+        self.activeLook = look
+      }
+      self.stateLock.unlock()
+    }
   }
 
   // MARK: - Native Photo Capture (Hardware LiDAR Portrait / Process Zero RAW / 48MP HEVC)
@@ -10720,6 +10831,13 @@ final class NativeCinemaCameraEngine: NSObject,
     lastRackTime = now
     if let disp = hardwareDisparity {
       latestDisparityBuffer = disp
+      // Live continuous LiDAR auto-tracking: when not manually rack-locked, smoothly
+      // track the real metric disparity of the subject at `(focusTargetX, focusTargetY)`!
+      if cineOn && now > manualRackLockUntil && (frameCounter % 3 == 0) {
+        if let sampled = Self.sampleNormalizedDisparity(from: disp, x: focusTargetX, y: focusTargetY) {
+          targetFocusDisparity = targetFocusDisparity * 0.72 + sampled * 0.28
+        }
+      }
     }
     let dispDiff = targetFocusDisparity - currentFocusDisparity
     if abs(dispDiff) > 0.002 {
@@ -10947,7 +11065,7 @@ final class NativeCinemaCameraEngine: NSObject,
     }
   }
 
-  // MARK: - Continuous Metric LiDAR Z-Depth Bokeh (< 1.5ms GPU!)
+  // MARK: - 2-Tier Progressive Metric LiDAR Z-Depth Bokeh (< 2ms GPU!)
 
   private func applyCinematicDepthBokeh(
     to image: CIImage,
@@ -10961,11 +11079,10 @@ final class NativeCinemaCameraEngine: NSObject,
     guard strength > 0.02 else { return image }
 
     let extent = image.extent
-    let sharpMask: CIImage
 
     if let rawDisp = disparity, rawDisp.extent.width > 4, rawDisp.extent.height > 4 {
-      // REAL HARDWARE LiDAR / DUAL-CAM CONTINUOUS Z-DEPTH BLUR!
-      // Normalize disparity (0..2.5 1/m -> 0..1) and scale smoothly to extent.
+      // REAL HARDWARE LiDAR CONTINUOUS 2-TIER OPTICAL DEPTH BLUR!
+      // Map hardware disparity (0..2.2 1/m -> 0..1) smoothly to frame extent.
       let sx = extent.width / rawDisp.extent.width
       let sy = extent.height / rawDisp.extent.height
       let dispNorm = rawDisp
@@ -10975,9 +11092,9 @@ final class NativeCinemaCameraEngine: NSObject,
         .applyingFilter(
           "CIColorMatrix",
           parameters: [
-            "inputRVector": CIVector(x: 0.40, y: 0, z: 0, w: 0),
-            "inputGVector": CIVector(x: 0.40, y: 0, z: 0, w: 0),
-            "inputBVector": CIVector(x: 0.40, y: 0, z: 0, w: 0),
+            "inputRVector": CIVector(x: 0.45, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0.45, y: 0, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0.45, y: 0, z: 0, w: 0),
             "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
             "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
           ]
@@ -10991,7 +11108,7 @@ final class NativeCinemaCameraEngine: NSObject,
         )
         .cropped(to: extent)
 
-      // Continuous distance from focal plane: |disparity - focusDisparity|
+      // Continuous physical Z-distance from focal plane: |disparity - focusDisparity|
       let focusVal = CGFloat(min(max(focusDisparity, 0.05), 0.95))
       let focusPlane = CIImage(color: CIColor(red: focusVal, green: focusVal, blue: focusVal, alpha: 1))
         .cropped(to: extent)
@@ -11000,18 +11117,16 @@ final class NativeCinemaCameraEngine: NSObject,
         parameters: [kCIInputBackgroundImageKey: focusPlane]
       ).cropped(to: extent)
 
-      // Sharpness mask: 1.0 inside focal depth zone, gradually tapering to 0.0
-      // with real physical Z distance (works on bottles, bikes, people, walls!).
-      let slope = CGFloat(-3.8 * (0.5 + strength))
-      let bias = CGFloat(1.32)
-      sharpMask = absDist.applyingFilter(
+      // Tier 1 mask (sharp zone -> soft mid-distance optical falloff)
+      let nearSlope = CGFloat(-5.2 * (0.45 + strength))
+      let nearSharpMask = absDist.applyingFilter(
         "CIColorMatrix",
         parameters: [
-          "inputRVector": CIVector(x: slope, y: 0, z: 0, w: 0),
-          "inputGVector": CIVector(x: 0, y: slope, z: 0, w: 0),
-          "inputBVector": CIVector(x: 0, y: 0, z: slope, w: 0),
+          "inputRVector": CIVector(x: nearSlope, y: 0, z: 0, w: 0),
+          "inputGVector": CIVector(x: 0, y: nearSlope, z: 0, w: 0),
+          "inputBVector": CIVector(x: 0, y: 0, z: nearSlope, w: 0),
           "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-          "inputBiasVector": CIVector(x: bias, y: bias, z: bias, w: 1)
+          "inputBiasVector": CIVector(x: 1.24, y: 1.24, z: 1.24, w: 1)
         ]
       ).applyingFilter(
         "CIColorClamp",
@@ -11020,43 +11135,95 @@ final class NativeCinemaCameraEngine: NSObject,
           "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
         ]
       ).clampedToExtent()
-        .applyingGaussianBlur(sigma: 2.0)
-        .cropped(to: extent)
-    } else if let rawVis = visionMatte {
-      // Graceful fallback on devices without live AVCaptureDepthDataOutput
-      let sx = extent.width / max(rawVis.extent.width, 1.0)
-      let sy = extent.height / max(rawVis.extent.height, 1.0)
-      var m = rawVis
-        .transformed(by: CGAffineTransform(translationX: -rawVis.extent.origin.x, y: -rawVis.extent.origin.y))
-        .transformed(by: CGAffineTransform(scaleX: sx, y: sy))
-        .transformed(by: CGAffineTransform(translationX: extent.origin.x, y: extent.origin.y))
-        .clampedToExtent()
         .applyingGaussianBlur(sigma: 1.8)
         .cropped(to: extent)
-      if visionRackMix > 0.01 {
-        let k = CGFloat(1.0 - 2.0 * visionRackMix)
-        let b = CGFloat(visionRackMix)
-        m = m.applyingFilter(
-          "CIColorMatrix",
-          parameters: [
-            "inputRVector": CIVector(x: k, y: 0, z: 0, w: 0),
-            "inputGVector": CIVector(x: 0, y: k, z: 0, w: 0),
-            "inputBVector": CIVector(x: 0, y: 0, z: k, w: 0),
-            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-            "inputBiasVector": CIVector(x: b, y: b, z: b, w: 1)
-          ]
-        ).cropped(to: extent)
-      }
-      sharpMask = m
-    } else {
-      return image
+
+      // Tier 2 mask (mid-distance -> creamy deep-background optical bokeh)
+      let farSlope = CGFloat(-2.6 * (0.45 + strength))
+      let farBlendMask = absDist.applyingFilter(
+        "CIColorMatrix",
+        parameters: [
+          "inputRVector": CIVector(x: farSlope, y: 0, z: 0, w: 0),
+          "inputGVector": CIVector(x: 0, y: farSlope, z: 0, w: 0),
+          "inputBVector": CIVector(x: 0, y: 0, z: farSlope, w: 0),
+          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputBiasVector": CIVector(x: 1.48, y: 1.48, z: 1.48, w: 1)
+        ]
+      ).applyingFilter(
+        "CIColorClamp",
+        parameters: [
+          "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 1),
+          "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
+        ]
+      ).clampedToExtent()
+        .applyingGaussianBlur(sigma: 2.5)
+        .cropped(to: extent)
+
+      let blurScale: CGFloat = 0.25
+      let small = image.transformed(by: CGAffineTransform(scaleX: blurScale, y: blurScale))
+      let smallExt = small.extent
+      let maxDim = Double(max(smallExt.width, smallExt.height))
+      let midSigma = max(0.8, strength * maxDim * 0.009)
+      let farSigma = max(1.8, strength * maxDim * 0.022)
+
+      let midBlur = small.clampedToExtent()
+        .applyingGaussianBlur(sigma: midSigma)
+        .cropped(to: smallExt)
+        .transformed(by: CGAffineTransform(scaleX: 1.0 / blurScale, y: 1.0 / blurScale))
+        .cropped(to: extent)
+      let farBlur = small.clampedToExtent()
+        .applyingGaussianBlur(sigma: farSigma)
+        .cropped(to: smallExt)
+        .transformed(by: CGAffineTransform(scaleX: 1.0 / blurScale, y: 1.0 / blurScale))
+        .cropped(to: extent)
+
+      let outOfFocus = midBlur.applyingFilter(
+        "CIBlendWithMask",
+        parameters: [
+          kCIInputBackgroundImageKey: farBlur,
+          kCIInputMaskImageKey: farBlendMask
+        ]
+      ).cropped(to: extent)
+
+      return image.applyingFilter(
+        "CIBlendWithMask",
+        parameters: [
+          kCIInputBackgroundImageKey: outOfFocus,
+          kCIInputMaskImageKey: nearSharpMask
+        ]
+      ).cropped(to: extent)
     }
 
-    // Fast separable 0.25x GPU Gaussian blur (< 1.2ms per frame on A16!)
+    // Graceful Vision fallback ONLY on older iPhones without hardware LiDAR depth
+    guard let rawVis = visionMatte else { return image }
+    let sx = extent.width / max(rawVis.extent.width, 1.0)
+    let sy = extent.height / max(rawVis.extent.height, 1.0)
+    var sharpMask = rawVis
+      .transformed(by: CGAffineTransform(translationX: -rawVis.extent.origin.x, y: -rawVis.extent.origin.y))
+      .transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+      .transformed(by: CGAffineTransform(translationX: extent.origin.x, y: extent.origin.y))
+      .clampedToExtent()
+      .applyingGaussianBlur(sigma: 1.8)
+      .cropped(to: extent)
+    if visionRackMix > 0.01 {
+      let k = CGFloat(1.0 - 2.0 * visionRackMix)
+      let b = CGFloat(visionRackMix)
+      sharpMask = sharpMask.applyingFilter(
+        "CIColorMatrix",
+        parameters: [
+          "inputRVector": CIVector(x: k, y: 0, z: 0, w: 0),
+          "inputGVector": CIVector(x: 0, y: k, z: 0, w: 0),
+          "inputBVector": CIVector(x: 0, y: 0, z: k, w: 0),
+          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+          "inputBiasVector": CIVector(x: b, y: b, z: b, w: 1)
+        ]
+      ).cropped(to: extent)
+    }
+
     let blurScale: CGFloat = 0.25
     let small = image.transformed(by: CGAffineTransform(scaleX: blurScale, y: blurScale))
     let smallExt = small.extent
-    let sigma = max(1.0, strength * Double(max(smallExt.width, smallExt.height)) * 0.015)
+    let sigma = max(1.0, strength * Double(max(smallExt.width, smallExt.height)) * 0.016)
     let blurred = small.clampedToExtent()
       .applyingGaussianBlur(sigma: sigma)
       .cropped(to: smallExt)

@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.0.1 PRO';
+  static const String appVersion = '3.1.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,25 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.0.1 PRO',
+        version: 'v3.1.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix Portrait Photo anti-loncat lensa 14mm makro: kunci sensor Hardware LiDAR 24mm + autofocus plane CIDepthBlurEffect asli',
+                'Fix Cinematic Video LiDAR Z-Depth aktif 100% (format 1080p inputPriority + DisparityFloat32, auto-track subjek & bokeh optik 2-tier progresif)',
+                'Fix stabilizer delay video: ganti mode .cinematic (delay ~0.8s) ke .standard (OIS+EIS zero-delay)',
+                'Fix lag saat pertama buka aplikasi: bangun LUT 3D asinkron di background, pasang mikrofon hanya saat mode Video, dan paralelkan init Dart',
+              ]
+            : const [
+                'Fixed Portrait Photo 14mm UltraWide macro hijack: prioritizes dedicated 24mm LiDAR depth camera & preserves native CIDepthBlurEffect AF plane',
+                'Fixed Cinematic Video hardware LiDAR depth stream via explicit inputPriority 1080p DisparityFloat32 format + live subject auto-tracking & 2-tier progressive bokeh',
+                'Eliminated ~0.8s video stabilizer preview lag by switching from .cinematic buffering to zero-delay .standard OIS+EIS',
+                'Eliminated cold-launch lag via async background 3D LUT build, lazy microphone session attach, and parallel Dart startup',
+              ],
+      ),
+      (
+        version: 'v3.0.1 PRO',
+        tag: '60FPS FIX',
         items: isId
             ? const [
                 'Fix preview kamera patah-patah & berat: Zero-Copy IOSurface 60fps pass-through (< 0.1ms/frame) untuk viewfinder standar',
