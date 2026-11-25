@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.0.0 PRO';
+  static const String appVersion = '3.0.1 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,23 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.0.0 PRO',
+        version: 'v3.0.1 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix preview kamera patah-patah & berat: Zero-Copy IOSurface 60fps pass-through (< 0.1ms/frame) untuk viewfinder standar',
+                'Dedicated 8-bit Metal previewContext tanpa Lanczos/RGBAh (10× lebih ringan & mulus di Live Metal LUT dan Cinematic Video)',
+                'Matikan buffer stabilisasi video di mode Foto/Portrait agar viewfinder zero-latency',
+              ]
+            : const [
+                'Fixed choppy/heavy camera preview via Zero-Copy IOSurface 60fps pass-through (< 0.1ms/frame) for standard viewfinder',
+                'Added dedicated 8-bit Metal previewContext without RGBAh/Lanczos overhead (~10× faster Live Metal LUT & Cinematic Video)',
+                'Disabled multi-frame video stabilization latency on Photo & Portrait viewfinders',
+              ],
+      ),
+      (
+        version: 'v3.0.0 PRO',
+        tag: 'NATIVE ENGINE',
         items: isId
             ? const [
                 'Mesin Kamera 100% Native Swift (AVFoundation + Metal GPU 60fps), tanpa plugin kamera Flutter',

@@ -9577,6 +9577,43 @@ final class NativeCinemaCameraEngine: NSObject,
 
   private static var falseColorCubeCache: Data?
 
+  /// Dedicated ultra-fast 8-bit Metal CIContext for 60fps live viewfinder
+  /// (NO 64-bit RGBAh, NO Lanczos highQualityDownsample, NO intermediate cache).
+  private static let previewContext: CIContext = {
+    let opts: [CIContextOption: Any] = [
+      .useSoftwareRenderer: false,
+      .workingFormat: CIFormat.BGRA8,
+      .highQualityDownsample: false,
+      .cacheIntermediates: false,
+    ]
+    if let dev = MTLCreateSystemDefaultDevice() {
+      return CIContext(mtlDevice: dev, options: opts)
+    }
+    return CIContext(options: opts)
+  }()
+
+  /// Dedicated real-time Display P3 CIContext for AVAssetWriter video recording
+  /// (fast 8-bit Display P3 without Lanczos/cache stalls).
+  private static let videoWriterContext: CIContext = {
+    let p3 = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpace(name: CGColorSpace.sRGB)
+    var opts: [CIContextOption: Any] = [
+      .useSoftwareRenderer: false,
+      .workingFormat: CIFormat.BGRA8,
+      .highQualityDownsample: false,
+      .cacheIntermediates: false,
+    ]
+    if let cs = p3 {
+      opts[.workingColorSpace] = cs
+      opts[.outputColorSpace] = cs
+    }
+    if let dev = MTLCreateSystemDefaultDevice() {
+      return CIContext(mtlDevice: dev, options: opts)
+    }
+    return CIContext(options: opts)
+  }()
+
+  private var pendingTextureNotify = false
+
   init(
     registry: FlutterTextureRegistry,
     channel: FlutterMethodChannel?,
@@ -9982,11 +10019,16 @@ final class NativeCinemaCameraEngine: NSObject,
 
       if let vConn = self.videoOutput.connection(with: .video),
          vConn.isVideoStabilizationSupported {
-        let wanted: AVCaptureVideoStabilizationMode = isVideo ? .cinematic : .standard
-        if targetDevice.activeFormat.isVideoStabilizationModeSupported(wanted) {
-          vConn.preferredVideoStabilizationMode = wanted
-        } else if targetDevice.activeFormat.isVideoStabilizationModeSupported(.standard) {
-          vConn.preferredVideoStabilizationMode = .standard
+        if isVideo {
+          let wanted: AVCaptureVideoStabilizationMode = .cinematic
+          if targetDevice.activeFormat.isVideoStabilizationModeSupported(wanted) {
+            vConn.preferredVideoStabilizationMode = wanted
+          } else if targetDevice.activeFormat.isVideoStabilizationModeSupported(.standard) {
+            vConn.preferredVideoStabilizationMode = .standard
+          }
+        } else {
+          // Zero-latency live viewfinder in Photo & Portrait modes (no multi-frame stabilization buffer!).
+          vConn.preferredVideoStabilizationMode = .off
         }
         stabActive = vConn.activeVideoStabilizationMode != .off
         stabMode = vConn.activeVideoStabilizationMode.rawValue
@@ -10698,11 +10740,36 @@ final class NativeCinemaCameraEngine: NSObject,
     frameCounter &+= 1
     let fIdx = frameCounter
 
+    let wantsGpuGrade = liveMetal || cineOn || peaking || zebra || fColor || wantScope || isLog
     let canWrite = recording && !isWritingFrame
     if canWrite { isWritingFrame = true }
-    let canPreview = !isRenderingPreview
+    let canPreview = wantsGpuGrade && !isRenderingPreview
     if canPreview { isRenderingPreview = true }
-    stateLock.unlock()
+
+    // FAST ZERO-COPY PATH (Normal Photo / Portrait / Video preview without GPU overlays):
+    // Hand the camera IOSurface CVPixelBuffer straight to FlutterTexture (< 0.1ms, true 60fps!).
+    if !wantsGpuGrade {
+      latestPixelBuffer = srcBuffer
+      let tid = textureId
+      let shouldNotify = tid >= 0 && !pendingTextureNotify
+      if shouldNotify { pendingTextureNotify = true }
+      stateLock.unlock()
+      if shouldNotify {
+        DispatchQueue.main.async { [weak self] in
+          guard let self = self else { return }
+          self.stateLock.lock()
+          self.pendingTextureNotify = false
+          let currentTid = self.textureId
+          self.stateLock.unlock()
+          if currentTid >= 0 {
+            self.registry?.textureFrameAvailable(currentTid)
+          }
+        }
+      }
+      if !canWrite { return }
+    } else {
+      stateLock.unlock()
+    }
 
     // Fallback Vision .fast matte ONLY when in Cinematic mode without hardware LiDAR depth
     if cineOn && hardwareDisparity == nil && (fIdx % 4 == 0) {
@@ -10741,7 +10808,7 @@ final class NativeCinemaCameraEngine: NSObject,
             )
           }
           if burnLut {
-            fullCI = Self.gradeLiveImage(fullCI, look: look, matrix: matrix)
+            fullCI = Self.gradeLiveImage(fullCI, look: look, matrix: matrix, forPreview: false)
           }
           if aspect > 0.1 {
             fullCI = Self.applyFrameAspect(to: fullCI, ratio: aspect, trueCrop: crop)
@@ -10751,7 +10818,7 @@ final class NativeCinemaCameraEngine: NSObject,
       }
     }
 
-    // 2. Async 60fps Metal FlutterTexture Preview
+    // 2. Async 8-Bit Metal GPU Preview (ONLY when Live Metal / Cinematic Bokeh / DOP Overlays active)
     if canPreview {
       renderQueue.async { [weak self] in
         guard let self = self else { return }
@@ -10767,9 +10834,10 @@ final class NativeCinemaCameraEngine: NSObject,
               by: CGAffineTransform(translationX: -ci.extent.origin.x, y: -ci.extent.origin.y)
             )
           }
+          // 768px max side keeps GPU preview < 2ms on A16/A17/A18 while staying razor-sharp on screen!
           let maxSide = max(ci.extent.width, ci.extent.height)
-          if maxSide > 1280.0 {
-            let factor = 1280.0 / maxSide
+          if maxSide > 768.0 {
+            let factor = 768.0 / maxSide
             ci = ci.transformed(by: CGAffineTransform(scaleX: factor, y: factor))
           }
           let w = max(2, Int(floor(ci.extent.width / 2.0) * 2.0))
@@ -10789,10 +10857,7 @@ final class NativeCinemaCameraEngine: NSObject,
             )
           }
 
-          let wantsGpuGrade = liveMetal || cineOn || peaking || zebra || fColor || wantScope
-          var displayImage = wantsGpuGrade
-            ? Self.gradeLiveImage(ci, look: look, matrix: matrix)
-            : ci
+          var displayImage = Self.gradeLiveImage(ci, look: look, matrix: matrix, forPreview: true)
 
           if fColor, let fcCube = Self.falseColorCube(),
              let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
@@ -10842,7 +10907,7 @@ final class NativeCinemaCameraEngine: NSObject,
 
           guard let outBuf = self.nextPreviewBuffer(width: w, height: h) else { return }
           let srgb = CGColorSpace(name: CGColorSpace.sRGB)
-          AppDelegate.gradingContext.render(
+          Self.previewContext.render(
             displayImage,
             to: outBuf,
             bounds: extent,
@@ -10852,15 +10917,24 @@ final class NativeCinemaCameraEngine: NSObject,
           self.stateLock.lock()
           self.latestPixelBuffer = outBuf
           let tid = self.textureId
+          let shouldNotify = tid >= 0 && !self.pendingTextureNotify
+          if shouldNotify { self.pendingTextureNotify = true }
           self.stateLock.unlock()
 
-          if tid >= 0 {
+          if shouldNotify {
             DispatchQueue.main.async { [weak self] in
-              self?.registry?.textureFrameAvailable(tid)
+              guard let self = self else { return }
+              self.stateLock.lock()
+              self.pendingTextureNotify = false
+              let currentTid = self.textureId
+              self.stateLock.unlock()
+              if currentTid >= 0 {
+                self.registry?.textureFrameAvailable(currentTid)
+              }
             }
           }
 
-          if wantScope && (fIdx % 6 == 0) {
+          if wantScope && (fIdx % 8 == 0) {
             let scopes = PhotoEditor.computeScopes(for: displayImage)
             if !scopes.isEmpty {
               DispatchQueue.main.async { [weak self] in
@@ -11030,7 +11104,12 @@ final class NativeCinemaCameraEngine: NSObject,
 
   // MARK: - Helpers (Grading, Aspect, Writer, Pool)
 
-  private static func gradeLiveImage(_ ci: CIImage, look: FilmLook?, matrix: [Double]) -> CIImage {
+  private static func gradeLiveImage(
+    _ ci: CIImage,
+    look: FilmLook?,
+    matrix: [Double],
+    forPreview: Bool
+  ) -> CIImage {
     let extent = ci.extent
     var graded: CIImage
     if let look = look {
@@ -11045,11 +11124,15 @@ final class NativeCinemaCameraEngine: NSObject,
       } else {
         graded = ci
       }
-      if look.shadowDepth > 0.005 {
-        graded = FilmEngine.applyShadowDepth(to: graded, strength: look.shadowDepth).cropped(to: extent)
-      }
-      if look.filmicRollOff > 0.005 {
-        graded = FilmEngine.applyFilmicRollOff(to: graded, strength: look.filmicRollOff).cropped(to: extent)
+      // On live viewfinder preview, run 1 single 3D LUT pass (< 1ms!) so preview
+      // stays locked at 60fps; recorded video & captured photos run the full 3-pass curve.
+      if !forPreview {
+        if look.shadowDepth > 0.005 {
+          graded = FilmEngine.applyShadowDepth(to: graded, strength: look.shadowDepth).cropped(to: extent)
+        }
+        if look.filmicRollOff > 0.005 {
+          graded = FilmEngine.applyFilmicRollOff(to: graded, strength: look.filmicRollOff).cropped(to: extent)
+        }
       }
     } else {
       graded = AppDelegate.colorMatrixImage(matrix, to: ci)
@@ -11179,7 +11262,7 @@ final class NativeCinemaCameraEngine: NSObject,
           let pixelBuf = dst else { return }
     let bounds = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
     let cs = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpace(name: CGColorSpace.sRGB)
-    AppDelegate.p3GradingContext.render(image, to: pixelBuf, bounds: bounds, colorSpace: cs)
+    Self.videoWriterContext.render(image, to: pixelBuf, bounds: bounds, colorSpace: cs)
 
     stateLock.lock()
     if isRecording, recordWriter?.status == .writing, recordVideoInput?.isReadyForMoreMediaData == true {

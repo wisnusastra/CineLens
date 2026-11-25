@@ -376,7 +376,8 @@ class CinemaCameraState {
       focusPeakingEnabled ||
       zebraEnabled ||
       falseColorEnabled ||
-      liveScopeEnabled;
+      liveScopeEnabled ||
+      appleLogEnabled;
 
   Size get previewSize => Size(previewWidth, previewHeight);
 

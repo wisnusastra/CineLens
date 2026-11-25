@@ -295,8 +295,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (current == null) return;
     final nextH = horizonDegrees ?? current.horizonDegrees;
     final nextA = audioPeakDb ?? current.audioPeakDb;
-    if ((nextH - current.horizonDegrees).abs() < 0.2 &&
-        (nextA - current.audioPeakDb).abs() < 0.8) {
+    if ((nextH - current.horizonDegrees).abs() < 0.6 &&
+        (nextA - current.audioPeakDb).abs() < 1.5) {
       return;
     }
     state = AsyncData(
