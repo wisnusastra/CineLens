@@ -107,19 +107,16 @@ class _MediaSpecsSheetState extends ConsumerState<_MediaSpecsSheet> {
               ? '$resolution (${(meta['megapixels'] as num).toStringAsFixed(1)} MP)'
               : resolution
         ),
-        if (meta['lens'] != null || meta['focalLength'] != null)
-          (
-            'LENS',
-            meta['lens'] != null
-                ? meta['lens'].toString()
-                : '${meta['focalLength']} mm'
-          ),
-        if (meta['fNumber'] != null) ('APERTURE', 'f/${meta['fNumber']}'),
+        if (meta['focalLength'] != null)
+          ('LENS', meta['focalLength'].toString()),
+        if (meta['fNumber'] != null) ('APERTURE', meta['fNumber'].toString()),
         if (meta['shutter'] != null) ('SHUTTER', meta['shutter'].toString()),
-        if (meta['iso'] != null) ('ISO', 'ISO ${meta['iso']}'),
+        if (meta['iso'] != null) ('ISO', meta['iso'].toString()),
         if (meta['colorSpace'] != null)
           ('COLOR SPACE', meta['colorSpace'].toString()),
-        if (meta['camera'] != null) ('CAMERA', meta['camera'].toString()),
+        if (meta['cameraModel'] != null)
+          ('CAMERA', meta['cameraModel'].toString()),
+        if (meta['dateTime'] != null) ('CAPTURED', meta['dateTime'].toString()),
         ('FILE SIZE', _formatSize(meta['fileSizeKB'] as num?)),
       ],
     ];

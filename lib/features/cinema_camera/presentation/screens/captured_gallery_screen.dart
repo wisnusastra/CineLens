@@ -1086,10 +1086,12 @@ class _VideoPosterTileState extends ConsumerState<_VideoPosterTile> {
     final res = await ref
         .read(cinemaCameraRepositoryProvider)
         .generateVideoThumbnail(widget.path);
-    if (!mounted || res == null) return;
+    if (!mounted || res.isEmpty) return;
+    final thumb = res['thumbPath'] as String?;
+    final dur = (res['durationSeconds'] as num?)?.toDouble() ?? 0.0;
     setState(() {
-      _thumbPath = res.thumbnailPath;
-      _durationSeconds = res.durationSeconds;
+      _thumbPath = thumb;
+      _durationSeconds = dur;
     });
   }
 
