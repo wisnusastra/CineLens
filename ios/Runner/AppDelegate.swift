@@ -2134,19 +2134,20 @@ final class ExportProgressReporter {
     // master on disk AND write it directly to Apple Photos (preserving 10-bit
     // smooth sky/shadow gradients without UIImage 8-bit truncation!).
     if heif10Bit,
-       let heifData = try? context.heif10Representation(
+       let heifData: Data = try? context.heif10Representation(
          of: output,
          colorSpace: colorSpace,
          options: [
-           kCIImageRepresentationLossyCompressionQuality as CIImageRepresentationOption:
-             CGFloat(clampedQuality)
+           CIImageRepresentationOption(
+             rawValue: kCGImageDestinationLossyCompressionQuality as String
+           ): CGFloat(clampedQuality)
          ]
        ) {
       let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
       let dir = docs.appendingPathComponent("cinelens_10bit", isDirectory: true)
       try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
       let heicUrl = dir.appendingPathComponent("CINELENS_10BIT_\(Int(Date().timeIntervalSince1970)).heic")
-      try? heifData.write(to: heicUrl, options: .atomic)
+      try? heifData.write(to: heicUrl, options: Data.WritingOptions.atomic)
       AppDelegate.saveRawHeifToPhotosIfAuthorized(heifData)
     }
 
@@ -2905,19 +2906,20 @@ final class ExportProgressReporter {
       if params.heif10Bit,
          let outImg = output,
          let p3 = CGColorSpace(name: CGColorSpace.displayP3),
-         let heifData = try? AppDelegate.p3GradingContext.heif10Representation(
+         let heifData: Data = try? AppDelegate.p3GradingContext.heif10Representation(
            of: outImg,
            colorSpace: p3,
            options: [
-             kCIImageRepresentationLossyCompressionQuality as CIImageRepresentationOption:
-               CGFloat(min(max(quality, 0.5), 1.0))
+             CIImageRepresentationOption(
+               rawValue: kCGImageDestinationLossyCompressionQuality as String
+             ): CGFloat(min(max(quality, 0.5), 1.0))
            ]
          ) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir = docs.appendingPathComponent("cinelens_10bit", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let heicUrl = dir.appendingPathComponent("CINELENS_EDIT_10BIT_\(Int(Date().timeIntervalSince1970)).heic")
-        try? heifData.write(to: heicUrl, options: .atomic)
+        try? heifData.write(to: heicUrl, options: Data.WritingOptions.atomic)
         AppDelegate.saveRawHeifToPhotosIfAuthorized(heifData)
       }
       let data = output.flatMap {
