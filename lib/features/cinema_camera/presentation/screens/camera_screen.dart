@@ -19,6 +19,7 @@ import '../../../options/domain/entities/camera_options_state.dart';
 import '../../../options/presentation/providers/camera_options_provider.dart';
 import '../../../options/presentation/widgets/camera_options_sheet.dart';
 import '../../../options/presentation/widgets/cinematic_viewfinder_overlay.dart';
+import '../../../photo_editor/presentation/widgets/watermark_frame_picker.dart';
 import '../providers/cinema_camera_provider.dart';
 import '../providers/cinema_camera_state.dart';
 import '../widgets/custom_tone_editor_sheet.dart';
@@ -344,6 +345,21 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                     _notifier.toggleSplitCompare();
                   },
                 ),
+                if (state.captureMode.isPhoto)
+                  _GlassTextChip(
+                    label: 'WM',
+                    active: state.watermarkStyle != 'none',
+                    onTap: () => _openWatermarkSheet(haptics),
+                  )
+                else if (state.proCapabilities.available)
+                  _GlassTextChip(
+                    label: '180°',
+                    active: state.is180ShutterLocked,
+                    onTap: () {
+                      if (haptics) HapticFeedback.selectionClick();
+                      _notifier.toggle180DegreeShutter();
+                    },
+                  ),
                 _GlassMiniButton(
                   icon: Icons.visibility_off_outlined,
                   active: state.zenModeEnabled,
@@ -362,15 +378,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                     );
                   },
                 ),
-                if (state.proCapabilities.available)
-                  _GlassTextChip(
-                    label: '180°',
-                    active: state.is180ShutterLocked,
-                    onTap: () {
-                      if (haptics) HapticFeedback.selectionClick();
-                      _notifier.toggle180DegreeShutter();
-                    },
-                  ),
               ],
             ),
           ),
@@ -1238,7 +1245,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             ),
           ),
         const Spacer(),
-        // Right: Split LUT + Zen Mode + HL/180°
+        // Right: Split LUT + Watermark (Photo) / 180° (Video) + Zen Mode
         _GlassMiniButton(
           icon: Icons.compare_rounded,
           active: state.splitCompareEnabled,
@@ -1248,30 +1255,28 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           },
         ),
         const SizedBox(width: 5),
+        if (state.captureMode.isPhoto)
+          _GlassTextChip(
+            label: 'WM',
+            active: state.watermarkStyle != 'none',
+            onTap: () => _openWatermarkSheet(haptics),
+          )
+        else if (state.proCapabilities.available)
+          _GlassTextChip(
+            label: '180°',
+            active: state.is180ShutterLocked,
+            onTap: () {
+              if (haptics) HapticFeedback.selectionClick();
+              _notifier.toggle180DegreeShutter();
+            },
+          ),
+        const SizedBox(width: 5),
         _GlassMiniButton(
           icon: Icons.visibility_off_outlined,
           active: state.zenModeEnabled,
           onTap: () {
             if (haptics) HapticFeedback.selectionClick();
             _notifier.toggleZenMode();
-          },
-        ),
-        const SizedBox(width: 5),
-        _GlassTextChip(
-          label: state.captureMode.isVideo && state.proCapabilities.available
-              ? '180°'
-              : 'HL',
-          active: state.captureMode.isVideo && state.proCapabilities.available
-              ? state.is180ShutterLocked
-              : state.highlightMeteringEnabled,
-          onTap: () {
-            if (haptics) HapticFeedback.selectionClick();
-            if (state.captureMode.isVideo && state.proCapabilities.available) {
-              _notifier.toggle180DegreeShutter();
-            } else {
-              _notifier
-                  .setHighlightMeteringEnabled(!state.highlightMeteringEnabled);
-            }
           },
         ),
       ],
@@ -1783,23 +1788,62 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     bool haptics, {
     bool compact = false,
   }) {
+    final isStd = state.activeRecipeSlot == null;
     return SizedBox(
       height: compact ? 22 : 24,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 14),
-        itemCount: state.recipes.length,
+        itemCount: state.recipes.length + 1,
         separatorBuilder: (_, __) => const SizedBox(width: 6),
         itemBuilder: (context, idx) {
-          final r = state.recipes[idx];
+          if (idx == 0) {
+            return GestureDetector(
+              onTap: state.isRecordingVideo
+                  ? null
+                  : () async {
+                      if (haptics) HapticFeedback.selectionClick();
+                      await _notifier.resetRecipeToStandard();
+                      _toast('Standar (Recipe OFF)');
+                    },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: isStd
+                      ? AppTheme.cinemaAmber.withValues(alpha: 0.2)
+                      : Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(7),
+                  border: Border.all(
+                    color: isStd ? AppTheme.cinemaAmber : Colors.white12,
+                    width: 0.8,
+                  ),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  'STD',
+                  style: AppTheme.monoStyle(
+                    color: isStd ? AppTheme.cinemaAmber : AppTheme.textSecondary,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            );
+          }
+
+          final r = state.recipes[idx - 1];
           final active = state.activeRecipeSlot == r.slot;
           return GestureDetector(
             onTap: state.isRecordingVideo
                 ? null
                 : () async {
                     if (haptics) HapticFeedback.selectionClick();
-                    await _notifier.applyRecipe(r.slot);
-                    _toast('${r.slotCode} · ${r.name}');
+                    final enabled = await _notifier.applyRecipe(r.slot);
+                    _toast(
+                      enabled
+                          ? '${r.slotCode} · ${r.name}'
+                          : 'Standar (${r.slotCode} OFF)',
+                    );
                   },
             onLongPress: state.isRecordingVideo
                 ? null
@@ -1842,6 +1886,78 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                       fontWeight: FontWeight.w700,
                       letterSpacing: 0.4,
                     ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _openWatermarkSheet(bool haptics) {
+    if (haptics) HapticFeedback.selectionClick();
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppTheme.surfaceDark,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetCtx) => Consumer(
+        builder: (_, sheetRef, __) {
+          final st = sheetRef.watch(cinemaCameraProvider).valueOrNull;
+          if (st == null) return const SizedBox.shrink();
+          final notifier = sheetRef.read(cinemaCameraProvider.notifier);
+          return SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(0, 14, 0, 18),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  WatermarkFramePicker(
+                    selectedStyle: st.watermarkStyle,
+                    selectedTheme: st.watermarkTheme,
+                    onStyleChanged: (style) =>
+                        notifier.setCameraWatermark(style: style),
+                    onThemeChanged: (theme) =>
+                        notifier.setCameraWatermark(theme: theme),
+                  ),
+                  const SizedBox(height: 8),
+                  SwitchListTile(
+                    dense: true,
+                    value: st.watermarkDateStamp,
+                    activeThumbColor: AppTheme.cinemaAmber,
+                    title: Text(
+                      AppStrings.of(sheetCtx).dateStamp,
+                      style: const TextStyle(
+                        color: AppTheme.textPrimary,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    subtitle: const Text(
+                      "Auto-stamp 'YY MM DD + Device & EXIF saat memotret",
+                      style: TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 10.5,
+                      ),
+                    ),
+                    onChanged: (v) =>
+                        notifier.setCameraWatermark(dateStamp: v),
                   ),
                 ],
               ),

@@ -1269,7 +1269,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final current = state.valueOrNull;
     if (current == null) return;
 
-    final next = current.copyWith(selectedTone: tone, clearLiveDraft: true);
+    final next = current.copyWith(
+      selectedTone: tone,
+      clearLiveDraft: true,
+      clearActiveRecipeSlot: true,
+    );
     state = AsyncData(next);
     _syncLiveMetalIfActive(next);
     ref.read(cinemaCameraRepositoryProvider).savePreferences(
@@ -1645,11 +1649,42 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     state = AsyncData(current.copyWith(freeStorageMB: freeMB));
   }
 
-  /// Recalls a saved Fujifilm-style recipe (`C1`–`C4`) in 1 tap.
-  Future<void> applyRecipe(int slot) async {
+  /// Resets any active `C1`–`C4` recipe cleanly back to Standard Photo/Video defaults.
+  Future<void> resetRecipeToStandard() async {
     final current = state.valueOrNull;
     if (current == null || current.isRecordingVideo || _isSwitchingProfile) {
       return;
+    }
+    final stdTone = current.tones.firstWhere(
+      (t) => t.id == 'standard',
+      orElse: () => current.tones.first,
+    );
+    selectTone(stdTone);
+    setIntensity(1.0);
+    setFrameFormat(CameraFrameFormat.full);
+    setProcessZeroEnabled(false);
+    setNightStack(false);
+    await setHiRes48MP(false);
+    setHeif10Bit(false);
+    await setHighlightMeteringEnabled(false);
+    await setExposureOffset(0.0);
+    final latest = state.valueOrNull;
+    if (!_disposed && latest != null) {
+      state = AsyncData(latest.copyWith(clearActiveRecipeSlot: true));
+    }
+  }
+
+  /// Recalls a saved Fujifilm-style recipe (`C1`–`C4`) in 1 tap.
+  /// Tapping the already-active recipe slot toggles it OFF back to Standard!
+  /// Returns `true` when activated, `false` when toggled off.
+  Future<bool> applyRecipe(int slot) async {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo || _isSwitchingProfile) {
+      return false;
+    }
+    if (current.activeRecipeSlot == slot) {
+      await resetRecipeToStandard();
+      return false;
     }
     final recipe = current.recipes.firstWhere(
       (r) => r.slot == slot,
@@ -1688,6 +1723,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (!_disposed && latest != null) {
       state = AsyncData(latest.copyWith(activeRecipeSlot: slot));
     }
+    return true;
   }
 
   /// Overwrites recipe slot `C1`–`C4` with the current camera configuration.

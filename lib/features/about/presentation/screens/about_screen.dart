@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.5.0 PRO';
+  static const String appVersion = '3.5.1 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,23 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.5.0 PRO',
+        version: 'v3.5.1 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix warna kulit terlalu oranye pada Orange & Teal, Metro Teal Night & Blue Hour Rooftop: perlindungan Skin-Vector penuh untuk cahaya indoor/daylight sambil mempertahankan Petrol Teal (#005F60/#008083/#249EA0) yang tajam',
+                'Fix Resep C1–C4: tambah tombol STD di kiri strip resep + tap ulang slot aktif untuk langsung mematikan resep & kembali ke Standar',
+                'Akses Watermark Frame 1-Tap: tombol WM langsung di viewfinder kamera + tab khusus "Watermark" di bar bawah Gallery Photo Editor',
+              ]
+            : const [
+                'Fixed over-orange indoor skin tones on Orange & Teal, Metro Teal Night & Blue Hour Rooftop with full Skin-Vector protection while keeping crisp Petrol Teal separation',
+                'Fixed C1–C4 Recipes toggle-off: added STD reset pill and tapping the active recipe slot now cleanly turns it off back to Standard',
+                'Added 1-tap WM button directly on the camera viewfinder and a dedicated Watermark tab in the Gallery Photo Editor',
+              ],
+      ),
+      (
+        version: 'v3.5.0 PRO',
+        tag: 'WATERMARK',
         items: isId
             ? const [
                 'Watermark Frame Studio (12 Gaya Editorial & Film): deteksi otomatis model iPhone/kamera asli (mis. iPhone 14 Pro Max) + EXIF 2 baris (24mm f/1.8 / 1/250s ISO 100) + pilihan tema White | Black | Glass',

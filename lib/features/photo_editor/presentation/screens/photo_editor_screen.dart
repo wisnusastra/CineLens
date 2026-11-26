@@ -79,6 +79,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
     Icons.blur_circular_rounded,
     Icons.layers_outlined,
     Icons.crop_rotate_rounded,
+    Icons.crop_free_rounded,
   ];
 
   static const List<Color> _bandColors = <Color>[
@@ -1549,6 +1550,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
       s.tabBlur,
       s.tabMask,
       s.tabCrop,
+      if (!_isVideo) 'Watermark',
     ];
 
     return Container(
@@ -1635,8 +1637,160 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
       7 => _buildDetailTab(),
       8 => _buildLensBlurTab(),
       9 => _buildMaskingTab(),
-      _ => _buildOpticsCropTab(),
+      10 => _buildOpticsCropTab(),
+      _ => _buildWatermarkTab(),
     };
+  }
+
+  Widget _buildWatermarkTab() {
+    final s = AppStrings.of(context);
+    return _scroll([
+      const SizedBox(height: 6),
+      WatermarkFramePicker(
+        selectedStyle: _edit.frameStyle,
+        selectedTheme: _edit.frameTheme,
+        onStyleChanged: (id) => _update(
+          _edit.copyWith(frameStyle: id),
+          immediateUndo: true,
+        ),
+        onThemeChanged: (theme) => _update(
+          _edit.copyWith(frameTheme: theme),
+          immediateUndo: true,
+        ),
+      ),
+      const SizedBox(height: 8),
+      if (_edit.frameStyle != 'none') ...[
+        SwitchListTile(
+          dense: true,
+          value: _edit.frameExifCaption,
+          activeThumbColor: AppTheme.cinemaAmber,
+          title: Text(
+            s.exifCaption,
+            style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12),
+          ),
+          onChanged: (v) => _update(
+            _edit.copyWith(frameExifCaption: v),
+            immediateUndo: true,
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 2, 16, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _signatureController,
+                  style: const TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 12,
+                  ),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: 'Signature (mis. WISNU SASTRA)',
+                    hintStyle: const TextStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 11.5,
+                    ),
+                    filled: true,
+                    fillColor: Colors.white.withValues(alpha: 0.06),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: AppTheme.hairline),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: AppTheme.hairline),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide:
+                          const BorderSide(color: AppTheme.cinemaAmber),
+                    ),
+                  ),
+                  onChanged: (v) => _update(
+                    _edit.copyWith(frameCustomText: v.trim()),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.cinemaAmber,
+                  side: BorderSide(
+                    color: AppTheme.cinemaAmber.withValues(alpha: 0.5),
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  minimumSize: Size.zero,
+                ),
+                onPressed: () async {
+                  final text = _signatureController.text.trim();
+                  await ref
+                      .read(cinemaCameraRepositoryProvider)
+                      .savePhotographerSignature(text);
+                  _update(
+                    _edit.copyWith(frameCustomText: text),
+                    immediateUndo: true,
+                  );
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context)
+                    ..hideCurrentSnackBar()
+                    ..showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Signature default disimpan.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        backgroundColor: AppTheme.cardDark,
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                },
+                child: const Text(
+                  'SAVE',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+      SwitchListTile(
+        dense: true,
+        value: _edit.frameDateStamp,
+        activeThumbColor: AppTheme.cinemaAmber,
+        title: Text(
+          s.dateStamp,
+          style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12),
+        ),
+        onChanged: (v) => _update(
+          _edit.copyWith(frameDateStamp: v),
+          immediateUndo: true,
+        ),
+      ),
+      SwitchListTile(
+        dense: true,
+        value: _edit.heif10Bit,
+        activeThumbColor: AppTheme.cinemaAmber,
+        title: Text(
+          s.heif10Bit,
+          style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12),
+        ),
+        onChanged: (v) => _update(
+          _edit.copyWith(heif10Bit: v),
+          immediateUndo: true,
+        ),
+      ),
+    ]);
   }
 
   Widget _scroll(List<Widget> children) {

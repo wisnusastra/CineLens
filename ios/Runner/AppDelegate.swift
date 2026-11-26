@@ -5285,44 +5285,79 @@ enum FilmEngine {
     switch profile {
     case "teal_orange":
       // Exact SchemeColor Orange & Teal (#FD5901 / #F78104 / #FAAB36 vs #249EA0 / #008083 / #005F60)
+      // WITH strict Cinema Skin-Tone Protection so indoor/daylight human skin NEVER turns carrot-orange!
       let tealZone = hueBell(h, center: 185.0, halfWidth: 96.0)
       let greenZone = hueBell(h, center: 118.0, halfWidth: 52.0)
-      let warmZone = hueBell(h, center: 28.0, halfWidth: 52.0)
-      let skinZone = hueBell(h, center: 24.0, halfWidth: 16.0) * smoothstep(0.28, 0.52, luma) * (1.0 - smoothstep(0.45, 0.78, s))
+      // Broad skin guard covering fair, warm indoor tungsten, tan & deep skin (8°..44°)
+      let skinZone = hueBell(h, center: 24.0, halfWidth: 20.0)
+        * smoothstep(0.10, 0.24, s)
+        * smoothstep(0.10, 0.26, v)
+        * (1.0 - smoothstep(0.84, 0.96, v))
+      // Only bright specular lights / vivid non-skin accents get fiery orange boost!
+      let brightLightMask = smoothstep(0.74, 0.92, v) * smoothstep(0.30, 0.60, s)
+      let warmAccent = hueBell(h, center: 28.0, halfWidth: 46.0) * (1.0 - 0.88 * skinZone)
 
-      // Pull blues & greens cleanly toward pure 181° cinema teal (#008083 / #249EA0)
+      // Pull blues & greens cleanly toward pure 181° cinema petrol teal (#008083 / #249EA0)
       h += shortestHueDelta(from: h, to: 181.0) * (0.64 * tealZone + 0.56 * greenZone) * chromaMask
-      // Pull reds & yellows cleanly toward 28° tangerine-amber (#FD5901 -> #FAAB36)
-      let orangeTarget = 22.0 + 14.0 * hlMask
-      h += shortestHueDelta(from: h, to: orangeTarget) * 0.58 * warmZone * chromaMask
+      // Pull non-skin yellows/reds toward clean golden-tangerine (#F78104/#FAAB36); keep skin natural peach (20°)
+      let orangeTarget = 22.0 + 13.0 * hlMask
+      h += shortestHueDelta(from: h, to: orangeTarget) * (0.50 * warmAccent + 0.35 * brightLightMask) * chromaMask
+      h += shortestHueDelta(from: h, to: 20.0) * 0.22 * skinZone
 
-      // Lush teal & vivid orange saturation, while protecting skin from turning carrot-orange
+      // Lush teal saturation; calm over-saturated indoor tungsten skin cleanly instead of boosting it!
       let tealBoost = 1.0 + 0.24 * (tealZone + greenZone * 0.6) * (0.65 + 0.35 * shadowMask)
-      let orangeBoost = 1.0 + 0.22 * warmZone * (1.0 - 0.72 * skinZone)
+      let orangeBoost = 1.0 + 0.18 * (warmAccent + brightLightMask * 0.6)
       s = min(s * tealBoost * orangeBoost, 1.0)
-      // Deepen petrol teal shadows (#005F60) slightly for cinematic density
-      v = min(max(v * (1.0 - 0.07 * tealZone * shadowMask + 0.04 * warmZone * hlMask), 0.0), 1.0)
+      if skinZone > 0.01 && s > 0.34 {
+        // Soft-compress excess orange saturation on skin (keeps skin clean, natural & creamy!)
+        let excess = s - 0.34
+        s = 0.34 + excess * (1.0 - 0.42 * skinZone)
+      }
+      v = min(max(v * (1.0 - 0.06 * tealZone * shadowMask + 0.03 * skinZone), 0.0), 1.0)
 
     case "metro_teal":
-      // Photo #1: Night urban light-trails — deep abyss petrol #005F60, electric #249EA0, blazing #FD5901
+      // Photo #1: Night urban light-trails — deep petrol #005F60, electric #249EA0, blazing neon lights #FD5901,
+      // while protecting human skin tones from turning neon burnt-orange!
       let coolZone = hueBell(h, center: 192.0, halfWidth: 105.0)
-      let warmZone = hueBell(h, center: 24.0, halfWidth: 56.0)
-      h += shortestHueDelta(from: h, to: 184.0) * 0.72 * coolZone * chromaMask
-      let fireTarget = 18.0 + 16.0 * hlMask // #FD5901 -> #FAAB36
-      h += shortestHueDelta(from: h, to: fireTarget) * 0.65 * warmZone * chromaMask
-      s = min(s * (1.0 + 0.30 * coolZone * (0.5 + 0.5 * midMask) + 0.28 * warmZone * (0.4 + 0.6 * hlMask)), 1.0)
-      v = min(max(v * (1.0 - 0.10 * coolZone * shadowMask + 0.06 * warmZone * hlMask), 0.0), 1.0)
+      let skinZone = hueBell(h, center: 24.0, halfWidth: 20.0)
+        * smoothstep(0.10, 0.24, s)
+        * smoothstep(0.10, 0.26, v)
+        * (1.0 - smoothstep(0.84, 0.96, v))
+      let neonLight = hueBell(h, center: 24.0, halfWidth: 48.0)
+        * (smoothstep(0.72, 0.90, v) + (1.0 - skinZone) * 0.55)
+
+      h += shortestHueDelta(from: h, to: 184.0) * 0.70 * coolZone * chromaMask
+      let fireTarget = 18.0 + 16.0 * hlMask
+      h += shortestHueDelta(from: h, to: fireTarget) * min(0.55, 0.45 * neonLight) * chromaMask
+      h += shortestHueDelta(from: h, to: 19.0) * 0.24 * skinZone
+
+      s = min(s * (1.0 + 0.28 * coolZone * (0.5 + 0.5 * midMask) + 0.22 * neonLight * hlMask), 1.0)
+      if skinZone > 0.01 && s > 0.32 {
+        let excess = s - 0.32
+        s = 0.32 + excess * (1.0 - 0.48 * skinZone)
+      }
+      v = min(max(v * (1.0 - 0.08 * coolZone * shadowMask + 0.04 * skinZone + 0.05 * neonLight * hlMask), 0.0), 1.0)
 
     case "rooftop_cyan":
       // Photo #2: Blue-hour rooftop portrait — cool cyan-slate concrete/sky (#008083/#249EA0),
-      // clean luminous ivory-peach skin, glowing golden city bokeh (#F78104/#FAAB36)
+      // luminous clean ivory-peach skin (ZERO orange cast!), glowing amber city bokeh (#FAAB36)
       let coolZone = hueBell(h, center: 196.0, halfWidth: 102.0)
-      let warmZone = hueBell(h, center: 30.0, halfWidth: 48.0)
-      let skinZone = hueBell(h, center: 22.0, halfWidth: 18.0) * smoothstep(0.28, 0.60, luma) * (1.0 - smoothstep(0.36, 0.70, s))
+      let skinZone = hueBell(h, center: 23.0, halfWidth: 21.0)
+        * smoothstep(0.08, 0.22, s)
+        * smoothstep(0.12, 0.28, v)
+        * (1.0 - smoothstep(0.86, 0.97, v))
+      let cityBokeh = hueBell(h, center: 34.0, halfWidth: 34.0) * smoothstep(0.75, 0.94, v)
+
       h += shortestHueDelta(from: h, to: 188.0) * 0.62 * coolZone * chromaMask
-      h += shortestHueDelta(from: h, to: 32.0) * 0.42 * warmZone * (1.0 - 0.75 * skinZone) * chromaMask
-      // Keep skin bright & natural; enrich cyan twilight & glowing amber lights
-      s = min(s * (1.0 + 0.22 * coolZone + 0.20 * warmZone * (1.0 - 0.85 * skinZone) - 0.10 * skinZone), 1.0)
+      h += shortestHueDelta(from: h, to: 34.0) * 0.40 * cityBokeh * chromaMask
+      h += shortestHueDelta(from: h, to: 18.0) * 0.28 * skinZone
+
+      s = min(s * (1.0 + 0.22 * coolZone + 0.16 * cityBokeh), 1.0)
+      if skinZone > 0.01 && s > 0.28 {
+        // Creamy pale-peach editorial portrait skin like Photo #2!
+        let excess = s - 0.28
+        s = 0.28 + excess * (1.0 - 0.54 * skinZone)
+      }
       v = min(max(v * (1.0 + 0.06 * skinZone - 0.05 * coolZone * shadowMask), 0.0), 1.0)
 
     case "nordic_ice":
@@ -5940,39 +5975,39 @@ enum FilmEngine {
         vignette: 0.2, soften: 0.12
       ),
       "teal_orange": FilmStockParams(
-        mix: [1.06, -0.02, -0.04, -0.02, 1.04, -0.02, -0.08, 0.04, 1.04],
-        ev: -0.03,
-        k: [6.4, 6.2, 6.0], pivot: [0.51, 0.52, 0.53],
-        sat: 1.08, hlDesat: 0.10, shDesat: 0.04,
-        shadowTint: [-0.055, 0.024, 0.030], hlTint: [0.048, 0.020, -0.038],
+        mix: [1.01, 0.0, -0.01, -0.01, 1.02, -0.01, -0.02, 0.02, 1.02],
+        ev: -0.02,
+        k: [6.2, 6.1, 6.0], pivot: [0.51, 0.52, 0.52],
+        sat: 1.00, hlDesat: 0.14, shDesat: 0.06,
+        shadowTint: [-0.044, 0.020, 0.026], hlTint: [0.012, 0.006, -0.008],
         black: 0.004, white: 0.985, mono: nil,
-        grain: 0.14, grainSize: 0.70,
-        halation: 0.28, bloom: 0.08,
-        vignette: 0.20, soften: 0.0,
+        grain: 0.12, grainSize: 0.65,
+        halation: 0.24, bloom: 0.06,
+        vignette: 0.18, soften: 0.0,
         hueProfile: "teal_orange"
       ),
       "metro_teal": FilmStockParams(
-        mix: [1.05, -0.03, -0.02, -0.03, 1.05, -0.02, -0.07, 0.04, 1.04],
-        ev: -0.06,
-        k: [6.8, 6.6, 6.4], pivot: [0.50, 0.52, 0.53],
-        sat: 1.12, hlDesat: 0.08, shDesat: 0.02,
-        shadowTint: [-0.068, 0.024, 0.032], hlTint: [0.036, 0.010, -0.024],
+        mix: [1.01, -0.01, 0.0, -0.01, 1.03, -0.01, -0.02, 0.02, 1.02],
+        ev: -0.04,
+        k: [6.5, 6.4, 6.3], pivot: [0.50, 0.51, 0.52],
+        sat: 1.02, hlDesat: 0.12, shDesat: 0.04,
+        shadowTint: [-0.052, 0.022, 0.028], hlTint: [0.008, 0.004, -0.004],
         black: 0.0, white: 0.99, mono: nil,
         grain: 0.12, grainSize: 0.65,
-        halation: 0.44, bloom: 0.12,
-        vignette: 0.24, soften: 0.0,
+        halation: 0.36, bloom: 0.10,
+        vignette: 0.22, soften: 0.0,
         hueProfile: "metro_teal"
       ),
       "rooftop_cyan": FilmStockParams(
-        mix: [1.02, -0.01, -0.01, -0.02, 1.04, -0.01, -0.04, 0.03, 1.03],
-        ev: -0.02,
-        k: [6.2, 6.1, 5.9], pivot: [0.51, 0.52, 0.52],
-        sat: 1.06, hlDesat: 0.12, shDesat: 0.06,
-        shadowTint: [-0.058, 0.018, 0.038], hlTint: [0.014, 0.008, -0.008],
+        mix: [1.00, 0.0, 0.0, -0.01, 1.02, 0.0, -0.01, 0.02, 1.02],
+        ev: -0.01,
+        k: [6.0, 6.0, 5.9], pivot: [0.51, 0.51, 0.51],
+        sat: 0.98, hlDesat: 0.14, shDesat: 0.08,
+        shadowTint: [-0.048, 0.018, 0.034], hlTint: [0.002, 0.004, 0.004],
         black: 0.006, white: 0.985, mono: nil,
-        grain: 0.12, grainSize: 0.65,
-        halation: 0.24, bloom: 0.08,
-        vignette: 0.20, soften: 0.0,
+        grain: 0.10, grainSize: 0.60,
+        halation: 0.20, bloom: 0.06,
+        vignette: 0.18, soften: 0.0,
         hueProfile: "rooftop_cyan"
       ),
       "nordic_ice": FilmStockParams(
