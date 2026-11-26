@@ -12,21 +12,12 @@ enum CameraLensDirection { back, front }
 enum FlashMode { off, auto, always, torch }
 
 enum CinemaCaptureMode {
-  portrait,
   photo,
-  video24fps,
-  cinematicVideo;
+  video24fps;
 
-  bool get isVideo =>
-      this == CinemaCaptureMode.video24fps ||
-      this == CinemaCaptureMode.cinematicVideo;
+  bool get isVideo => this == CinemaCaptureMode.video24fps;
 
-  bool get isPhoto =>
-      this == CinemaCaptureMode.photo || this == CinemaCaptureMode.portrait;
-
-  bool get isBokehMode =>
-      this == CinemaCaptureMode.portrait ||
-      this == CinemaCaptureMode.cinematicVideo;
+  bool get isPhoto => this == CinemaCaptureMode.photo;
 }
 
 /// One back camera focal-length choice (`0.5×`, `1×`, `2×` 48mm optical crop,
@@ -368,11 +359,10 @@ class CinemaCameraState {
 
   bool get isZoomed => zoomLevel > minZoom + 0.01;
 
-  /// True when the native Metal GPU texture already has color grading/bokeh/DOP
+  /// True when the native Metal GPU texture already has color grading/DOP
   /// overlays baked into the preview pixels (so Dart skips `ColorFiltered`).
   bool get isGpuGradingActive =>
       liveMetalEnabled ||
-      captureMode == CinemaCaptureMode.cinematicVideo ||
       focusPeakingEnabled ||
       zebraEnabled ||
       falseColorEnabled ||

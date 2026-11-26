@@ -342,9 +342,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       'liveScope': s.liveScopeEnabled,
       'frameAspectRatio': s.effectiveFrameAspectRatio,
       'anamorphicCrop': s.anamorphicCrop,
-      'cinematicEnabled': s.captureMode == CinemaCaptureMode.cinematicVideo,
-      'apertureFStop': s.apertureFStop,
-      'rackToBackground': s.cinematicRackedToBg,
     };
   }
 
@@ -724,34 +721,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     if (current.captureMode == CinemaCaptureMode.photo) {
       await applyCaptureProfile(mode: current.captureMode);
     }
-  }
-
-  void setApertureFStop(double fStop) {
-    final current = state.valueOrNull;
-    if (current == null) return;
-    final clamped = fStop.clamp(1.4, 16.0);
-    final next = current.copyWith(apertureFStop: clamped);
-    state = AsyncData(next);
-    _syncLiveMetalIfActive(next);
-    unawaited(
-      ref.read(cinemaCameraRepositoryProvider).saveApertureFStop(clamped),
-    );
-  }
-
-  Future<void> toggleCinematicRackFocus() async {
-    final current = state.valueOrNull;
-    if (current == null || !current.captureMode.isBokehMode) return;
-    final targetBg = !current.cinematicRackedToBg;
-    final racked = await ref
-        .read(cinemaCameraRepositoryProvider)
-        .triggerCinematicRackFocus(
-          x: current.lastFocusNormalized.dx,
-          y: current.lastFocusNormalized.dy,
-          rackToBackground: targetBg,
-        );
-    if (_disposed) return;
-    final latest = state.valueOrNull ?? current;
-    state = AsyncData(latest.copyWith(cinematicRackedToBg: racked));
   }
 
   void setVolumeShutterEnabled(bool enabled) {
@@ -1486,11 +1455,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     final wantsFocus = !current.manualFocusEnabled;
     final wantsExposure = !current.manualExposureEnabled;
-    if (!wantsFocus && !wantsExposure && !current.captureMode.isBokehMode) {
-      return;
-    }
+    if (!wantsFocus && !wantsExposure) return;
 
-    final rackedToBg = await ref
+    await ref
         .read(cinemaCameraRepositoryProvider)
         .nativeCameraSetFocusPoint(
           x: normalizedPoint.dx,
@@ -1505,9 +1472,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       nowState.copyWith(
         focusPoint: screenTapPosition,
         lastFocusNormalized: normalizedPoint,
-        cinematicRackedToBg: current.captureMode.isBokehMode
-            ? rackedToBg
-            : nowState.cinematicRackedToBg,
       ),
     );
     _focusIndicatorTimer?.cancel();
@@ -1608,7 +1572,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       final repository = ref.read(cinemaCameraRepositoryProvider);
       final toneId =
           current.selectedTone.isCustom ? null : current.selectedTone.id;
-      final isPortrait = current.captureMode == CinemaCaptureMode.portrait;
 
       final gradedBytes = await repository.nativeCameraCapturePhoto(
         <String, dynamic>{
@@ -1626,10 +1589,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           'nightStack': current.nightStack,
           'heif10Bit': current.heif10Bit,
           'hiRes48MP': current.hiRes48MP,
-          'portraitMode': isPortrait,
-          'apertureFStop': current.apertureFStop,
-          'focusX': current.lastFocusNormalized.dx,
-          'focusY': current.lastFocusNormalized.dy,
+          'portraitMode': false,
           'quality': 0.96,
         },
       );
@@ -1680,18 +1640,13 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       return;
     }
 
-    // ProRes writes a 10-bit 4:2:2 `.mov` master through the native ProRes
-    // recorder (non-Cinematic mode).
-    if (current.proResEnabled &&
-        current.proCapabilities.supportsProRes &&
-        current.captureMode != CinemaCaptureMode.cinematicVideo) {
+    // ProRes writes a 10-bit 4:2:2 `.mov` master through the native ProRes recorder.
+    if (current.proResEnabled && current.proCapabilities.supportsProRes) {
       await _startProResTake(current);
       return;
     }
 
     // Single-session Native Swift HEVC Display P3 + AAC 192kbps recorder!
-    // Video + Audio + Hardware LiDAR Depth share ONE AVCaptureSession, so
-    // recordings never drop or cut off at 0.125s and save instantaneously!
     final repo = ref.read(cinemaCameraRepositoryProvider);
     _nativeRecording = true;
     try {
@@ -1699,7 +1654,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         'fps': current.frameRate.value,
         'bitrate': _videoBitrateFor(current.resolution, current.frameRate),
         'burnLut': current.directLutRecordingEnabled ||
-            current.captureMode == CinemaCaptureMode.cinematicVideo ||
             current.hasRenderableLook,
         'grading': _liveMetalConfigFor(current),
       });

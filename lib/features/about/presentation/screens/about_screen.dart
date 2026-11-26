@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.2.0 PRO';
+  static const String appVersion = '3.3.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,21 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.2.0 PRO',
+        version: 'v3.3.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fokus penuh ke 2 mode utama PHOTO & VIDEO yang super stabil, cepat, dan bebas error (hapus mode Portrait & Cinematic dari kamera beserta overhead sensor LiDAR/virtual camera)',
+                'Lensa fisik 0.5× · 1× · 2× · 3× selalu terkunci murni tanpa pindah otomatis ke makro 14mm; efek blur/bokeh optik tetap tersedia di Gallery Photo Editor',
+              ]
+            : const [
+                'Streamlined into a rock-solid, ultra-fast 2-mode Pro Cinema Camera (PHOTO | VIDEO), removing Portrait & Cinematic modes along with LiDAR/virtual-camera overhead',
+                'Discrete physical lenses (0.5× · 1× · 2× · 3×) always stay cleanly locked with zero macro hijack; optical Lens Blur / Bokeh remains available in the Gallery Photo Editor',
+              ],
+      ),
+      (
+        version: 'v3.2.0 PRO',
+        tag: 'LANDSCAPE',
         items: isId
             ? const [
                 'Fix mode Landscape miring 90°: rotasi otomatis 4 arah real-time untuk preview kamera, sensor LiDAR, hasil foto/video, dan titik tap-to-focus',

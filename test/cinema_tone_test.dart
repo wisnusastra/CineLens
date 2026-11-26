@@ -164,17 +164,16 @@ void main() {
       expect(AppStrings.id.hiRes48MP, '48MP PENUH');
     });
 
-    test('v3.0 native camera enums & OpticalLensOption work without camera plugin', () {
+    test('v3.3 native camera enums & OpticalLensOption work cleanly (PHOTO + VIDEO)', () {
       const lens = OpticalLensOption(id: 'wide#2x', label: '2×', initialZoom: 2.0);
       expect(lens.id, 'wide#2x');
       expect(lens.label, '2×');
       expect(lens.initialZoom, 2.0);
       expect(CameraLensDirection.values, hasLength(2));
       expect(FlashMode.values, containsAll(<FlashMode>[FlashMode.off, FlashMode.auto, FlashMode.torch]));
-      expect(CinemaCaptureMode.portrait.isBokehMode, isTrue);
-      expect(CinemaCaptureMode.portrait.isPhoto, isTrue);
-      expect(CinemaCaptureMode.cinematicVideo.isBokehMode, isTrue);
-      expect(CinemaCaptureMode.cinematicVideo.isVideo, isTrue);
+      expect(CinemaCaptureMode.values, hasLength(2));
+      expect(CinemaCaptureMode.photo.isPhoto, isTrue);
+      expect(CinemaCaptureMode.video24fps.isVideo, isTrue);
     });
   });
 }

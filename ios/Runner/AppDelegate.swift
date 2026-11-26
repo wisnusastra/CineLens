@@ -9839,7 +9839,7 @@ final class NativeCinemaCameraEngine: NSObject,
     }
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
-      if self.currentMode == "video24fps" || self.currentMode == "cinematicVideo" {
+      if self.currentMode == "video24fps" {
         self.ensurePlayAndRecordAudioSession()
       }
       if !self.session.isRunning && self.videoInput != nil {
@@ -9911,47 +9911,13 @@ final class NativeCinemaCameraEngine: NSObject,
     mode: String,
     requestedLensId: String?
   ) -> AVCaptureDevice? {
-    let wantsDepth = (mode == "portrait" || mode == "cinematicVideo")
     if position == .front {
-      if wantsDepth,
-         let td = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) {
-        return td
-      }
       return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
         ?? AVCaptureDevice.default(for: .video)
     }
 
-    // Back camera: for Portrait & Cinematic, prefer dedicated Hardware LiDAR Depth camera
-    // (24mm Wide + LiDAR Scanner — ZERO 14mm UltraWide macro hijack & true 30fps live depth!).
-    // If user explicitly chooses 3× Telephoto or 0.5× UltraWide in Portrait, use TripleCamera.
-    if wantsDepth {
-      var wantsTeleOrUltra = false
-      if mode == "portrait", let rawId = requestedLensId, !rawId.hasSuffix("#2x") {
-        let baseId = rawId.components(separatedBy: "#").first ?? rawId
-        if let dev = AVCaptureDevice(uniqueID: baseId) {
-          wantsTeleOrUltra = (dev.deviceType == .builtInTelephotoCamera || dev.deviceType == .builtInUltraWideCamera)
-        }
-      }
-      var depthTypes: [AVCaptureDevice.DeviceType] = wantsTeleOrUltra
-        ? [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera]
-        : [.builtInDualWideCamera, .builtInTripleCamera, .builtInDualCamera]
-      if #available(iOS 15.4, *) {
-        if wantsTeleOrUltra {
-          depthTypes.append(.builtInLiDARDepthCamera)
-        } else {
-          depthTypes.insert(.builtInLiDARDepthCamera, at: 0)
-        }
-      }
-      let disc = AVCaptureDevice.DiscoverySession(
-        deviceTypes: depthTypes,
-        mediaType: .video,
-        position: .back
-      )
-      if let depthCam = disc.devices.first {
-        return depthCam
-      }
-    }
-
+    // Back camera: always pick the exact discrete physical lens (UltraWide 0.5×,
+    // Wide 1×/2×, or Telephoto 3×) — zero virtual-camera macro hijack or depth overhead!
     if let rawId = requestedLensId {
       let baseId = rawId.components(separatedBy: "#").first ?? rawId
       if let exact = AVCaptureDevice(uniqueID: baseId), exact.position == .back {
@@ -9969,7 +9935,8 @@ final class NativeCinemaCameraEngine: NSObject,
       updateGrading(args: grading)
     }
 
-    let mode = (args["mode"] as? String) ?? currentMode
+    let rawMode = (args["mode"] as? String) ?? currentMode
+    let mode = (rawMode == "video24fps") ? "video24fps" : "photo"
     let resolution = (args["resolution"] as? String) ?? currentResolution
     let fps = (args["fps"] as? NSNumber)?.intValue ?? currentFps
     let posStr = (args["position"] as? String) ?? (currentPosition == .front ? "front" : "back")
@@ -9994,8 +9961,7 @@ final class NativeCinemaCameraEngine: NSObject,
         return
       }
 
-      // Fast path: same device, same mode/resolution/fps/48MP (e.g. 1× <-> 2× on wide sensor,
-      // or switching focal pills 0.5× / 1× / 2× / 3× on TripleCamera during Portrait / Cinematic!)
+      // Fast path: same physical lens, same mode/resolution/fps/48MP (e.g. 1× <-> 2× on wide sensor)
       let sameHardware = self.activeDevice?.uniqueID == targetDevice.uniqueID
         && self.currentMode == mode
         && self.currentResolution == resolution
@@ -10003,14 +9969,8 @@ final class NativeCinemaCameraEngine: NSObject,
         && self.currentHiRes48MP == hiRes48MP
         && self.session.isRunning
       if sameHardware {
-        let resolvedZoom = self.resolveZoomFactor(
-          device: targetDevice,
-          requestedZoom: requestedZoom,
-          requestedLensId: requestedLensId,
-          isDepthMode: (mode == "portrait" || mode == "cinematicVideo"),
-          position: position
-        )
-        self.applyZoomLocked(device: targetDevice, factor: resolvedZoom)
+        let minZoom = Double(targetDevice.minAvailableVideoZoomFactor)
+        self.applyZoomLocked(device: targetDevice, factor: max(minZoom, requestedZoom))
         self.currentLensId = requestedLensId ?? targetDevice.uniqueID
         self.sendConfigReply(device: targetDevice, result: result)
         return
@@ -10020,17 +9980,11 @@ final class NativeCinemaCameraEngine: NSObject,
       // Keep audio session under our control for External Mic + Volume Shutter
       self.session.automaticallyConfiguresApplicationAudioSession = false
 
-      let isVideo = (mode == "video24fps" || mode == "cinematicVideo")
-      let isPortrait = (mode == "portrait")
-      let isCinematic = (mode == "cinematicVideo")
+      let isVideo = (mode == "video24fps")
 
-      // 1. Choose clean session preset
-      // For Cinematic Video, use `.inputPriority` so we can explicitly pick an
-      // AVCaptureDevice.Format that supports live hardware LiDAR DepthDataOutput!
+      // 1. Choose clean session preset (4K/1080p for Video, full-sensor .photo for Photo)
       let preset: AVCaptureSession.Preset
-      if isCinematic {
-        preset = .inputPriority
-      } else if isVideo {
+      if isVideo {
         if resolution == "fullHD" {
           preset = .hd1920x1080
         } else if self.session.canSetSessionPreset(.hd4K3840x2160) {
@@ -10059,7 +10013,7 @@ final class NativeCinemaCameraEngine: NSObject,
       }
       self.activeDevice = targetDevice
 
-      // 3. Attach Audio input + output LAZILY only when entering Video / Cinematic mode!
+      // 3. Attach Audio input + output LAZILY only when entering Video mode!
       // Avoiding CoreAudio / mic hardware spin-up on Photo cold launch cuts startup lag by ~500ms,
       // while keeping Video + Audio inside ONE single AVCaptureSession once attached!
       if isVideo {
@@ -10096,31 +10050,24 @@ final class NativeCinemaCameraEngine: NSObject,
         }
       }
 
-      // 5. Attach Photo output & configure Depth (Portrait) or 48MP (Photo) safely
+      // 5. Attach Photo output & configure safe 48MP HEVC dimensions
       if !self.session.outputs.contains(self.photoOutput) {
         if self.session.canAddOutput(self.photoOutput) {
           self.session.addOutput(self.photoOutput)
         }
       }
       self.photoOutput.isHighResolutionCaptureEnabled = true
-
-      if isPortrait && self.photoOutput.isDepthDataDeliverySupported {
-        self.photoOutput.isDepthDataDeliveryEnabled = true
-        self.photoOutput.isPortraitEffectsMatteDeliveryEnabled =
-          self.photoOutput.isPortraitEffectsMatteDeliverySupported
-      } else {
-        if self.photoOutput.isPortraitEffectsMatteDeliveryEnabled {
-          self.photoOutput.isPortraitEffectsMatteDeliveryEnabled = false
-        }
-        if self.photoOutput.isDepthDataDeliveryEnabled {
-          self.photoOutput.isDepthDataDeliveryEnabled = false
-        }
+      if self.photoOutput.isPortraitEffectsMatteDeliveryEnabled {
+        self.photoOutput.isPortraitEffectsMatteDeliveryEnabled = false
+      }
+      if self.photoOutput.isDepthDataDeliveryEnabled {
+        self.photoOutput.isDepthDataDeliveryEnabled = false
       }
 
       // Safe 48MP maxPhotoDimensions (HEVC 48MP without 1.9GB ProRAW ring-buffer!)
       if #available(iOS 16.0, *) {
         let dims = targetDevice.activeFormat.supportedMaxPhotoDimensions
-        if mode == "photo", hiRes48MP,
+        if !isVideo, hiRes48MP,
            let max48 = dims.max(by: { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) }),
            Int(max48.width) * Int(max48.height) >= 40_000_000 {
           self.photoOutput.maxPhotoDimensions = max48
@@ -10129,112 +10076,26 @@ final class NativeCinemaCameraEngine: NSObject,
         }
       }
 
-      // 6. Attach / detach synchronized Hardware LiDAR Depth output for CINEMATIC Video
-      var depthSynced = false
-      if isCinematic {
-        // Explicitly select the best 1080p (or 1440×1080 / 1280×720) video format that
-        // exposes DisparityFloat32/16 (or DepthFloat32/16) hardware LiDAR depth streams!
-        var chosenVideoFmt: AVCaptureDevice.Format?
-        var chosenDepthFmt: AVCaptureDevice.Format?
-        var bestScore: Int = -1
-
-        for fmt in targetDevice.formats {
-          let depthCandidates = fmt.supportedDepthDataFormats.filter { df in
-            let sub = CMFormatDescriptionGetMediaSubType(df.formatDescription)
-            return sub == kCVPixelFormatType_DisparityFloat32 ||
-                   sub == kCVPixelFormatType_DisparityFloat16 ||
-                   sub == kCVPixelFormatType_DepthFloat32 ||
-                   sub == kCVPixelFormatType_DepthFloat16
-          }
-          guard !depthCandidates.isEmpty else { continue }
-          let vDims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
-          let vw = Int(vDims.width)
-          let vh = Int(vDims.height)
-          guard vw >= 1280, vw <= 1920 else { continue }
-          let maxFps = fmt.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 0
-          guard maxFps >= 24.0 else { continue }
-          // Prefer 1920×1080 16:9 30fps with highest-resolution DisparityFloat32 depth map!
-          let is1080p = (vw == 1920 && vh == 1080) ? 5000 : 0
-          let is420f = CMFormatDescriptionGetMediaSubType(fmt.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ? 200 : 0
-          let bestDepth = depthCandidates.max(by: { a, b in
-            let aw = Int(CMVideoFormatDescriptionGetDimensions(a.formatDescription).width)
-            let bw = Int(CMVideoFormatDescriptionGetDimensions(b.formatDescription).width)
-            let aDisp = CMFormatDescriptionGetMediaSubType(a.formatDescription) == kCVPixelFormatType_DisparityFloat32 ? 1000 : 0
-            let bDisp = CMFormatDescriptionGetMediaSubType(b.formatDescription) == kCVPixelFormatType_DisparityFloat32 ? 1000 : 0
-            return (aw + aDisp) < (bw + bDisp)
-          })
-          guard let bd = bestDepth else { continue }
-          let dw = Int(CMVideoFormatDescriptionGetDimensions(bd.formatDescription).width)
-          let score = is1080p + is420f + vw + dw
-          if score > bestScore {
-            bestScore = score
-            chosenVideoFmt = fmt
-            chosenDepthFmt = bd
-          }
-        }
-
-        if let vFmt = chosenVideoFmt, let dFmt = chosenDepthFmt {
-          do {
-            try targetDevice.lockForConfiguration()
-            targetDevice.activeFormat = vFmt
-            targetDevice.activeDepthDataFormat = dFmt
-            targetDevice.unlockForConfiguration()
-          } catch {}
-          if !self.session.outputs.contains(self.depthOutput),
-             self.session.canAddOutput(self.depthOutput) {
-            self.session.addOutput(self.depthOutput)
-          }
-          self.depthOutput.isFilteringEnabled = true
-          self.depthOutput.alwaysDiscardsLateDepthData = true
-          if let dConn = self.depthOutput.connection(with: .depthData) {
-            dConn.isEnabled = true
-            if dConn.isVideoOrientationSupported { dConn.videoOrientation = self.activeVideoOrientation }
-            if dConn.isVideoMirroringSupported {
-              dConn.automaticallyAdjustsVideoMirroring = false
-              dConn.isVideoMirrored = (position == .front)
-            }
-          }
-          if self.session.outputs.contains(self.depthOutput) {
-            // DECOUPLED independent depth delegate: videoOutput ALWAYS streams smoothly
-            // at 24/30/60fps without AVCaptureDataOutputSynchronizer 24fps-vs-30fps deadlocks!
-            self.depthOutput.setDelegate(self, callbackQueue: self.depthQueue)
-            depthSynced = true
-          }
-        } else if self.session.canSetSessionPreset(.hd1920x1080) {
-          self.session.sessionPreset = .hd1920x1080
-        }
+      // 6. Keep depthOutput permanently detached — pure PHOTO + VIDEO pipeline!
+      self.depthOutput.setDelegate(nil, callbackQueue: nil)
+      if self.session.outputs.contains(self.depthOutput) {
+        self.session.removeOutput(self.depthOutput)
       }
-
-      if !depthSynced {
-        self.depthOutput.setDelegate(nil, callbackQueue: nil)
-        if self.session.outputs.contains(self.depthOutput) {
-          self.session.removeOutput(self.depthOutput)
-        }
-      }
-      // Video output delegate is ALWAYS directly connected (never blocked by depth sync!).
       self.videoOutput.setSampleBufferDelegate(self, queue: self.videoQueue)
 
       self.session.commitConfiguration()
 
-      // 7. Lock video frame rate, disable SDR->HLG HDR, prevent 14mm macro hijack, & set ZERO-DELAY stabilization
+      // 7. Lock video frame rate, disable SDR->HLG HDR, engage smooth AF & ZERO-DELAY stabilization
       var stabActive = false
       var stabMode = 0
       do {
         try targetDevice.lockForConfiguration()
-        // Prevent TripleCamera/DualWide from silently hijacking to 14mm UltraWide macro on close subjects!
-        if (isPortrait || isCinematic) &&
-            (targetDevice.deviceType == .builtInTripleCamera || targetDevice.deviceType == .builtInDualWideCamera) {
-          targetDevice.setPrimaryConstituentDeviceSwitchingBehavior(
-            .restricted,
-            restrictedSwitchingBehaviorConditions: []
-          )
-        }
         if targetDevice.isVideoHDREnabled {
           targetDevice.automaticallyAdjustsVideoHDREnabled = false
           targetDevice.isVideoHDREnabled = false
         }
         if isVideo {
-          let desiredFps = Double(isCinematic ? min(fps, 30) : fps)
+          let desiredFps = Double(fps)
           let supported = targetDevice.activeFormat.videoSupportedFrameRateRanges.contains {
             desiredFps >= $0.minFrameRate && desiredFps <= $0.maxFrameRate
           }
@@ -10243,8 +10104,6 @@ final class NativeCinemaCameraEngine: NSObject,
             targetDevice.activeVideoMinFrameDuration = dur
             targetDevice.activeVideoMaxFrameDuration = dur
           }
-          // Engage instant smooth continuous autofocus on video/cinematic startup so
-          // the lens locks immediately onto the center subject without needing a tap!
           if targetDevice.isFocusPointOfInterestSupported {
             targetDevice.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
           }
@@ -10262,35 +10121,28 @@ final class NativeCinemaCameraEngine: NSObject,
          vConn.isVideoStabilizationSupported {
         if isVideo {
           // Use `.standard` (hardware OIS + low-latency EIS = < 1 frame latency!).
-          // `.cinematic` stabilization buffers 15-30 frames (~0.8s lag in preview!).
           if targetDevice.activeFormat.isVideoStabilizationModeSupported(.standard) {
             vConn.preferredVideoStabilizationMode = .standard
           } else {
             vConn.preferredVideoStabilizationMode = .off
           }
         } else {
-          // Zero-latency live viewfinder in Photo & Portrait modes.
+          // Zero-latency live viewfinder in Photo mode.
           vConn.preferredVideoStabilizationMode = .off
         }
         stabActive = vConn.activeVideoStabilizationMode != .off
         stabMode = vConn.activeVideoStabilizationMode.rawValue
       }
 
-      // 8. Apply initial zoom (maps 0.5×/1×/2×/3× cleanly on TripleCamera during Portrait/Cinematic!)
-      let resolvedZoom = self.resolveZoomFactor(
-        device: targetDevice,
-        requestedZoom: requestedZoom,
-        requestedLensId: requestedLensId,
-        isDepthMode: (isPortrait || isCinematic),
-        position: position
-      )
-      self.applyZoomLocked(device: targetDevice, factor: resolvedZoom)
+      // 8. Apply initial zoom directly on the discrete physical lens
+      let minZoom = Double(targetDevice.minAvailableVideoZoomFactor)
+      self.applyZoomLocked(device: targetDevice, factor: max(minZoom, requestedZoom))
 
       if !self.session.isRunning {
         self.session.startRunning()
       }
 
-      // Record dimensions (portrait orientation)
+      // Record dimensions (portrait reference)
       let dims = CMVideoFormatDescriptionGetDimensions(targetDevice.activeFormat.formatDescription)
       let pw = Double(min(dims.width, dims.height))
       let ph = Double(max(dims.width, dims.height))
@@ -10302,12 +10154,12 @@ final class NativeCinemaCameraEngine: NSObject,
       self.currentPosition = position
       self.currentLensId = requestedLensId ?? targetDevice.uniqueID
       self.currentHiRes48MP = hiRes48MP
-      self.hasHardwareDepth = isPortrait
-        ? self.photoOutput.isDepthDataDeliveryEnabled
-        : depthSynced
+      self.hasHardwareDepth = false
 
       self.stateLock.lock()
-      self.cinematicActive = isCinematic
+      self.cinematicActive = false
+      self.latestDisparityBuffer = nil
+      self.latestVisionMatte = nil
       if self.isRecording && self.recordWriter == nil {
         self.isRecording = false
         let staleCb = self.recordStartResult
@@ -10317,10 +10169,6 @@ final class NativeCinemaCameraEngine: NSObject,
             cb(FlutterError(code: "cancelled", message: "Session reconfigured.", details: nil))
           }
         }
-      }
-      if !isCinematic {
-        self.latestDisparityBuffer = nil
-        self.latestVisionMatte = nil
       }
       self.stateLock.unlock()
 
@@ -10616,7 +10464,7 @@ final class NativeCinemaCameraEngine: NSObject,
     }
   }
 
-  // MARK: - Native Photo Capture (Hardware LiDAR Portrait / Process Zero RAW / 48MP HEVC)
+  // MARK: - Native Photo Capture (Process Zero RAW / Night Stack / 48MP HEVC / 10-Bit P3)
 
   func capturePhoto(args: [String: Any], result: @escaping FlutterResult) {
     let done = ReplyOnce(result)
@@ -10629,8 +10477,6 @@ final class NativeCinemaCameraEngine: NSObject,
     let nightStack = (args["nightStack"] as? Bool) ?? false
     let heif10Bit = (args["heif10Bit"] as? Bool) ?? false
     let hiRes48MP = (args["hiRes48MP"] as? Bool) ?? false
-    let portraitMode = (args["portraitMode"] as? Bool) ?? (currentMode == "portrait")
-    let apertureFStop = (args["apertureFStop"] as? NSNumber)?.doubleValue ?? self.apertureFStop
     let focusX = (args["focusX"] as? NSNumber)?.doubleValue ?? 0.5
     let focusY = (args["focusY"] as? NSNumber)?.doubleValue ?? 0.5
     let desqueeze = (args["desqueeze"] as? NSNumber)?.doubleValue ?? 1.0
@@ -10655,8 +10501,7 @@ final class NativeCinemaCameraEngine: NSObject,
         }
       }
 
-      let useHardwareDepth = portraitMode && self.photoOutput.isDepthDataDeliveryEnabled
-      let bayerRawFmt = (!useHardwareDepth && processZero && !hiRes48MP)
+      let bayerRawFmt = (processZero && !hiRes48MP)
         ? self.photoOutput.availableRawPhotoPixelFormatTypes.first(where: {
             AVCapturePhotoOutput.isBayerRAWPixelFormat($0)
           })
@@ -10735,7 +10580,7 @@ final class NativeCinemaCameraEngine: NSObject,
                 quality: quality,
                 heif10Bit: heif10Bit,
                 portraitMode: false,
-                apertureFStop: apertureFStop,
+                apertureFStop: 2.8,
                 focusX: focusX,
                 focusY: focusY
               )
@@ -10764,20 +10609,10 @@ final class NativeCinemaCameraEngine: NSObject,
         return
       }
 
-      // Single-shot capture: Hardware LiDAR Portrait, Bayer RAW, 48MP HEVC, or Standard HEVC
+      // Single-shot capture: Bayer RAW, 48MP HEVC, or Standard HEVC
       let settings: AVCapturePhotoSettings
       let isRawShot: Bool
-      if useHardwareDepth {
-        settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
-        settings.isDepthDataDeliveryEnabled = true
-        settings.embedsDepthDataInPhoto = true
-        if self.photoOutput.isPortraitEffectsMatteDeliveryEnabled {
-          settings.isPortraitEffectsMatteDeliveryEnabled = true
-          settings.embedsPortraitEffectsMatteInPhoto = true
-        }
-        settings.photoQualityPrioritization = .balanced
-        isRawShot = false
-      } else if let rawFmt = bayerRawFmt {
+      if let rawFmt = bayerRawFmt {
         settings = AVCapturePhotoSettings(rawPixelFormatType: rawFmt)
         settings.photoQualityPrioritization = .speed
         isRawShot = true
@@ -10827,8 +10662,8 @@ final class NativeCinemaCameraEngine: NSObject,
               appleLogInput: appleLogInput,
               quality: quality,
               heif10Bit: heif10Bit,
-              portraitMode: portraitMode,
-              apertureFStop: apertureFStop,
+              portraitMode: false,
+              apertureFStop: 2.8,
               focusX: focusX,
               focusY: focusY
             )

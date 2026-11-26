@@ -46,7 +46,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
 
   int _countdownRemaining = 0;
   Timer? _countdownTimer;
-  bool _apertureSliderExpanded = false;
 
   CinemaCameraNotifier get _notifier => ref.read(cinemaCameraProvider.notifier);
 
@@ -573,17 +572,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             Positioned(
               left: 0,
               right: 0,
-              bottom: state.captureMode.isBokehMode ? 96 : 48,
-              child: Center(child: _buildZoomIndicator(state)),
-            ),
-
-          // Portrait / Cinematic Mode floating Aperture (f/1.4 – f/16) & Rack Focus bar
-          if (state.captureMode.isBokehMode)
-            Positioned(
-              left: 14,
-              right: 14,
               bottom: 48,
-              child: _buildApertureBar(state, options.hapticFeedback),
+              child: Center(child: _buildZoomIndicator(state)),
             ),
 
           // Portrait Bottom-of-viewfinder clean Lens Switcher + Quick Tools
@@ -693,9 +683,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   Widget _buildActiveBadges(CinemaCameraState state, bool hasLiveMetal) {
     final chips = <String>[
       if (hasLiveMetal) 'METAL',
-      if (state.hasHardwareDepth && state.captureMode.isBokehMode) 'LiDAR',
-      if (state.captureMode.isBokehMode)
-        'f/${state.apertureFStop.toStringAsFixed(1)}',
       if (state.hiRes48MP && state.captureMode.isPhoto) '48MP',
       if (state.processZeroEnabled && state.captureMode.isPhoto)
         state.saveDngRaw ? 'RAW+DNG' : 'RAW',
@@ -704,10 +691,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           state.captureMode.isPhoto)
         'STACK',
       if (state.heif10Bit && state.captureMode.isPhoto) '10B',
-      if (state.proResEnabled &&
-          state.captureMode == CinemaCaptureMode.video24fps)
-        'PRORES',
-      if (state.captureMode == CinemaCaptureMode.cinematicVideo) '10B·P3',
+      if (state.proResEnabled && state.captureMode.isVideo) 'PRORES',
       if (state.appleLogEnabled) 'LOG',
       if (state.focusPeakingEnabled) 'PEAK',
       if (state.zebraEnabled) 'ZEBRA',
@@ -758,10 +742,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       children: [
         if (state.isZoomed || _zoomIndicatorVisible) ...[
           _buildZoomIndicator(state),
-          const SizedBox(height: 6),
-        ],
-        if (state.captureMode.isBokehMode) ...[
-          _buildApertureBar(state, haptics),
           const SizedBox(height: 6),
         ],
         if (_trayVisible) ...[
@@ -1078,157 +1058,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     );
   }
 
-  Widget _buildApertureBar(CinemaCameraState state, bool haptics) {
-    final s = AppStrings.of(context);
-    const stops = <double>[1.4, 2.0, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0];
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (_apertureSliderExpanded)
-          Container(
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.72),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: AppTheme.cinemaAmber.withValues(alpha: 0.45),
-                width: 0.8,
-              ),
-            ),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (final f in stops)
-                    GestureDetector(
-                      onTap: () {
-                        if (haptics) HapticFeedback.selectionClick();
-                        _notifier.setApertureFStop(f);
-                      },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 120),
-                        margin: const EdgeInsets.symmetric(horizontal: 3),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 9,
-                          vertical: 5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: (state.apertureFStop - f).abs() < 0.25
-                              ? AppTheme.cinemaAmber
-                              : Colors.white.withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          'f/${f == f.roundToDouble() ? f.toInt() : f.toStringAsFixed(1)}',
-                          style: AppTheme.monoStyle(
-                            color: (state.apertureFStop - f).abs() < 0.25
-                                ? Colors.black
-                                : Colors.white70,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            GestureDetector(
-              onTap: () {
-                if (haptics) HapticFeedback.selectionClick();
-                setState(
-                    () => _apertureSliderExpanded = !_apertureSliderExpanded);
-              },
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-                decoration: BoxDecoration(
-                  color: _apertureSliderExpanded
-                      ? AppTheme.cinemaAmber
-                      : Colors.black.withValues(alpha: 0.62),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: AppTheme.cinemaAmber.withValues(alpha: 0.7),
-                    width: 0.9,
-                  ),
-                ),
-                child: Text(
-                  '${s.aperture}  f/${state.apertureFStop.toStringAsFixed(1)}',
-                  style: AppTheme.monoStyle(
-                    color: _apertureSliderExpanded
-                        ? Colors.black
-                        : AppTheme.cinemaAmber,
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ),
-            if (state.captureMode == CinemaCaptureMode.cinematicVideo) ...[
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: () {
-                  if (haptics) HapticFeedback.selectionClick();
-                  _notifier.toggleCinematicRackFocus();
-                },
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: state.cinematicRackedToBg
-                        ? AppTheme.cinemaAmber.withValues(alpha: 0.22)
-                        : Colors.black.withValues(alpha: 0.62),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: state.cinematicRackedToBg
-                          ? AppTheme.cinemaAmber
-                          : Colors.white24,
-                      width: 0.9,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        state.cinematicRackedToBg
-                            ? Icons.landscape_rounded
-                            : Icons.person_outline_rounded,
-                        color: state.cinematicRackedToBg
-                            ? AppTheme.cinemaAmber
-                            : Colors.white,
-                        size: 12,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        state.cinematicRackedToBg
-                            ? s.rackBackground
-                            : s.rackSubject,
-                        style: AppTheme.monoStyle(
-                          color: state.cinematicRackedToBg
-                              ? AppTheme.cinemaAmber
-                              : Colors.white,
-                          fontSize: 9.5,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ],
-    );
-  }
-
   Widget _buildModeSelector(
     CinemaCameraState state,
     AppStrings s,
@@ -1245,16 +1074,13 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             ? null
             : () {
                 if (haptics) HapticFeedback.selectionClick();
-                if (!mode.isBokehMode && _apertureSliderExpanded) {
-                  setState(() => _apertureSliderExpanded = false);
-                }
                 _applyProfile(
                   () => _notifier.setCaptureMode(mode),
                   label,
                 );
               },
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1283,17 +1109,13 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       );
     }
 
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          modeItem(s.portrait, CinemaCaptureMode.portrait),
-          modeItem(s.photo, CinemaCaptureMode.photo),
-          modeItem(s.video, CinemaCaptureMode.video24fps),
-          modeItem(s.cinematic, CinemaCaptureMode.cinematicVideo),
-        ],
-      ),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        modeItem(s.photo, CinemaCaptureMode.photo),
+        modeItem(s.video, CinemaCaptureMode.video24fps),
+      ],
     );
   }
 
