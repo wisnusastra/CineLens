@@ -173,6 +173,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
 
   Timer? _debounce;
   int _renderToken = 0;
+  final TextEditingController _signatureController = TextEditingController();
 
   bool get _isVideo => widget.args.isVideo;
 
@@ -181,12 +182,25 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
     super.initState();
     _load();
     _loadPresets();
+    _loadSignature();
+  }
+
+  Future<void> _loadSignature() async {
+    final saved = await ref
+        .read(cinemaCameraRepositoryProvider)
+        .loadPhotographerSignature();
+    if (!mounted || saved.isEmpty) return;
+    _signatureController.text = saved;
+    if (_edit.frameCustomText.isEmpty) {
+      setState(() => _edit = _edit.copyWith(frameCustomText: saved));
+    }
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
     _scrubDebounce?.cancel();
+    _signatureController.dispose();
     super.dispose();
   }
 
@@ -852,7 +866,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
   Future<void> _openSaveSheet() async {
     if (_exporting) return;
     final s = AppStrings.of(context);
-    final choice = await showModalBottomSheet<bool>(
+    final choice = await showModalBottomSheet<({bool toPhotos, String social})>(
       context: context,
       backgroundColor: AppTheme.surfaceDark,
       shape: const RoundedRectangleBorder(
@@ -885,6 +899,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
               ),
             ),
             ListTile(
+              dense: true,
               leading: const Icon(
                 Icons.photo_library_outlined,
                 color: AppTheme.textPrimary,
@@ -894,9 +909,11 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                 style:
                     const TextStyle(color: AppTheme.textPrimary, fontSize: 13),
               ),
-              onTap: () => Navigator.of(sheetContext).pop(false),
+              onTap: () => Navigator.of(sheetContext)
+                  .pop((toPhotos: false, social: 'none')),
             ),
             ListTile(
+              dense: true,
               leading: const Icon(
                 Icons.photo_camera_outlined,
                 color: AppTheme.cinemaAmber,
@@ -906,19 +923,80 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
                 style:
                     const TextStyle(color: AppTheme.textPrimary, fontSize: 13),
               ),
-              onTap: () => Navigator.of(sheetContext).pop(true),
+              onTap: () => Navigator.of(sheetContext)
+                  .pop((toPhotos: true, social: 'none')),
             ),
-            const SizedBox(height: 8),
+            if (!_isVideo) ...[
+              const Divider(color: AppTheme.hairline, height: 12),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 2, 18, 6),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '1-TAP SOCIAL EXPORT (SAFE sRGB)',
+                    style: AppTheme.monoStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Row(
+                  children: [
+                    for (final item in const <(String, String)>[
+                      ('ig_4_5', 'IG 4:5'),
+                      ('reels_9_16', 'REELS 9:16'),
+                      ('wa_hd', 'WA HD'),
+                    ])
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 3),
+                          child: OutlinedButton(
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: AppTheme.cinemaAmber,
+                              side: BorderSide(
+                                color: AppTheme.cinemaAmber
+                                    .withValues(alpha: 0.45),
+                              ),
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                            onPressed: () => Navigator.of(sheetContext)
+                                .pop((toPhotos: true, social: item.$1)),
+                            child: Text(
+                              item.$2,
+                              style: AppTheme.monoStyle(
+                                color: AppTheme.cinemaAmber,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 6),
           ],
         ),
       ),
     );
 
     if (choice == null || !mounted) return;
-    await _export(toPhotos: choice);
+    await _export(toPhotos: choice.toPhotos, socialPreset: choice.social);
   }
 
-  Future<void> _export({required bool toPhotos}) async {
+  Future<void> _export({
+    required bool toPhotos,
+    String socialPreset = 'none',
+  }) async {
     setState(() {
       _exporting = true;
       _error = null;
@@ -955,6 +1033,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
         final bytes = await repository.exportPhoto(
           path: widget.args.path,
           payload: payload,
+          socialPreset: socialPreset,
         );
         await camera.storePhoto(
           jpegBytes: bytes,
@@ -3329,7 +3408,7 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
             },
           ),
         ),
-        if (_edit.frameStyle != 'none')
+        if (_edit.frameStyle != 'none') ...[
           SwitchListTile(
             dense: true,
             value: _edit.frameExifCaption,
@@ -3343,6 +3422,97 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
               immediateUndo: true,
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 2, 16, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _signatureController,
+                    style: const TextStyle(
+                      color: AppTheme.textPrimary,
+                      fontSize: 12,
+                    ),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: 'Signature (mis. WISNU SASTRA)',
+                      hintStyle: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 11.5,
+                      ),
+                      filled: true,
+                      fillColor: Colors.white.withValues(alpha: 0.06),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: AppTheme.hairline),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: AppTheme.hairline),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide:
+                            const BorderSide(color: AppTheme.cinemaAmber),
+                      ),
+                    ),
+                    onChanged: (v) => _update(
+                      _edit.copyWith(frameCustomText: v.trim()),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.cinemaAmber,
+                    side: BorderSide(
+                      color: AppTheme.cinemaAmber.withValues(alpha: 0.5),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    minimumSize: Size.zero,
+                  ),
+                  onPressed: () async {
+                    final text = _signatureController.text.trim();
+                    await ref
+                        .read(cinemaCameraRepositoryProvider)
+                        .savePhotographerSignature(text);
+                    _update(
+                      _edit.copyWith(frameCustomText: text),
+                      immediateUndo: true,
+                    );
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context)
+                      ..hideCurrentSnackBar()
+                      ..showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Signature default disimpan.',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          backgroundColor: AppTheme.cardDark,
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                  },
+                  child: const Text(
+                    'SAVE',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         SwitchListTile(
           dense: true,
           value: _edit.frameDateStamp,

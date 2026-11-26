@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../photo_editor/data/photo_editor_repository.dart';
 import '../../data/repositories/cinema_camera_repository_impl.dart';
+import '../../domain/entities/camera_recipe.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/film_look.dart';
@@ -98,6 +99,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       filmLook,
       bakeLook,
       proImaging,
+      favoriteToneIds,
+      recipes,
+      freeStorageMB,
     ) = await (
       repository.getAllTones(),
       repository.loadSavedPreferences(),
@@ -105,6 +109,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       repository.loadFilmLook(),
       repository.loadBakeLookIntoProRes(),
       repository.loadProImagingSettings(),
+      repository.loadFavoriteToneIds(),
+      repository.loadCameraRecipes(),
+      repository.nativeCameraStorageFreeMB(),
     ).wait;
 
     final selectedTone = tones.firstWhere(
@@ -225,6 +232,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       latestGalleryThumbPath: null,
       backLenses: backLenses,
       activeBackLensIndex: initialLensIdx,
+      favoriteToneIds: favoriteToneIds,
+      recipes: recipes,
+      freeStorageMB: freeStorageMB,
       iso: 400.0.clamp(capabilities.minIso, capabilities.maxIso).toDouble(),
       shutterSeconds: (1 / 48)
           .clamp(
@@ -245,12 +255,23 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           final id = item['id']?.toString() ?? '';
           final label = item['label']?.toString() ?? '1×';
           final initialZoom = (item['initialZoom'] as num?)?.toDouble() ?? 1.0;
+          final focalMm = (item['focalMm'] as num?)?.toInt() ??
+              (label.startsWith('0.5')
+                  ? 13
+                  : label == '35mm'
+                      ? 35
+                      : label.startsWith('2')
+                          ? 48
+                          : label.startsWith('3')
+                              ? 77
+                              : 24);
           if (id.isNotEmpty) {
             options.add(
               OpticalLensOption(
                 id: id,
                 label: label,
                 initialZoom: initialZoom,
+                focalMm: focalMm,
               ),
             );
           }
@@ -258,7 +279,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       }
     }
     if (options.isEmpty) {
-      options.add(const OpticalLensOption(id: 'default', label: '1×'));
+      options.add(const OpticalLensOption(id: 'default', label: '1×', focalMm: 24));
     }
     return options;
   }
@@ -340,6 +361,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       'zebraStripes': s.zebraEnabled,
       'falseColor': s.falseColorEnabled,
       'liveScope': s.liveScopeEnabled,
+      'splitCompare': s.splitCompareEnabled,
       'frameAspectRatio': s.effectiveFrameAspectRatio,
       'anamorphicCrop': s.anamorphicCrop,
     };
@@ -1472,15 +1494,203 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       nowState.copyWith(
         focusPoint: screenTapPosition,
         lastFocusNormalized: normalizedPoint,
+        isAeAfLocked: false,
       ),
     );
     _focusIndicatorTimer?.cancel();
     _focusIndicatorTimer = Timer(const Duration(milliseconds: 1400), () {
       final latest = state.valueOrNull;
-      if (latest != null) {
+      if (latest != null && !latest.isAeAfLocked) {
         state = AsyncData(latest.copyWith(clearFocusPoint: true));
       }
     });
+  }
+
+  /// Long-Press AE/AF Lock on the viewfinder: locks focus & exposure solidly
+  /// at the tapped subject until the user taps again or taps the lock badge.
+  Future<void> lockAeAf(
+    Offset normalizedPoint,
+    Offset screenTapPosition,
+  ) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    _focusIndicatorTimer?.cancel();
+    await ref.read(cinemaCameraRepositoryProvider).nativeCameraSetAeAfLock(
+          locked: true,
+          x: normalizedPoint.dx,
+          y: normalizedPoint.dy,
+        );
+    if (_disposed) return;
+    final latest = state.valueOrNull ?? current;
+    state = AsyncData(
+      latest.copyWith(
+        isAeAfLocked: true,
+        focusPoint: screenTapPosition,
+        lastFocusNormalized: normalizedPoint,
+      ),
+    );
+  }
+
+  Future<void> unlockAeAf() async {
+    final current = state.valueOrNull;
+    if (current == null || !current.isAeAfLocked) return;
+    await ref.read(cinemaCameraRepositoryProvider).nativeCameraSetAeAfLock(
+          locked: false,
+          x: 0.5,
+          y: 0.5,
+        );
+    if (_disposed) return;
+    final latest = state.valueOrNull ?? current;
+    state = AsyncData(
+      latest.copyWith(isAeAfLocked: false, clearFocusPoint: true),
+    );
+  }
+
+  void toggleFavoriteTone(String toneId) {
+    final current = state.valueOrNull;
+    if (current == null || toneId == 'standard') return;
+    final nextFavs = Set<String>.from(current.favoriteToneIds);
+    if (nextFavs.contains(toneId)) {
+      nextFavs.remove(toneId);
+    } else {
+      nextFavs.add(toneId);
+    }
+    state = AsyncData(current.copyWith(favoriteToneIds: nextFavs));
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveFavoriteToneIds(nextFavs),
+    );
+  }
+
+  void toggleSplitCompare() {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final next = current.copyWith(
+      splitCompareEnabled: !current.splitCompareEnabled,
+    );
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
+  }
+
+  void toggleZenMode() {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(zenModeEnabled: !current.zenModeEnabled));
+  }
+
+  void cycleTimelapseInterval() {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo) return;
+    const steps = <double>[0.0, 1.0, 2.0, 5.0, 10.0];
+    final idx = steps.indexWhere((s) => (s - current.timelapseInterval).abs() < 0.1);
+    final next = steps[(idx + 1) % steps.length];
+    state = AsyncData(current.copyWith(timelapseInterval: next));
+  }
+
+  void setTimelapseInterval(double seconds) {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo) return;
+    state = AsyncData(current.copyWith(timelapseInterval: seconds.clamp(0.0, 30.0)));
+  }
+
+  Future<void> togglePauseVideoRecording() async {
+    final current = state.valueOrNull;
+    if (current == null || !current.isRecordingVideo || _proResRecording) return;
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    if (current.isRecordingPaused) {
+      await repo.nativeCameraResumeVideo();
+      if (_disposed) return;
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(latest.copyWith(isRecordingPaused: false));
+    } else {
+      await repo.nativeCameraPauseVideo();
+      if (_disposed) return;
+      final latest = state.valueOrNull ?? current;
+      state = AsyncData(latest.copyWith(isRecordingPaused: true));
+    }
+  }
+
+  Future<void> refreshStorageInfo() async {
+    final freeMB =
+        await ref.read(cinemaCameraRepositoryProvider).nativeCameraStorageFreeMB();
+    final current = state.valueOrNull;
+    if (_disposed || current == null || freeMB <= 0) return;
+    state = AsyncData(current.copyWith(freeStorageMB: freeMB));
+  }
+
+  /// Recalls a saved Fujifilm-style recipe (`C1`–`C4`) in 1 tap.
+  Future<void> applyRecipe(int slot) async {
+    final current = state.valueOrNull;
+    if (current == null || current.isRecordingVideo || _isSwitchingProfile) {
+      return;
+    }
+    final recipe = current.recipes.firstWhere(
+      (r) => r.slot == slot,
+      orElse: () => CameraRecipe.defaults.first,
+    );
+    final targetTone = current.tones.firstWhere(
+      (t) => t.id == recipe.toneId,
+      orElse: () => current.selectedTone,
+    );
+    final targetMode =
+        recipe.isVideo ? CinemaCaptureMode.video24fps : CinemaCaptureMode.photo;
+    final targetRes = CaptureResolution.values.firstWhere(
+      (r) => r.name == recipe.resolutionName,
+      orElse: () =>
+          recipe.isVideo ? CaptureResolution.uhd4K : CaptureResolution.maxSensor,
+    );
+    final targetFps = CaptureFrameRate.fromValue(recipe.fps);
+    final targetFrame = recipe.frameFormat;
+
+    selectTone(targetTone);
+    setIntensity(recipe.intensity);
+    setFrameFormat(targetFrame);
+    setProcessZeroEnabled(recipe.processZero);
+    setNightStack(recipe.nightStack);
+    await setHiRes48MP(recipe.hiRes48MP);
+    setHeif10Bit(recipe.heif10Bit);
+    await setHighlightMeteringEnabled(recipe.highlightMetering);
+    if (targetMode != current.captureMode) {
+      await setCaptureMode(targetMode);
+    }
+    if (recipe.isVideo) {
+      await setCaptureQuality(resolution: targetRes, frameRate: targetFps);
+    }
+    final latest = state.valueOrNull;
+    if (!_disposed && latest != null) {
+      state = AsyncData(latest.copyWith(activeRecipeSlot: slot));
+    }
+  }
+
+  /// Overwrites recipe slot `C1`–`C4` with the current camera configuration.
+  Future<CameraRecipe?> saveCurrentToRecipe(int slot, {String? name}) async {
+    final current = state.valueOrNull;
+    if (current == null) return null;
+    final cleanName = (name != null && name.trim().isNotEmpty)
+        ? name.trim().toUpperCase()
+        : current.selectedTone.name.toUpperCase().split(' ').take(2).join(' ');
+    final updatedRecipe = CameraRecipe(
+      slot: slot,
+      name: cleanName,
+      isVideo: current.captureMode.isVideo,
+      toneId: current.selectedTone.id,
+      intensity: current.intensity,
+      frameFormatName: current.frameFormat.name,
+      resolutionName: current.resolution.name,
+      fps: current.frameRate.value,
+      processZero: current.processZeroEnabled,
+      nightStack: current.nightStack,
+      hiRes48MP: current.hiRes48MP,
+      heif10Bit: current.heif10Bit,
+      highlightMetering: current.highlightMeteringEnabled,
+    );
+    final nextList = current.recipes
+        .map((r) => r.slot == slot ? updatedRecipe : r)
+        .toList(growable: false);
+    state = AsyncData(
+      current.copyWith(recipes: nextList, activeRecipeSlot: slot),
+    );
+    await ref.read(cinemaCameraRepositoryProvider).saveCameraRecipes(nextList);
+    return updatedRecipe;
   }
 
   Future<void> switchCamera() async {
@@ -1655,6 +1865,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         'bitrate': _videoBitrateFor(current.resolution, current.frameRate),
         'burnLut': current.directLutRecordingEnabled ||
             current.hasRenderableLook,
+        'timelapseInterval': current.timelapseInterval,
         'grading': _liveMetalConfigFor(current),
       });
     } catch (error) {
@@ -1668,11 +1879,13 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     state = AsyncData(
       current.copyWith(
         isRecordingVideo: true,
+        isRecordingPaused: false,
         isProcessingVideo: false,
         recordingDuration: Duration.zero,
       ),
     );
     _startRecordingClock();
+    unawaited(refreshStorageInfo());
   }
 
   /// Starts the native ProRes take and marks the UI as recording.
@@ -1710,13 +1923,15 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   void _startRecordingClock() {
     _recordingTimer?.cancel();
-    _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _recordingTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       final latest = state.valueOrNull;
-      if (latest != null && latest.isRecordingVideo) {
+      if (latest != null &&
+          latest.isRecordingVideo &&
+          !latest.isRecordingPaused) {
         state = AsyncData(
           latest.copyWith(
             recordingDuration:
-                latest.recordingDuration + const Duration(seconds: 1),
+                latest.recordingDuration + const Duration(milliseconds: 100),
           ),
         );
       }
@@ -1823,12 +2038,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     state = AsyncData(
       latest.copyWith(
         isRecordingVideo: false,
+        isRecordingPaused: false,
         isProcessingVideo: false,
         recordingDuration: Duration.zero,
         videoProcessingLabel: 'Memproses video 24fps...',
         clearVideoProcessingProgress: true,
       ),
     );
+    unawaited(refreshStorageInfo());
   }
 
   void resumeCameraSession() {

@@ -42,6 +42,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   bool _zoomIndicatorVisible = false;
   Timer? _zoomIndicatorTimer;
   double _scaleStartZoom = 1.0;
+  bool _evSliderVisible = false;
+  Timer? _evSliderTimer;
+  double _evDragAccumulator = 0.0;
   bool _isSwitchingQuality = false;
 
   int _countdownRemaining = 0;
@@ -64,6 +67,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   @override
   void dispose() {
     _zoomIndicatorTimer?.cancel();
+    _evSliderTimer?.cancel();
     _countdownTimer?.cancel();
     if (_orientationLocked) {
       SystemChrome.setPreferredOrientations(
@@ -112,6 +116,99 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   Widget _buildProLayout(CinemaCameraState state, CameraOptionsState options) {
     final isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
+
+    // Zen Mode: pure optical viewfinder + minimal shutter + 1-tap exit pill!
+    if (state.zenModeEnabled) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          LayoutBuilder(
+            builder: (context, constraints) {
+              return _buildViewfinderStack(
+                state: state,
+                options: options,
+                viewport: Size(constraints.maxWidth, constraints.maxHeight),
+                isLandscape: isLandscape,
+                zenMode: true,
+              );
+            },
+          ),
+          Positioned(
+            top: 12,
+            right: 14,
+            child: SafeArea(
+              child: GestureDetector(
+                onTap: () {
+                  if (options.hapticFeedback) HapticFeedback.selectionClick();
+                  _notifier.toggleZenMode();
+                },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.62),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: AppTheme.cinemaAmber.withValues(alpha: 0.6),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.visibility_rounded,
+                        color: AppTheme.cinemaAmber,
+                        size: 14,
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        'HUD',
+                        style: AppTheme.monoStyle(
+                          color: AppTheme.cinemaAmber,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          if (isLandscape)
+            Positioned(
+              right: 22,
+              top: 0,
+              bottom: 0,
+              child: SafeArea(
+                child: Center(
+                  child: _buildShutterButton(
+                    state,
+                    options.hapticFeedback,
+                    size: 68,
+                  ),
+                ),
+              ),
+            )
+          else
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 24,
+              child: SafeArea(
+                top: false,
+                child: Center(
+                  child: _buildShutterButton(
+                    state,
+                    options.hapticFeedback,
+                    size: 72,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      );
+    }
 
     if (isLandscape) {
       return _buildLandscapeStack(state, options);
@@ -220,13 +317,39 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                   },
                 ),
                 _GlassTextChip(
-                  label: state.timerSeconds == 0
-                      ? '⏱'
-                      : '${state.timerSeconds}s',
-                  active: state.timerSeconds > 0,
+                  label: state.captureMode.isVideo
+                      ? (state.timelapseInterval > 0
+                          ? '${state.timelapseInterval.round()}s'
+                          : 'TL')
+                      : (state.timerSeconds == 0
+                          ? '⏱'
+                          : '${state.timerSeconds}s'),
+                  active: state.captureMode.isVideo
+                      ? state.timelapseInterval > 0
+                      : state.timerSeconds > 0,
                   onTap: () {
                     if (haptics) HapticFeedback.selectionClick();
-                    _notifier.cycleTimerSeconds();
+                    if (state.captureMode.isVideo) {
+                      _notifier.cycleTimelapseInterval();
+                    } else {
+                      _notifier.cycleTimerSeconds();
+                    }
+                  },
+                ),
+                _GlassMiniButton(
+                  icon: Icons.compare_rounded,
+                  active: state.splitCompareEnabled,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    _notifier.toggleSplitCompare();
+                  },
+                ),
+                _GlassMiniButton(
+                  icon: Icons.visibility_off_outlined,
+                  active: state.zenModeEnabled,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    _notifier.toggleZenMode();
                   },
                 ),
                 _GlassTextChip(
@@ -323,8 +446,26 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                   ],
                 ),
 
-                // Center: Tactile Shutter / Record Ring right under right thumb
-                _buildShutterButton(state, haptics, size: 68),
+                // Center: Tactile Shutter / Record Ring (+ Pause/Resume while recording)
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildShutterButton(state, haptics, size: 66),
+                    if (state.isRecordingVideo && !state.proResEnabled) ...[
+                      const SizedBox(height: 8),
+                      _CircleControl(
+                        icon: state.isRecordingPaused
+                            ? Icons.play_arrow_rounded
+                            : Icons.pause_rounded,
+                        active: state.isRecordingPaused,
+                        onTap: () {
+                          if (haptics) HapticFeedback.mediumImpact();
+                          _notifier.togglePauseVideoRecording();
+                        },
+                      ),
+                    ],
+                  ],
+                ),
 
                 // Bottom: LUT Tray Toggle + Gallery Thumbnail
                 Row(
@@ -474,6 +615,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     required CameraOptionsState options,
     required Size viewport,
     required bool isLandscape,
+    bool zenMode = false,
   }) {
     final isVideo = state.captureMode.isVideo;
     final hasLiveMetal = state.isGpuGradingActive;
@@ -493,10 +635,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           const _CinemaLoadingView(),
 
         // Composition grid
-        CinematicViewfinderOverlay(
-          activeToneName: state.selectedTone.name,
-          showGrid: state.showGrid,
-        ),
+        if (!zenMode)
+          CinematicViewfinderOverlay(
+            activeToneName: state.selectedTone.name,
+            showGrid: state.showGrid,
+          ),
 
         // Dynamic Vintage & Cinema Frame Mask (1:1, 4:5, 6:7, 3:2, 16:9, 2.39, XPan)
         if (state.effectiveFrameAspectRatio > 0.1)
@@ -508,43 +651,175 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           ),
 
         // Tahap 2 Horizon Level Overlay
-        if (state.horizonLevelEnabled)
+        if (!zenMode && state.horizonLevelEnabled)
           HorizonLevelOverlay(degrees: state.horizonDegrees),
 
-        // Tap-to-focus reticle
+        // Split-Screen RAW | LUT micro labels when Live Split Compare is active
+        if (state.splitCompareEnabled)
+          Positioned(
+            top: 42,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 10),
+                        child: _MicroTag(label: 'RAW', amber: false),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 10),
+                        child: _MicroTag(label: 'LUT', amber: true),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+        // Tap-to-focus / Long-Press AE/AF LOCK reticle
         if (state.focusPoint != null)
           Positioned(
-            left: state.focusPoint!.dx - 30,
-            top: state.focusPoint!.dy - 30,
+            left: state.focusPoint!.dx - 32,
+            top: state.focusPoint!.dy - 32,
             child: IgnorePointer(
-              child: Container(
-                width: 60,
-                height: 60,
-                decoration: BoxDecoration(
-                  border: Border.all(color: AppTheme.cinemaAmber, width: 1.4),
-                  borderRadius: BorderRadius.circular(8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: AppTheme.cinemaAmber,
+                        width: state.isAeAfLocked ? 2.0 : 1.4,
+                      ),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: state.isAeAfLocked
+                        ? Center(
+                            child: Container(
+                              width: 46,
+                              height: 46,
+                              decoration: BoxDecoration(
+                                border: Border.all(
+                                  color: AppTheme.cinemaAmber
+                                      .withValues(alpha: 0.55),
+                                  width: 1.0,
+                                ),
+                                borderRadius: BorderRadius.circular(5),
+                              ),
+                            ),
+                          )
+                        : null,
+                  ),
+                  if (state.isAeAfLocked) ...[
+                    const SizedBox(height: 3),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 1.5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppTheme.cinemaAmber,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        'LOCK',
+                        style: AppTheme.monoStyle(
+                          color: Colors.black,
+                          fontSize: 8,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+
+        // Direct Viewfinder Vertical EV Exposure Swipe HUD
+        if (_evSliderVisible)
+          Positioned(
+            right: 16,
+            top: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              child: Center(child: _buildVerticalEvIndicator(state)),
+            ),
+          ),
+
+        // Tappable AE/AF LOCK banner at top-center (tap to unlock)
+        if (state.isAeAfLocked && !state.isRecordingVideo)
+          Positioned(
+            top: 10,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: GestureDetector(
+                onTap: () {
+                  if (options.hapticFeedback) HapticFeedback.selectionClick();
+                  _notifier.unlockAeAf();
+                },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppTheme.cinemaAmber,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.lock_rounded,
+                        color: Colors.black,
+                        size: 11,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        'AE/AF LOCK',
+                        style: AppTheme.monoStyle(
+                          color: Colors.black,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
 
         // Top-left active DOP monitors (Live Scope + micro status chips)
-        Positioned(
-          top: 10,
-          left: 10,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (state.liveScopeEnabled) ...[
-                LiveCameraScopeMini(scopeData: state.liveScopeData),
-                const SizedBox(height: 6),
+        if (!zenMode)
+          Positioned(
+            top: 10,
+            left: 10,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (state.liveScopeEnabled) ...[
+                  LiveCameraScopeMini(scopeData: state.liveScopeData),
+                  const SizedBox(height: 6),
+                ],
+                _buildActiveBadges(state, hasLiveMetal),
               ],
-              _buildActiveBadges(state, hasLiveMetal),
-            ],
+            ),
           ),
-        ),
 
-        // Top-center Recording timer or Audio dB Meter
+        // Top-center Recording SMPTE Timecode or Audio dB Meter
         if (state.isRecordingVideo)
           Positioned(
             top: 10,
@@ -552,38 +827,38 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             right: 0,
             child: Center(child: _buildRecordingBadge(state)),
           )
-        else if (isVideo && state.audioMeterEnabled)
+        else if (!zenMode && isVideo && state.audioMeterEnabled)
           Positioned(
             top: 10,
             right: 10,
             child: AudioMeterOverlay(peakDb: state.audioPeakDb),
           ),
 
-        if (state.isRecordingVideo && state.audioMeterEnabled)
+        if (!zenMode && state.isRecordingVideo && state.audioMeterEnabled)
           Positioned(
             top: 10,
             right: 10,
             child: AudioMeterOverlay(peakDb: state.audioPeakDb),
           ),
 
-        if (!isLandscape) ...[
+        if (!zenMode && !isLandscape) ...[
           // Portrait Zoom indicator pill
           if (state.isZoomed || _zoomIndicatorVisible)
             Positioned(
               left: 0,
               right: 0,
-              bottom: 48,
+              bottom: 50,
               child: Center(child: _buildZoomIndicator(state)),
             ),
 
           // Portrait Bottom-of-viewfinder clean Lens Switcher + Quick Tools
           Positioned(
-            left: 12,
-            right: 12,
+            left: 10,
+            right: 10,
             bottom: 10,
             child: _buildViewfinderBottomRow(state, options.hapticFeedback),
           ),
-        ] else
+        ] else if (!zenMode && isLandscape)
           // Landscape Clean Floating Bottom Controls (zero collision with Left/Right rails!)
           Positioned(
             left: 10,
@@ -648,18 +923,40 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       behavior: HitTestBehavior.opaque,
       onTapUp: (details) =>
           _handleFocusTap(details.localPosition, viewport, haptics),
-      onScaleStart: (_) => _scaleStartZoom = state.zoomLevel,
+      onLongPressStart: (details) =>
+          _handleAeAfLongPress(details.localPosition, viewport, haptics),
+      onScaleStart: (_) {
+        _scaleStartZoom = state.zoomLevel;
+        _evDragAccumulator = state.exposureOffset;
+      },
       onScaleUpdate: (details) {
-        if (details.pointerCount < 2) return;
-        _flashZoomIndicator();
-        _notifier.setZoomLevel(_scaleStartZoom * details.scale);
+        if (details.pointerCount >= 2) {
+          _flashZoomIndicator();
+          _notifier.setZoomLevel(_scaleStartZoom * details.scale);
+        } else if (details.pointerCount == 1 &&
+            !state.manualExposureEnabled &&
+            details.focalPointDelta.dy.abs() > 0.3) {
+          // 1-finger vertical swipe directly adjusts EV exposure (-2.0..+2.0)!
+          final nextEv = (_evDragAccumulator - details.focalPointDelta.dy / 105.0)
+              .clamp(state.minExposure, state.maxExposure);
+          _evDragAccumulator = nextEv;
+          _flashEvSlider();
+          _notifier.setExposureOffset(nextEv);
+        }
       },
       onScaleEnd: (_) {
-        if (!_zoomIndicatorVisible) return;
-        _zoomIndicatorTimer?.cancel();
-        _zoomIndicatorTimer = Timer(const Duration(milliseconds: 1200), () {
-          if (mounted) setState(() => _zoomIndicatorVisible = false);
-        });
+        if (_zoomIndicatorVisible) {
+          _zoomIndicatorTimer?.cancel();
+          _zoomIndicatorTimer = Timer(const Duration(milliseconds: 1200), () {
+            if (mounted) setState(() => _zoomIndicatorVisible = false);
+          });
+        }
+        if (_evSliderVisible) {
+          _evSliderTimer?.cancel();
+          _evSliderTimer = Timer(const Duration(milliseconds: 1600), () {
+            if (mounted) setState(() => _evSliderVisible = false);
+          });
+        }
       },
       child: Stack(
         fit: StackFit.expand,
@@ -756,14 +1053,18 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 ToneSelectorStrip(
-                  tones: state.tones,
+                  tones: state.orderedTones,
                   selectedTone: state.selectedTone,
+                  favoriteToneIds: state.favoriteToneIds,
+                  onToggleFavorite: (t) => _notifier.toggleFavoriteTone(t.id),
                   onToneSelected: _notifier.selectTone,
                   onOpenCustomCreator: _openCustomToneEditor,
                   onDeleteCustomTone: _confirmDeleteTone,
                   compact: true,
                 ),
                 const SizedBox(height: 4),
+                _buildRecipeRow(state, haptics, compact: true),
+                const SizedBox(height: 2),
                 _buildMixSlider(state, s),
               ],
             ),
@@ -806,7 +1107,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                             borderRadius: BorderRadius.circular(14),
                           ),
                           child: Text(
-                            state.backLenses[i].label,
+                            state.activeBackLensIndex == i
+                                ? state.backLenses[i].focalLabel
+                                : '${state.backLenses[i].focalMm}',
                             style: AppTheme.monoStyle(
                               color: state.activeBackLensIndex == i
                                   ? Colors.black
@@ -846,7 +1149,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
 
     return Row(
       children: [
-        // Left: Grid toggle + Flash icon
+        // Left: Grid + Flash + Timer/Timelapse
         _GlassMiniButton(
           icon: Icons.grid_3x3_rounded,
           active: state.showGrid,
@@ -855,7 +1158,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             _notifier.toggleGrid();
           },
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 5),
         _GlassMiniButton(
           icon: _flashIcon(state.flashMode),
           active: state.flashMode != FlashMode.off,
@@ -864,20 +1167,30 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             _notifier.cycleFlashMode();
           },
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 5),
         _GlassTextChip(
-          label: state.timerSeconds == 0 ? '⏱' : '${state.timerSeconds}s',
-          active: state.timerSeconds > 0,
+          label: state.captureMode.isVideo
+              ? (state.timelapseInterval > 0
+                  ? '${state.timelapseInterval.round()}s'
+                  : 'TL')
+              : (state.timerSeconds == 0 ? '⏱' : '${state.timerSeconds}s'),
+          active: state.captureMode.isVideo
+              ? state.timelapseInterval > 0
+              : state.timerSeconds > 0,
           onTap: () {
             if (haptics) HapticFeedback.selectionClick();
-            _notifier.cycleTimerSeconds();
+            if (state.captureMode.isVideo) {
+              _notifier.cycleTimelapseInterval();
+            } else {
+              _notifier.cycleTimerSeconds();
+            }
           },
         ),
         const Spacer(),
-        // Center: Optical Multi-Lens switcher (0.5× · 1× · TEL)
+        // Center: Physical Optical Focal-Length Pills (13 · 24 · 35 · 48 · 77mm)
         if (showLenses)
           Container(
-            padding: const EdgeInsets.all(3),
+            padding: const EdgeInsets.all(2.5),
             decoration: BoxDecoration(
               color: Colors.black.withValues(alpha: 0.56),
               borderRadius: BorderRadius.circular(18),
@@ -896,8 +1209,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                           },
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 140),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 9,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: state.activeBackLensIndex == i ? 7 : 6,
                         vertical: 4,
                       ),
                       decoration: BoxDecoration(
@@ -907,12 +1220,14 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                         borderRadius: BorderRadius.circular(14),
                       ),
                       child: Text(
-                        state.backLenses[i].label,
+                        state.activeBackLensIndex == i
+                            ? state.backLenses[i].focalLabel
+                            : '${state.backLenses[i].focalMm}',
                         style: AppTheme.monoStyle(
                           color: state.activeBackLensIndex == i
                               ? Colors.black
                               : Colors.white70,
-                          fontSize: 10,
+                          fontSize: 9.5,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
@@ -922,27 +1237,42 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             ),
           ),
         const Spacer(),
-        // Right: HL Metering & 180° quick toggles
-        _GlassTextChip(
-          label: 'HL',
-          active: state.highlightMeteringEnabled,
+        // Right: Split LUT + Zen Mode + HL/180°
+        _GlassMiniButton(
+          icon: Icons.compare_rounded,
+          active: state.splitCompareEnabled,
           onTap: () {
             if (haptics) HapticFeedback.selectionClick();
-            _notifier
-                .setHighlightMeteringEnabled(!state.highlightMeteringEnabled);
+            _notifier.toggleSplitCompare();
           },
         ),
-        if (state.proCapabilities.available) ...[
-          const SizedBox(width: 6),
-          _GlassTextChip(
-            label: '180°',
-            active: state.is180ShutterLocked,
-            onTap: () {
-              if (haptics) HapticFeedback.selectionClick();
+        const SizedBox(width: 5),
+        _GlassMiniButton(
+          icon: Icons.visibility_off_outlined,
+          active: state.zenModeEnabled,
+          onTap: () {
+            if (haptics) HapticFeedback.selectionClick();
+            _notifier.toggleZenMode();
+          },
+        ),
+        const SizedBox(width: 5),
+        _GlassTextChip(
+          label: state.captureMode.isVideo && state.proCapabilities.available
+              ? '180°'
+              : 'HL',
+          active: state.captureMode.isVideo && state.proCapabilities.available
+              ? state.is180ShutterLocked
+              : state.highlightMeteringEnabled,
+          onTap: () {
+            if (haptics) HapticFeedback.selectionClick();
+            if (state.captureMode.isVideo && state.proCapabilities.available) {
               _notifier.toggle180DegreeShutter();
-            },
-          ),
-        ],
+            } else {
+              _notifier
+                  .setHighlightMeteringEnabled(!state.highlightMeteringEnabled);
+            }
+          },
+        ),
       ],
     );
   }
@@ -981,14 +1311,18 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             children: [
               if (showTray) ...[
                 ToneSelectorStrip(
-                  tones: state.tones,
+                  tones: state.orderedTones,
                   selectedTone: state.selectedTone,
+                  favoriteToneIds: state.favoriteToneIds,
+                  onToggleFavorite: (t) => _notifier.toggleFavoriteTone(t.id),
                   onToneSelected: _notifier.selectTone,
                   onOpenCustomCreator: _openCustomToneEditor,
                   onDeleteCustomTone: _confirmDeleteTone,
                   compact: isLandscape,
                 ),
                 const SizedBox(height: 6),
+                _buildRecipeRow(state, haptics),
+                const SizedBox(height: 4),
                 _buildMixSlider(state, s),
               ],
               const SizedBox(height: 4),
@@ -1130,12 +1464,23 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
 
     return Row(
       children: [
-        // Left: Gallery Thumbnail button
+        // Left: Gallery Thumbnail OR Pause/Resume button while recording
         SizedBox(
           width: 96,
           child: Align(
             alignment: Alignment.centerLeft,
-            child: GestureDetector(
+            child: state.isRecordingVideo && !state.proResEnabled
+                ? _CircleControl(
+                    icon: state.isRecordingPaused
+                        ? Icons.play_arrow_rounded
+                        : Icons.pause_rounded,
+                    active: state.isRecordingPaused,
+                    onTap: () {
+                      if (haptics) HapticFeedback.mediumImpact();
+                      _notifier.togglePauseVideoRecording();
+                    },
+                  )
+                : GestureDetector(
               onTap: state.isRecordingVideo
                   ? null
                   : () async {
@@ -1323,26 +1668,185 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   }
 
   Widget _buildRecordingBadge(CinemaCameraState state) {
+    final rem = state.remainingStorageLabel;
+    final paused = state.isRecordingPaused;
+    final tl = state.isTimelapseArmed;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
       decoration: BoxDecoration(
-        color: AppTheme.cinemaRed.withValues(alpha: 0.9),
+        color: paused
+            ? AppTheme.cinemaAmber.withValues(alpha: 0.92)
+            : AppTheme.cinemaRed.withValues(alpha: 0.92),
         borderRadius: BorderRadius.circular(16),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.fiber_manual_record, color: Colors.white, size: 10),
-          const SizedBox(width: 6),
+          Icon(
+            paused ? Icons.pause_rounded : Icons.fiber_manual_record,
+            color: paused ? Colors.black : Colors.white,
+            size: 11,
+          ),
+          const SizedBox(width: 5),
           Text(
-            _formatDuration(state.recordingDuration),
+            paused
+                ? 'PAUSED · ${state.smpteTimecode}'
+                : tl
+                    ? 'TL ${state.timelapseInterval.round()}s · ${state.smpteTimecode}'
+                    : state.smpteTimecode,
             style: AppTheme.monoStyle(
-              color: Colors.white,
-              fontSize: 11.5,
+              color: paused ? Colors.black : Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          if (rem.isNotEmpty) ...[
+            const SizedBox(width: 7),
+            Text(
+              '~$rem',
+              style: AppTheme.monoStyle(
+                color: (paused ? Colors.black : Colors.white)
+                    .withValues(alpha: 0.78),
+                fontSize: 9.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVerticalEvIndicator(CinemaCameraState state) {
+    final span = (state.maxExposure - state.minExposure).clamp(0.1, 10.0);
+    final norm = ((state.exposureOffset - state.minExposure) / span)
+        .clamp(0.0, 1.0);
+    final evSign = state.exposureOffset >= 0 ? '+' : '';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.65),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppTheme.cinemaAmber.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.wb_sunny_rounded,
+            color: AppTheme.cinemaAmber,
+            size: 13,
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: 4,
+            height: 92,
+            child: Stack(
+              alignment: Alignment.bottomCenter,
+              children: [
+                Container(
+                  width: 3,
+                  height: 92,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Container(
+                  width: 3,
+                  height: 92 * norm,
+                  decoration: BoxDecoration(
+                    color: AppTheme.cinemaAmber,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '$evSign${state.exposureOffset.toStringAsFixed(1)}',
+            style: AppTheme.monoStyle(
+              color: AppTheme.cinemaAmber,
+              fontSize: 9.5,
               fontWeight: FontWeight.w800,
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildRecipeRow(
+    CinemaCameraState state,
+    bool haptics, {
+    bool compact = false,
+  }) {
+    return SizedBox(
+      height: compact ? 22 : 24,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        itemCount: state.recipes.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 6),
+        itemBuilder: (context, idx) {
+          final r = state.recipes[idx];
+          final active = state.activeRecipeSlot == r.slot;
+          return GestureDetector(
+            onTap: state.isRecordingVideo
+                ? null
+                : () async {
+                    if (haptics) HapticFeedback.selectionClick();
+                    await _notifier.applyRecipe(r.slot);
+                    _toast('${r.slotCode} · ${r.name}');
+                  },
+            onLongPress: state.isRecordingVideo
+                ? null
+                : () async {
+                    if (haptics) HapticFeedback.heavyImpact();
+                    final saved = await _notifier.saveCurrentToRecipe(r.slot);
+                    if (saved != null) {
+                      _toast('Disimpan ke ${saved.slotCode} · ${saved.name}');
+                    }
+                  },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                color: active
+                    ? AppTheme.cinemaAmber.withValues(alpha: 0.2)
+                    : Colors.white.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(7),
+                border: Border.all(
+                  color: active ? AppTheme.cinemaAmber : Colors.white12,
+                  width: 0.8,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    r.slotCode,
+                    style: AppTheme.monoStyle(
+                      color: AppTheme.cinemaAmber,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    r.name,
+                    style: TextStyle(
+                      color: active ? Colors.white : AppTheme.textSecondary,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -1402,6 +1906,16 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     });
   }
 
+  void _flashEvSlider() {
+    _evSliderTimer?.cancel();
+    if (!_evSliderVisible) {
+      setState(() => _evSliderVisible = true);
+    }
+    _evSliderTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) setState(() => _evSliderVisible = false);
+    });
+  }
+
   Future<void> _handleFocusTap(
     Offset localPosition,
     Size viewport,
@@ -1412,6 +1926,18 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     final dx = (localPosition.dx / viewport.width).clamp(0.0, 1.0);
     final dy = (localPosition.dy / viewport.height).clamp(0.0, 1.0);
     await _notifier.setFocusPoint(Offset(dx, dy), localPosition);
+  }
+
+  Future<void> _handleAeAfLongPress(
+    Offset localPosition,
+    Size viewport,
+    bool haptics,
+  ) async {
+    if (viewport.isEmpty) return;
+    if (haptics) HapticFeedback.heavyImpact();
+    final dx = (localPosition.dx / viewport.width).clamp(0.0, 1.0);
+    final dy = (localPosition.dy / viewport.height).clamp(0.0, 1.0);
+    await _notifier.lockAeAf(Offset(dx, dy), localPosition);
   }
 
   Future<void> _applyProfile(
@@ -1617,12 +2143,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     return text.startsWith('Exception: ') ? text.substring(11) : text;
   }
 
-  String _formatDuration(Duration duration) {
-    final m = duration.inMinutes.toString().padLeft(2, '0');
-    final sec = (duration.inSeconds % 60).toString().padLeft(2, '0');
-    return '$m:$sec';
-  }
-
   IconData _flashIcon(FlashMode mode) => switch (mode) {
         FlashMode.off => Icons.flash_off_rounded,
         FlashMode.auto => Icons.flash_auto_rounded,
@@ -1632,6 +2152,38 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
 }
 
 // ----------------------------------------------------------------- subwidgets
+
+class _MicroTag extends StatelessWidget {
+  final String label;
+  final bool amber;
+
+  const _MicroTag({required this.label, required this.amber});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(
+          color: amber
+              ? AppTheme.cinemaAmber.withValues(alpha: 0.7)
+              : Colors.white24,
+          width: 0.8,
+        ),
+      ),
+      child: Text(
+        label,
+        style: AppTheme.monoStyle(
+          color: amber ? AppTheme.cinemaAmber : Colors.white70,
+          fontSize: 8.5,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+}
 
 class _TelemetryCell extends StatelessWidget {
   final String label;

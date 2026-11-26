@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.3.0 PRO';
+  static const String appVersion = '3.4.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,23 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.3.0 PRO',
+        version: 'v3.4.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Rombak total 3D LUT Orange & Teal sesuai palet sinema asli (#FD5901/#F78104/#FAAB36 × #249EA0/#008083/#005F60) + 5 Film Stock Cool Non-Warm baru: Metro Teal Night, Blue Hour Rooftop, Nordic Slate, Tokyo Petrol 500T & Cool Chrome 100',
+                'Kamera Pro Baru: tekan-tahan AE/AF LOCK + geser vertikal EV langsung di layar, Resep Cepat C1–C4 (tap muat, tahan simpan), Pin Favorit LUT (★), fokal lensa asli 13·24·35·48·77mm, Pause/Resume Video + Timecode SMPTE + sisa storage, Timelapse 4K (1s–10s), Live Split RAW|LUT & Zen Mode',
+                'Gallery & Editor Baru: 4K Frame Grab langsung dari video, Signature Fotografer kustom permanen + EXIF otomatis pada Frame Vintage, serta 1-Tap Social Export Safe sRGB (IG 4:5, Reels 9:16, WA HD)',
+              ]
+            : const [
+                'Overhauled 3D LUT Orange & Teal calibrated to exact cinema palette (#FD5901/#F78104/#FAAB36 × #249EA0/#008083/#005F60) + 5 new Cool/Non-Warm Film Stocks: Metro Teal Night, Blue Hour Rooftop, Nordic Slate, Tokyo Petrol 500T & Cool Chrome 100',
+                'Pro Camera Upgrades: Long-Press AE/AF LOCK + vertical EV swipe on viewfinder, C1–C4 Film Recipes, Pin Favorite LUTs (★), true 13·24·35·48·77mm focal pills, Pause/Resume Video + SMPTE Timecode + storage estimate, 4K Timelapse (1s–10s), Live Split RAW|LUT & Zen Mode',
+                'Gallery & Editor Upgrades: 4K Still Frame Grab from Video, saved custom Photographer Signature + auto-EXIF on Vintage Frames, and 1-Tap Safe sRGB Social Export (IG 4:5, Reels 9:16, WA HD)',
+              ],
+      ),
+      (
+        version: 'v3.3.0 PRO',
+        tag: 'PURE ENGINE',
         items: isId
             ? const [
                 'Fokus penuh ke 2 mode utama PHOTO & VIDEO yang super stabil, cepat, dan bebas error (hapus mode Portrait & Cinematic dari kamera beserta overhead sensor LiDAR/virtual camera)',

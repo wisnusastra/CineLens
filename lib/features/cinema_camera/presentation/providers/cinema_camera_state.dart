@@ -1,4 +1,5 @@
 import 'dart:ui';
+import '../../domain/entities/camera_recipe.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/film_look.dart';
 import '../../domain/entities/frame_format.dart';
@@ -27,12 +28,16 @@ class OpticalLensOption {
   final String id;
   final String label;
   final double initialZoom;
+  final int focalMm;
 
   const OpticalLensOption({
     required this.id,
     required this.label,
     this.initialZoom = 1.0,
+    this.focalMm = 24,
   });
+
+  String get focalLabel => '${focalMm}mm';
 }
 
 /// Output resolution offered to the user.
@@ -200,6 +205,17 @@ class CinemaCameraState {
   /// rejected setting is never silent.
   final String? proControlError;
 
+  // v3.4 Pro Camera Ergonomics & Controls
+  final bool isAeAfLocked;
+  final bool isRecordingPaused;
+  final double timelapseInterval;
+  final double freeStorageMB;
+  final bool splitCompareEnabled;
+  final bool zenModeEnabled;
+  final Set<String> favoriteToneIds;
+  final List<CameraRecipe> recipes;
+  final int? activeRecipeSlot;
+
   const CinemaCameraState({
     required this.tones,
     required this.selectedTone,
@@ -274,6 +290,15 @@ class CinemaCameraState {
     this.videoProcessingLabel,
     this.videoProcessingProgress,
     this.proControlError,
+    this.isAeAfLocked = false,
+    this.isRecordingPaused = false,
+    this.timelapseInterval = 0.0,
+    this.freeStorageMB = 0.0,
+    this.splitCompareEnabled = false,
+    this.zenModeEnabled = false,
+    this.favoriteToneIds = const <String>{},
+    this.recipes = CameraRecipe.defaults,
+    this.activeRecipeSlot,
   });
 
   /// Matrix the live preview uses.
@@ -367,7 +392,61 @@ class CinemaCameraState {
       zebraEnabled ||
       falseColorEnabled ||
       liveScopeEnabled ||
-      appleLogEnabled;
+      appleLogEnabled ||
+      splitCompareEnabled;
+
+  bool get isTimelapseArmed => captureMode.isVideo && timelapseInterval > 0.0;
+
+  /// SMPTE timecode formatted as `HH:MM:SS:FF` at the active recording FPS.
+  String get smpteTimecode {
+    final totalMs = recordingDuration.inMilliseconds;
+    final hours = (totalMs ~/ 3600000) % 100;
+    final minutes = (totalMs ~/ 60000) % 60;
+    final seconds = (totalMs ~/ 1000) % 60;
+    final frames = ((totalMs % 1000) * frameRate.value) ~/ 1000;
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(hours)}:${two(minutes)}:${two(seconds)}:${two(frames)}';
+  }
+
+  /// Estimated remaining video recording time based on free iPhone storage.
+  String get remainingStorageLabel {
+    if (freeStorageMB <= 0) return '';
+    // Active HEVC bitrate MB/min: 4K (~337 MB/min) vs 1080p (~165 MB/min) vs ProRes (~2500 MB/min)
+    final double mbPerMin;
+    if (proResEnabled) {
+      mbPerMin = 2400.0;
+    } else if (resolution == CaptureResolution.fullHD) {
+      mbPerMin = 165.0;
+    } else {
+      mbPerMin = 335.0;
+    }
+    final mins = (freeStorageMB / mbPerMin).floor();
+    if (mins < 1) return '<1m';
+    if (mins >= 60) {
+      final h = mins ~/ 60;
+      final m = mins % 60;
+      return '${h}h${m > 0 ? '${m}m' : ''}';
+    }
+    return '${mins}m';
+  }
+
+  /// Returns tones with `standard` first, then pinned Favorites (`★`), then the rest.
+  List<CinemaTone> get orderedTones {
+    if (favoriteToneIds.isEmpty) return tones;
+    final standard = <CinemaTone>[];
+    final favs = <CinemaTone>[];
+    final rest = <CinemaTone>[];
+    for (final t in tones) {
+      if (t.id == 'standard') {
+        standard.add(t);
+      } else if (favoriteToneIds.contains(t.id)) {
+        favs.add(t);
+      } else {
+        rest.add(t);
+      }
+    }
+    return <CinemaTone>[...standard, ...favs, ...rest];
+  }
 
   Size get previewSize => Size(previewWidth, previewHeight);
 
@@ -450,6 +529,16 @@ class CinemaCameraState {
     bool clearVideoProcessingProgress = false,
     String? proControlError,
     bool clearProControlError = false,
+    bool? isAeAfLocked,
+    bool? isRecordingPaused,
+    double? timelapseInterval,
+    double? freeStorageMB,
+    bool? splitCompareEnabled,
+    bool? zenModeEnabled,
+    Set<String>? favoriteToneIds,
+    List<CameraRecipe>? recipes,
+    int? activeRecipeSlot,
+    bool clearActiveRecipeSlot = false,
   }) {
     return CinemaCameraState(
       tones: tones ?? this.tones,
@@ -540,6 +629,17 @@ class CinemaCameraState {
       proControlError: clearProControlError
           ? null
           : (proControlError ?? this.proControlError),
+      isAeAfLocked: isAeAfLocked ?? this.isAeAfLocked,
+      isRecordingPaused: isRecordingPaused ?? this.isRecordingPaused,
+      timelapseInterval: timelapseInterval ?? this.timelapseInterval,
+      freeStorageMB: freeStorageMB ?? this.freeStorageMB,
+      splitCompareEnabled: splitCompareEnabled ?? this.splitCompareEnabled,
+      zenModeEnabled: zenModeEnabled ?? this.zenModeEnabled,
+      favoriteToneIds: favoriteToneIds ?? this.favoriteToneIds,
+      recipes: recipes ?? this.recipes,
+      activeRecipeSlot: clearActiveRecipeSlot
+          ? null
+          : (activeRecipeSlot ?? this.activeRecipeSlot),
     );
   }
 }

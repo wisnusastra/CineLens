@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../domain/entities/camera_recipe.dart';
 import '../../domain/entities/captured_media.dart';
 import '../../domain/entities/cinema_tone.dart';
 import '../../domain/entities/cinema_tone_preset_package.dart';
@@ -1405,6 +1406,101 @@ class CinemaCameraRepository {
     try {
       await _videoChannel.invokeMethod<bool>('nativeCameraDispose');
     } catch (_) {}
+  }
+
+  Future<void> nativeCameraSetAeAfLock({
+    required bool locked,
+    required double x,
+    required double y,
+  }) async {
+    try {
+      await _videoChannel.invokeMethod<bool>(
+        'nativeCameraSetAeAfLock',
+        <String, dynamic>{'locked': locked, 'x': x, 'y': y},
+      );
+    } catch (_) {}
+  }
+
+  Future<void> nativeCameraPauseVideo() async {
+    try {
+      await _videoChannel.invokeMethod<bool>('nativeCameraPauseVideo');
+    } catch (_) {}
+  }
+
+  Future<void> nativeCameraResumeVideo() async {
+    try {
+      await _videoChannel.invokeMethod<bool>('nativeCameraResumeVideo');
+    } catch (_) {}
+  }
+
+  Future<double> nativeCameraStorageFreeMB() async {
+    try {
+      final raw = await _videoChannel.invokeMapMethod<Object?, Object?>(
+        'nativeCameraStorageInfo',
+      );
+      return (raw?['freeMB'] as num?)?.toDouble() ?? 0.0;
+    } catch (_) {
+      return 0.0;
+    }
+  }
+
+  Future<Uint8List> extractVideoFrame({
+    required String path,
+    int timeMs = 0,
+  }) async {
+    final bytes = await _videoChannel
+        .invokeMethod<Uint8List>(
+          'extractVideoFrame',
+          <String, dynamic>{'path': path, 'timeMs': timeMs},
+        )
+        .timeout(const Duration(seconds: 15));
+    if (bytes == null || bytes.isEmpty) {
+      throw Exception('Gagal mengambil frame 4K dari video.');
+    }
+    return bytes;
+  }
+
+  Future<Set<String>> loadFavoriteToneIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(AppConstants.prefFavoriteToneIds);
+    if (list == null) {
+      // Helpful starter favorites showcasing our new cool & teal-orange looks!
+      return const <String>{'teal_orange', 'metro_teal', 'rooftop_cyan'};
+    }
+    return list.toSet();
+  }
+
+  Future<void> saveFavoriteToneIds(Set<String> ids) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(AppConstants.prefFavoriteToneIds, ids.toList());
+  }
+
+  Future<List<CameraRecipe>> loadCameraRecipes() async {
+    final prefs = await SharedPreferences.getInstance();
+    return CameraRecipe.decodeList(
+      prefs.getString(AppConstants.prefCameraRecipesJson),
+    );
+  }
+
+  Future<void> saveCameraRecipes(List<CameraRecipe> recipes) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      AppConstants.prefCameraRecipesJson,
+      CameraRecipe.encodeList(recipes),
+    );
+  }
+
+  Future<String> loadPhotographerSignature() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(AppConstants.prefPhotographerSignature) ?? '';
+  }
+
+  Future<void> savePhotographerSignature(String signature) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      AppConstants.prefPhotographerSignature,
+      signature.trim(),
+    );
   }
 
   Future<void> _ensureGalleryPermission() async {

@@ -12,6 +12,8 @@ class ToneSelectorStrip extends StatelessWidget {
   final ValueChanged<CinemaTone> onToneSelected;
   final VoidCallback onOpenCustomCreator;
   final ValueChanged<CinemaTone>? onDeleteCustomTone;
+  final Set<String> favoriteToneIds;
+  final ValueChanged<CinemaTone>? onToggleFavorite;
 
   /// Shorter pills used in landscape, keeping the viewfinder unobstructed.
   final bool compact;
@@ -26,6 +28,8 @@ class ToneSelectorStrip extends StatelessWidget {
     required this.onToneSelected,
     required this.onOpenCustomCreator,
     this.onDeleteCustomTone,
+    this.favoriteToneIds = const <String>{},
+    this.onToggleFavorite,
     this.compact = false,
     this.showCustomCard = true,
   });
@@ -70,18 +74,22 @@ class ToneSelectorStrip extends StatelessWidget {
 
           final tone = tones[index - (showCustomCard ? 1 : 0)];
           final isSelected = tone.id == selectedTone.id;
+          final isFavorite = favoriteToneIds.contains(tone.id);
 
           return GestureDetector(
             onTap: () {
               HapticFeedback.selectionClick();
               onToneSelected(tone);
             },
-            onLongPress: tone.isCustom && onDeleteCustomTone != null
-                ? () {
-                    HapticFeedback.heavyImpact();
-                    onDeleteCustomTone!(tone);
-                  }
-                : null,
+            onLongPress: () {
+              if (tone.isCustom && onDeleteCustomTone != null) {
+                HapticFeedback.heavyImpact();
+                onDeleteCustomTone!(tone);
+              } else if (tone.id != 'standard' && onToggleFavorite != null) {
+                HapticFeedback.mediumImpact();
+                onToggleFavorite!(tone);
+              }
+            },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 160),
               padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 12),
@@ -93,7 +101,9 @@ class ToneSelectorStrip extends StatelessWidget {
                 border: Border.all(
                   color: isSelected
                       ? AppTheme.cinemaAmber
-                      : Colors.white.withValues(alpha: 0.1),
+                      : isFavorite
+                          ? AppTheme.cinemaAmber.withValues(alpha: 0.35)
+                          : Colors.white.withValues(alpha: 0.1),
                   width: isSelected ? 1.3 : 0.8,
                 ),
               ),
@@ -115,6 +125,31 @@ class ToneSelectorStrip extends StatelessWidget {
                       letterSpacing: 0.6,
                     ),
                   ),
+                  if (tone.id != 'standard' &&
+                      (isFavorite || (isSelected && onToggleFavorite != null))) ...[
+                    const SizedBox(width: 4),
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: onToggleFavorite == null
+                          ? null
+                          : () {
+                              HapticFeedback.lightImpact();
+                              onToggleFavorite!(tone);
+                            },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        child: Icon(
+                          isFavorite
+                              ? CupertinoIcons.star_fill
+                              : CupertinoIcons.star,
+                          size: 11,
+                          color: isFavorite
+                              ? AppTheme.cinemaAmber
+                              : Colors.white.withValues(alpha: 0.42),
+                        ),
+                      ),
+                    ),
+                  ],
                   if (tone.isLutTone) ...[
                     const SizedBox(width: 5),
                     Container(

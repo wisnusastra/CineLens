@@ -8,6 +8,7 @@ import 'package:video_player/video_player.dart';
 import '../../../../core/l10n/app_strings.dart';
 import '../../../../core/routing/capture_args.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../providers/cinema_camera_provider.dart';
 import '../widgets/media_specs_sheet.dart';
 
 class CapturedPreviewScreen extends ConsumerStatefulWidget {
@@ -24,6 +25,7 @@ class _CapturedPreviewScreenState extends ConsumerState<CapturedPreviewScreen> {
   VideoPlayerController? _videoController;
   bool _isVideoReady = false;
   bool _isInitializingVideo = false;
+  bool _isGrabbingFrame = false;
   bool _didEdit = false;
   String? _videoError;
 
@@ -106,6 +108,57 @@ class _CapturedPreviewScreenState extends ConsumerState<CapturedPreviewScreen> {
     context.pop(_didEdit ? true : null);
   }
 
+  Future<void> _grabVideoFrame() async {
+    final path = widget.args.videoFilePath;
+    if (path == null || _isGrabbingFrame) return;
+    setState(() => _isGrabbingFrame = true);
+    try {
+      final timeMs = _videoController?.value.position.inMilliseconds ?? 0;
+      final repo = ref.read(cinemaCameraRepositoryProvider);
+      final bytes = await repo.extractVideoFrame(path: path, timeMs: timeMs);
+      await repo.storePhoto(
+        jpegBytes: bytes,
+        toneId: widget.args.tone.id,
+        toneName: '${widget.args.tone.name} (4K Frame)',
+        intensity: widget.args.intensity,
+        isAnamorphic: widget.args.isAnamorphic,
+      );
+      try {
+        await repo.saveImageToIosGallery(bytes);
+      } catch (_) {}
+      if (!mounted) return;
+      setState(() => _didEdit = true);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Frame 4K disimpan ke Galeri & Apple Photos.',
+              style: TextStyle(fontSize: 12),
+            ),
+            backgroundColor: AppTheme.cardDark,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              'Gagal ambil frame: ${_describeVideoError(error)}',
+              style: const TextStyle(fontSize: 12),
+            ),
+            backgroundColor: AppTheme.cinemaRed,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+    } finally {
+      if (mounted) setState(() => _isGrabbingFrame = false);
+    }
+  }
+
   Future<void> _openEditor() async {
     final path = _editablePath;
     if (path == null) return;
@@ -148,6 +201,25 @@ class _CapturedPreviewScreenState extends ConsumerState<CapturedPreviewScreen> {
         title: Text(_isVideo ? s.video : s.photo),
         actions: [
           if (_editablePath != null) ...[
+            if (_isVideo)
+              IconButton(
+                icon: _isGrabbingFrame
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppTheme.cinemaAmber,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.photo_camera_back_rounded,
+                        color: AppTheme.cinemaAmber,
+                        size: 20,
+                      ),
+                tooltip: '4K Frame Grab',
+                onPressed: _isGrabbingFrame ? null : _grabVideoFrame,
+              ),
             IconButton(
               icon: const Icon(
                 Icons.info_outline_rounded,

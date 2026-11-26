@@ -97,15 +97,19 @@ class PhotoEditorRepository {
   }
 
   /// Renders the edit at full resolution and returns JPEG bytes.
+  /// Optional [socialPreset] (`none`, `ig_4_5`, `reels_9_16`, `wa_hd`) crops
+  /// and exports in safe sRGB so social apps never wash out P3 colors.
   Future<Uint8List> exportPhoto({
     required String path,
     required Map<String, dynamic> payload,
+    String socialPreset = 'none',
   }) async {
     final bytes = await _channel.invokeMethod<Uint8List>(
       'editorExportPhoto',
       <String, dynamic>{
         'path': path,
         ...payload,
+        'socialPreset': socialPreset,
         'quality': 0.95,
       },
     ).timeout(const Duration(minutes: 3));

@@ -630,6 +630,14 @@ final class ExportProgressReporter {
         ) ?? false
         result(racked)
 
+      case "nativeCameraSetAeAfLock":
+        let args = call.arguments as? [String: Any] ?? [:]
+        let locked = (args["locked"] as? Bool) ?? false
+        let x = (args["x"] as? NSNumber)?.doubleValue ?? 0.5
+        let y = (args["y"] as? NSNumber)?.doubleValue ?? 0.5
+        self?.nativeEngine?.setAeAfLock(locked: locked, x: x, y: y)
+        result(locked)
+
       case "nativeCameraUpdateGrading":
         let args = call.arguments as? [String: Any] ?? [:]
         self?.nativeEngine?.updateGrading(args: args)
@@ -651,12 +659,33 @@ final class ExportProgressReporter {
         }
         engine.startVideoRecording(args: args, result: result)
 
+      case "nativeCameraPauseVideo":
+        self?.nativeEngine?.pauseVideoRecording()
+        result(true)
+
+      case "nativeCameraResumeVideo":
+        self?.nativeEngine?.resumeVideoRecording()
+        result(true)
+
       case "nativeCameraStopVideo":
         guard let engine = self?.nativeEngine else {
           result(FlutterError(code: "no_engine", message: "Native camera not initialized.", details: nil))
           return
         }
         engine.stopVideoRecording(result: result)
+
+      case "nativeCameraStorageInfo":
+        let freeMB = NativeCinemaCameraEngine.availableStorageMB()
+        result(["freeMB": freeMB])
+
+      case "extractVideoFrame":
+        let args = call.arguments as? [String: Any] ?? [:]
+        guard let path = args["path"] as? String else {
+          result(FlutterError(code: "invalid_args", message: "Missing video path.", details: nil))
+          return
+        }
+        let timeMs = (args["timeMs"] as? NSNumber)?.int64Value ?? 0
+        self?.extractVideoFrame(path: path, timeMs: timeMs, result: result)
 
       case "nativeCameraPause":
         self?.nativeEngine?.pause()
@@ -3174,6 +3203,43 @@ final class ExportProgressReporter {
     }
   }
 
+  private func extractVideoFrame(
+    path: String,
+    timeMs: Int64,
+    result: @escaping FlutterResult
+  ) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      let url = URL(fileURLWithPath: path)
+      let asset = AVURLAsset(url: url)
+      let generator = AVAssetImageGenerator(asset: asset)
+      generator.appliesPreferredTrackTransform = true
+      generator.requestedTimeToleranceBefore = .zero
+      generator.requestedTimeToleranceAfter = .zero
+      generator.maximumSize = .zero // Full native 4K resolution!
+
+      let target = CMTime(value: max(0, timeMs), timescale: 1000)
+      var actualTime = CMTime.zero
+      do {
+        let cgImage = try generator.copyCGImage(at: target, actualTime: &actualTime)
+        let uiImage = UIImage(cgImage: cgImage)
+        guard let jpeg = uiImage.jpegData(compressionQuality: 0.96) else {
+          throw NSError(domain: "CineLens", code: -2, userInfo: [NSLocalizedDescriptionKey: "Gagal encode frame JPEG."])
+        }
+        DispatchQueue.main.async {
+          result(FlutterStandardTypedData(bytes: jpeg))
+        }
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(
+            code: "frame_grab_failed",
+            message: error.localizedDescription,
+            details: nil
+          ))
+        }
+      }
+    }
+  }
+
   private func editorExportPhoto(
     args: [String: Any],
     path: String,
@@ -3183,6 +3249,7 @@ final class ExportProgressReporter {
     let (filmLook, effectLook) = AppDelegate.editorLooks(args: args)
     let matrix = args["matrix"] as? [Double]
     let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.95
+    let socialPreset = (args["socialPreset"] as? String) ?? "none"
 
     DispatchQueue.global(qos: .userInitiated).async {
       var output: CIImage?
@@ -3195,7 +3262,44 @@ final class ExportProgressReporter {
           sourcePath: path
         )
       }
-      if params.heif10Bit,
+
+      // 1-Tap Social Media Export: exact aspect crop + safe sRGB output so
+      // Instagram / Reels / WhatsApp never wash out Display P3 colors!
+      if var img = output, socialPreset != "none" {
+        let ext = img.extent
+        if socialPreset == "ig_4_5" || socialPreset == "reels_9_16" {
+          let targetRatio: CGFloat = (socialPreset == "ig_4_5") ? (4.0 / 5.0) : (9.0 / 16.0)
+          let curRatio = ext.width / max(ext.height, 1.0)
+          let cropW: CGFloat
+          let cropH: CGFloat
+          if curRatio > targetRatio {
+            cropH = ext.height
+            cropW = floor((ext.height * targetRatio) / 2.0) * 2.0
+          } else {
+            cropW = ext.width
+            cropH = floor((ext.width / targetRatio) / 2.0) * 2.0
+          }
+          let rect = CGRect(
+            x: ext.midX - cropW * 0.5,
+            y: ext.midY - cropH * 0.5,
+            width: max(2.0, cropW),
+            height: max(2.0, cropH)
+          )
+          img = img.cropped(to: rect).transformed(
+            by: CGAffineTransform(translationX: -rect.origin.x, y: -rect.origin.y)
+          )
+        }
+        let maxEdge: CGFloat = (socialPreset == "wa_hd") ? 2048.0 : 2700.0
+        let curMax = max(img.extent.width, img.extent.height)
+        if curMax > maxEdge {
+          let s = maxEdge / curMax
+          img = img.transformed(by: CGAffineTransform(scaleX: s, y: s))
+        }
+        output = img
+      }
+
+      if socialPreset == "none",
+         params.heif10Bit,
          let outImg = output,
          let p3 = CGColorSpace(name: CGColorSpace.displayP3),
          let heifData: Data = try? AppDelegate.p3GradingContext.heif10Representation(
@@ -3214,8 +3318,9 @@ final class ExportProgressReporter {
         try? heifData.write(to: heicUrl, options: Data.WritingOptions.atomic)
         AppDelegate.saveRawHeifToPhotosIfAuthorized(heifData)
       }
+      let outQuality = (socialPreset == "wa_hd") ? min(quality, 0.90) : quality
       let data = output.flatMap {
-        PhotoEditor.jpegData(from: $0, quality: quality)
+        PhotoEditor.jpegData(from: $0, quality: outQuality)
       }
       AppDelegate.p3GradingContext.clearCaches()
       AppDelegate.gradingContext.clearCaches()
@@ -4393,6 +4498,9 @@ struct FilmStockParams {
   let bloom: Double
   let vignette: Double
   let soften: Double
+  /// Optional 3D Hue-Compression profile applied inside the 33³ LUT cube
+  /// for true non-linear cinema color separation (Orange & Teal, Cool Cinema, etc.).
+  var hueProfile: String? = nil
 }
 
 extension FilmStockParams {
@@ -4426,7 +4534,8 @@ extension FilmStockParams {
       halation: effects.halation,
       bloom: effects.bloom,
       vignette: effects.vignette,
-      soften: soften
+      soften: soften,
+      hueProfile: hueProfile
     )
   }
 }
@@ -5057,11 +5166,217 @@ enum FilmEngine {
     outG += p.shadowTint[1] * shadowWeight + p.hlTint[1] * highlightWeight
     outB += p.shadowTint[2] * shadowWeight + p.hlTint[2] * highlightWeight
 
+    if let profile = p.hueProfile {
+      let sculpted = applyHueProfile(
+        r: min(max(outR, 0.0), 1.0),
+        g: min(max(outG, 0.0), 1.0),
+        b: min(max(outB, 0.0), 1.0),
+        luma: luma,
+        profile: profile
+      )
+      outR = sculpted.0
+      outG = sculpted.1
+      outB = sculpted.2
+    }
+
     let span = p.white - p.black
     func finish(_ v: Double) -> Double {
       min(max(p.black + v * span, 0.0), 1.0)
     }
     return (finish(outR), finish(outG), finish(outB))
+  }
+
+  /// RGB (0..1) <-> HSV (H in 0..360, S in 0..1, V in 0..1) helpers for
+  /// non-linear 3D LUT hue compression (zero runtime GPU overhead!).
+  private static func rgbToHsv(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double, Double) {
+    let maxC = max(r, max(g, b))
+    let minC = min(r, min(g, b))
+    let delta = maxC - minC
+    let v = maxC
+    let s = maxC > 1e-6 ? (delta / maxC) : 0.0
+    var h = 0.0
+    if delta > 1e-6 {
+      if maxC == r {
+        h = 60.0 * (((g - b) / delta).truncatingRemainder(dividingBy: 6.0))
+      } else if maxC == g {
+        h = 60.0 * (((b - r) / delta) + 2.0)
+      } else {
+        h = 60.0 * (((r - g) / delta) + 4.0)
+      }
+      if h < 0 { h += 360.0 }
+    }
+    return (h, s, v)
+  }
+
+  private static func hsvToRgb(_ h: Double, _ s: Double, _ v: Double) -> (Double, Double, Double) {
+    var hh = h.truncatingRemainder(dividingBy: 360.0)
+    if hh < 0 { hh += 360.0 }
+    let c = v * s
+    let x = c * (1.0 - abs((hh / 60.0).truncatingRemainder(dividingBy: 2.0) - 1.0))
+    let m = v - c
+    let (r1, g1, b1): (Double, Double, Double)
+    switch hh {
+    case 0..<60: (r1, g1, b1) = (c, x, 0)
+    case 60..<120: (r1, g1, b1) = (x, c, 0)
+    case 120..<180: (r1, g1, b1) = (0, c, x)
+    case 180..<240: (r1, g1, b1) = (0, x, c)
+    case 240..<300: (r1, g1, b1) = (x, 0, c)
+    default: (r1, g1, b1) = (c, 0, x)
+    }
+    return (r1 + m, g1 + m, b1 + m)
+  }
+
+  private static func shortestHueDelta(from h: Double, to target: Double) -> Double {
+    var d = (target - h).truncatingRemainder(dividingBy: 360.0)
+    if d > 180.0 { d -= 360.0 }
+    if d < -180.0 { d += 360.0 }
+    return d
+  }
+
+  private static func hueBell(_ h: Double, center: Double, halfWidth: Double) -> Double {
+    let dist = abs(shortestHueDelta(from: h, to: center))
+    if dist >= halfWidth { return 0.0 }
+    let t = 1.0 - (dist / halfWidth)
+    return t * t * (3.0 - 2.0 * t)
+  }
+
+  /// Non-linear 3D Cinema Hue Compression & Selective Color Separation.
+  ///
+  /// Maps exact target palettes:
+  /// - `teal_orange`: SchemeColor #FD5901/#F78104/#FAAB36 (21°–36°) vs #249EA0/#008083/#005F60 (181°)
+  /// - `metro_teal`: Night light-trails deep petrol #005F60 + electric cyan #249EA0 + fiery #FD5901
+  /// - `rooftop_cyan`: Blue-hour twilight cyan-slate #008083/#249EA0 + ivory-peach skin + amber bokeh
+  /// - `nordic_ice`: Pure cold Scandinavian steel-blue & pine-slate (zero warm cast)
+  /// - `tokyo_petrol`: Cool tungsten emerald-petrol shadows + crisp cyan whites + crimson neon
+  /// - `cool_chrome`: Crisp neutral-cool daylight slide (pure whites, cobalt skies, zero yellow)
+  private static func applyHueProfile(
+    r: Double,
+    g: Double,
+    b: Double,
+    luma: Double,
+    profile: String
+  ) -> (Double, Double, Double) {
+    var (h, s, v) = rgbToHsv(r, g, b)
+    let chromaMask = smoothstep(0.04, 0.22, s)
+    let shadowMask = 1.0 - smoothstep(0.06, 0.52, luma)
+    let midMask = smoothstep(0.08, 0.35, luma) * (1.0 - smoothstep(0.62, 0.92, luma))
+    let hlMask = smoothstep(0.50, 0.92, luma)
+
+    switch profile {
+    case "teal_orange":
+      // Exact SchemeColor Orange & Teal (#FD5901 / #F78104 / #FAAB36 vs #249EA0 / #008083 / #005F60)
+      let tealZone = hueBell(h, center: 185.0, halfWidth: 96.0)
+      let greenZone = hueBell(h, center: 118.0, halfWidth: 52.0)
+      let warmZone = hueBell(h, center: 28.0, halfWidth: 52.0)
+      let skinZone = hueBell(h, center: 24.0, halfWidth: 16.0) * smoothstep(0.28, 0.52, luma) * (1.0 - smoothstep(0.45, 0.78, s))
+
+      // Pull blues & greens cleanly toward pure 181° cinema teal (#008083 / #249EA0)
+      h += shortestHueDelta(from: h, to: 181.0) * (0.64 * tealZone + 0.56 * greenZone) * chromaMask
+      // Pull reds & yellows cleanly toward 28° tangerine-amber (#FD5901 -> #FAAB36)
+      let orangeTarget = 22.0 + 14.0 * hlMask
+      h += shortestHueDelta(from: h, to: orangeTarget) * 0.58 * warmZone * chromaMask
+
+      // Lush teal & vivid orange saturation, while protecting skin from turning carrot-orange
+      let tealBoost = 1.0 + 0.24 * (tealZone + greenZone * 0.6) * (0.65 + 0.35 * shadowMask)
+      let orangeBoost = 1.0 + 0.22 * warmZone * (1.0 - 0.72 * skinZone)
+      s = min(s * tealBoost * orangeBoost, 1.0)
+      // Deepen petrol teal shadows (#005F60) slightly for cinematic density
+      v = min(max(v * (1.0 - 0.07 * tealZone * shadowMask + 0.04 * warmZone * hlMask), 0.0), 1.0)
+
+    case "metro_teal":
+      // Photo #1: Night urban light-trails — deep abyss petrol #005F60, electric #249EA0, blazing #FD5901
+      let coolZone = hueBell(h, center: 192.0, halfWidth: 105.0)
+      let warmZone = hueBell(h, center: 24.0, halfWidth: 56.0)
+      h += shortestHueDelta(from: h, to: 184.0) * 0.72 * coolZone * chromaMask
+      let fireTarget = 18.0 + 16.0 * hlMask // #FD5901 -> #FAAB36
+      h += shortestHueDelta(from: h, to: fireTarget) * 0.65 * warmZone * chromaMask
+      s = min(s * (1.0 + 0.30 * coolZone * (0.5 + 0.5 * midMask) + 0.28 * warmZone * (0.4 + 0.6 * hlMask)), 1.0)
+      v = min(max(v * (1.0 - 0.10 * coolZone * shadowMask + 0.06 * warmZone * hlMask), 0.0), 1.0)
+
+    case "rooftop_cyan":
+      // Photo #2: Blue-hour rooftop portrait — cool cyan-slate concrete/sky (#008083/#249EA0),
+      // clean luminous ivory-peach skin, glowing golden city bokeh (#F78104/#FAAB36)
+      let coolZone = hueBell(h, center: 196.0, halfWidth: 102.0)
+      let warmZone = hueBell(h, center: 30.0, halfWidth: 48.0)
+      let skinZone = hueBell(h, center: 22.0, halfWidth: 18.0) * smoothstep(0.28, 0.60, luma) * (1.0 - smoothstep(0.36, 0.70, s))
+      h += shortestHueDelta(from: h, to: 188.0) * 0.62 * coolZone * chromaMask
+      h += shortestHueDelta(from: h, to: 32.0) * 0.42 * warmZone * (1.0 - 0.75 * skinZone) * chromaMask
+      // Keep skin bright & natural; enrich cyan twilight & glowing amber lights
+      s = min(s * (1.0 + 0.22 * coolZone + 0.20 * warmZone * (1.0 - 0.85 * skinZone) - 0.10 * skinZone), 1.0)
+      v = min(max(v * (1.0 + 0.06 * skinZone - 0.05 * coolZone * shadowMask), 0.0), 1.0)
+
+    case "nordic_ice":
+      // Pure Cold Scandinavian Cinema: icy steel-blue 205°, dark pine-slate greens, ZERO warmth
+      let blueZone = hueBell(h, center: 210.0, halfWidth: 85.0)
+      let greenZone = hueBell(h, center: 115.0, halfWidth: 58.0)
+      let warmZone = hueBell(h, center: 36.0, halfWidth: 54.0)
+      h += shortestHueDelta(from: h, to: 204.0) * 0.55 * blueZone * chromaMask
+      h += shortestHueDelta(from: h, to: 168.0) * 0.45 * greenZone * chromaMask
+      // Cool down & gently desaturate yellows/oranges so nothing looks warm
+      s = min(max(s * (1.0 + 0.14 * blueZone - 0.34 * greenZone - 0.28 * warmZone), 0.0), 1.0)
+      v = min(max(v * (1.0 - 0.06 * greenZone), 0.0), 1.0)
+
+    case "tokyo_petrol":
+      // Cool Tungsten Night 500T: emerald-petrol shadows (174°), cool cyan highlights, crimson neon
+      let coolZone = hueBell(h, center: 180.0, halfWidth: 92.0)
+      let yellowZone = hueBell(h, center: 54.0, halfWidth: 32.0)
+      let redZone = hueBell(h, center: 356.0, halfWidth: 28.0)
+      h += shortestHueDelta(from: h, to: 176.0) * 0.62 * coolZone * chromaMask
+      h += shortestHueDelta(from: h, to: 34.0) * 0.35 * yellowZone * chromaMask
+      s = min(max(s * (1.0 + 0.20 * coolZone + 0.24 * redZone - 0.18 * yellowZone), 0.0), 1.0)
+      v = min(max(v * (1.0 - 0.06 * coolZone * shadowMask), 0.0), 1.0)
+
+    case "cool_chrome":
+      // Crisp Neutral-Cool Daylight Slide: cobalt skies, clean whites, zero yellow cast
+      let skyZone = hueBell(h, center: 210.0, halfWidth: 65.0)
+      let yellowZone = hueBell(h, center: 56.0, halfWidth: 34.0)
+      h += shortestHueDelta(from: h, to: 202.0) * 0.35 * skyZone * chromaMask
+      s = min(max(s * (1.0 + 0.16 * skyZone - 0.14 * yellowZone), 0.0), 1.0)
+
+    default:
+      break
+    }
+
+    var (nr, ng, nb) = hsvToRgb(h, s, v)
+
+    // Inject cool petrol-teal / slate-cyan into neutral low-saturation shadows & concrete
+    // (because pure greys have S=0 so HSV rotation alone cannot tint neutral concrete/asphalt!)
+    switch profile {
+    case "teal_orange":
+      let nMask = (1.0 - smoothstep(0.18, 0.55, s)) * shadowMask
+      nr -= 0.042 * nMask
+      ng += 0.018 * nMask
+      nb += 0.024 * nMask
+    case "metro_teal":
+      let nMask = (1.0 - smoothstep(0.22, 0.60, s)) * (0.75 * shadowMask + 0.25 * midMask)
+      nr -= 0.056 * nMask
+      ng += 0.022 * nMask
+      nb += 0.028 * nMask
+    case "rooftop_cyan":
+      let nMask = (1.0 - smoothstep(0.16, 0.48, s)) * (0.55 * shadowMask + 0.45 * midMask)
+      nr -= 0.048 * nMask
+      ng += 0.016 * nMask
+      nb += 0.032 * nMask
+    case "nordic_ice":
+      let nMask = (1.0 - smoothstep(0.18, 0.50, s))
+      nr -= 0.030 * nMask * (0.65 * shadowMask + 0.35 * midMask)
+      ng += 0.004 * nMask * midMask
+      nb += 0.034 * nMask * (0.55 * shadowMask + 0.45 * midMask)
+    case "tokyo_petrol":
+      let nMask = (1.0 - smoothstep(0.20, 0.55, s)) * shadowMask
+      nr -= 0.045 * nMask
+      ng += 0.022 * nMask
+      nb += 0.020 * nMask
+    case "cool_chrome":
+      let nMask = (1.0 - smoothstep(0.18, 0.48, s)) * (0.5 * shadowMask + 0.5 * hlMask)
+      nr -= 0.016 * nMask
+      ng += 0.004 * nMask
+      nb += 0.020 * nMask
+    default:
+      break
+    }
+
+    return (min(max(nr, 0.0), 1.0), min(max(ng, 0.0), 1.0), min(max(nb, 0.0), 1.0))
   }
 
   /// 33^3 RGBA float cube, red varying fastest (the layout Core Image expects),
@@ -5605,15 +5920,76 @@ enum FilmEngine {
         vignette: 0.2, soften: 0.12
       ),
       "teal_orange": FilmStockParams(
-        mix: [1.12, -0.06, -0.06, -0.04, 1.04, 0.0, -0.12, 0.06, 1.06],
+        mix: [1.06, -0.02, -0.04, -0.02, 1.04, -0.02, -0.08, 0.04, 1.04],
+        ev: -0.03,
+        k: [6.4, 6.2, 6.0], pivot: [0.51, 0.52, 0.53],
+        sat: 1.08, hlDesat: 0.10, shDesat: 0.04,
+        shadowTint: [-0.055, 0.024, 0.030], hlTint: [0.048, 0.020, -0.038],
+        black: 0.004, white: 0.985, mono: nil,
+        grain: 0.14, grainSize: 0.70,
+        halation: 0.28, bloom: 0.08,
+        vignette: 0.20, soften: 0.0,
+        hueProfile: "teal_orange"
+      ),
+      "metro_teal": FilmStockParams(
+        mix: [1.05, -0.03, -0.02, -0.03, 1.05, -0.02, -0.07, 0.04, 1.04],
+        ev: -0.06,
+        k: [6.8, 6.6, 6.4], pivot: [0.50, 0.52, 0.53],
+        sat: 1.12, hlDesat: 0.08, shDesat: 0.02,
+        shadowTint: [-0.068, 0.024, 0.032], hlTint: [0.036, 0.010, -0.024],
+        black: 0.0, white: 0.99, mono: nil,
+        grain: 0.12, grainSize: 0.65,
+        halation: 0.44, bloom: 0.12,
+        vignette: 0.24, soften: 0.0,
+        hueProfile: "metro_teal"
+      ),
+      "rooftop_cyan": FilmStockParams(
+        mix: [1.02, -0.01, -0.01, -0.02, 1.04, -0.01, -0.04, 0.03, 1.03],
         ev: -0.02,
-        k: [6.0, 5.6, 5.6], pivot: [0.52, 0.54, 0.55],
-        sat: 1.1, hlDesat: 0.18, shDesat: 0.05,
-        shadowTint: [-0.065, 0.032, 0.1], hlTint: [0.095, 0.034, -0.085],
-        black: 0.012, white: 0.97, mono: nil,
-        grain: 0.24, grainSize: 1.0,
-        halation: 0.4, bloom: 0.14,
-        vignette: 0.22, soften: 0.08
+        k: [6.2, 6.1, 5.9], pivot: [0.51, 0.52, 0.52],
+        sat: 1.06, hlDesat: 0.12, shDesat: 0.06,
+        shadowTint: [-0.058, 0.018, 0.038], hlTint: [0.014, 0.008, -0.008],
+        black: 0.006, white: 0.985, mono: nil,
+        grain: 0.12, grainSize: 0.65,
+        halation: 0.24, bloom: 0.08,
+        vignette: 0.20, soften: 0.0,
+        hueProfile: "rooftop_cyan"
+      ),
+      "nordic_ice": FilmStockParams(
+        mix: [0.98, 0.01, 0.01, -0.01, 1.02, 0.0, -0.03, 0.02, 1.04],
+        ev: -0.04,
+        k: [6.3, 6.2, 6.0], pivot: [0.51, 0.51, 0.50],
+        sat: 0.92, hlDesat: 0.14, shDesat: 0.12,
+        shadowTint: [-0.036, 0.002, 0.040], hlTint: [-0.014, 0.004, 0.022],
+        black: 0.006, white: 0.99, mono: nil,
+        grain: 0.10, grainSize: 0.60,
+        halation: 0.08, bloom: 0.02,
+        vignette: 0.18, soften: 0.0,
+        hueProfile: "nordic_ice"
+      ),
+      "tokyo_petrol": FilmStockParams(
+        mix: [1.02, -0.02, 0.0, -0.02, 1.05, -0.02, -0.04, 0.03, 1.03],
+        ev: -0.03,
+        k: [6.2, 6.1, 6.0], pivot: [0.51, 0.52, 0.52],
+        sat: 1.06, hlDesat: 0.14, shDesat: 0.05,
+        shadowTint: [-0.052, 0.026, 0.024], hlTint: [-0.010, 0.012, 0.016],
+        black: 0.008, white: 0.985, mono: nil,
+        grain: 0.20, grainSize: 0.80,
+        halation: 0.42, bloom: 0.10,
+        vignette: 0.22, soften: 0.0,
+        hueProfile: "tokyo_petrol"
+      ),
+      "cool_chrome": FilmStockParams(
+        mix: [1.02, -0.02, 0.0, -0.01, 1.03, -0.02, -0.02, 0.0, 1.04],
+        ev: -0.02,
+        k: [6.4, 6.4, 6.2], pivot: [0.52, 0.52, 0.51],
+        sat: 1.04, hlDesat: 0.12, shDesat: 0.08,
+        shadowTint: [-0.022, 0.004, 0.028], hlTint: [-0.008, 0.002, 0.014],
+        black: 0.004, white: 0.992, mono: nil,
+        grain: 0.08, grainSize: 0.55,
+        halation: 0.10, bloom: 0.03,
+        vignette: 0.12, soften: 0.0,
+        hueProfile: "cool_chrome"
       ),
       "fuji_velvia": FilmStockParams(
         mix: [1.1, -0.06, -0.04, -0.05, 1.12, -0.07, -0.04, -0.08, 1.12],
@@ -9586,6 +9962,7 @@ final class NativeCinemaCameraEngine: NSObject,
   private var zebraStripes = false
   private var falseColor = false
   private var liveScopeEnabled = false
+  private var splitCompareEnabled = false
   private var frameAspectRatio: Double = 0.0
   private var trueCrop: Bool = false
 
@@ -9604,8 +9981,15 @@ final class NativeCinemaCameraEngine: NSObject,
   private var latestVisionMatte: CIImage?
   private var gradingGeneration: Int = 0
 
-  // Single-session AVAssetWriter video recording state
+  // Single-session AVAssetWriter video recording state (with Pause/Resume & Timelapse!)
   private var isRecording = false
+  private var isRecordingPaused = false
+  private var needsPauseOffsetUpdate = false
+  private var pausedAccumulatedOffset: CMTime = .zero
+  private var lastWrittenVideoPTS: CMTime?
+  private var timelapseInterval: Double = 0.0
+  private var lastTimelapseWallTime: CFTimeInterval = 0.0
+  private var timelapseFrameIndex: Int64 = 0
   private var burnLutOnRecord = true
   private var recordWriter: AVAssetWriter?
   private var recordVideoInput: AVAssetWriterInput?
@@ -9891,17 +10275,18 @@ final class NativeCinemaCameraEngine: NSObject,
       }
     }
     if let u = ultra {
-      list.append(["id": u.uniqueID, "label": "0.5×", "initialZoom": 1.0, "position": "back"])
+      list.append(["id": u.uniqueID, "label": "0.5×", "focalMm": 13, "initialZoom": 1.0, "position": "back"])
     }
     if let w = wide {
-      list.append(["id": w.uniqueID, "label": "1×", "initialZoom": 1.0, "position": "back"])
-      list.append(["id": "\(w.uniqueID)#2x", "label": "2×", "initialZoom": 2.0, "position": "back"])
+      list.append(["id": w.uniqueID, "label": "1×", "focalMm": 24, "initialZoom": 1.0, "position": "back"])
+      list.append(["id": "\(w.uniqueID)#1.5x", "label": "35mm", "focalMm": 35, "initialZoom": 1.46, "position": "back"])
+      list.append(["id": "\(w.uniqueID)#2x", "label": "2×", "focalMm": 48, "initialZoom": 2.0, "position": "back"])
     }
     if let t = tele {
-      list.append(["id": t.uniqueID, "label": "3×", "initialZoom": 1.0, "position": "back"])
+      list.append(["id": t.uniqueID, "label": "3×", "focalMm": 77, "initialZoom": 1.0, "position": "back"])
     }
     if list.isEmpty, let fallback = AVCaptureDevice.default(for: .video) {
-      list.append(["id": fallback.uniqueID, "label": "1×", "initialZoom": 1.0, "position": "back"])
+      list.append(["id": fallback.uniqueID, "label": "1×", "focalMm": 24, "initialZoom": 1.0, "position": "back"])
     }
     return list
   }
@@ -10349,6 +10734,88 @@ final class NativeCinemaCameraEngine: NSObject,
     return triggerRackFocus(x: clampedX, y: clampedY, forceBackground: nil)
   }
 
+  /// Long-Press AE/AF Lock: locks focus + exposure at `(x, y)` (4-orientation mapped),
+  /// or unlocks back to smooth continuous AF/AE when `locked == false`.
+  func setAeAfLock(locked: Bool, x: Double, y: Double) {
+    let clampedX = min(max(x, 0.0), 1.0)
+    let clampedY = min(max(y, 0.0), 1.0)
+    let orient = Self.resolveMainThreadOrientation()
+    let sensorPoint: CGPoint
+    switch orient {
+    case .landscapeRight:
+      sensorPoint = CGPoint(x: clampedX, y: clampedY)
+    case .landscapeLeft:
+      sensorPoint = CGPoint(x: 1.0 - clampedX, y: 1.0 - clampedY)
+    case .portraitUpsideDown:
+      sensorPoint = CGPoint(x: 1.0 - clampedY, y: clampedX)
+    default:
+      sensorPoint = CGPoint(x: clampedY, y: 1.0 - clampedX)
+    }
+
+    sessionQueue.async { [weak self] in
+      guard let self = self, let device = self.activeDevice else { return }
+      do {
+        try device.lockForConfiguration()
+        if locked {
+          if device.isFocusPointOfInterestSupported {
+            device.focusPointOfInterest = sensorPoint
+          }
+          if device.isExposurePointOfInterestSupported {
+            device.exposurePointOfInterest = sensorPoint
+          }
+          if device.isFocusModeSupported(.autoFocus) {
+            device.focusMode = .autoFocus
+          } else if device.isFocusModeSupported(.locked) {
+            device.focusMode = .locked
+          }
+          if device.isExposureModeSupported(.autoExpose) {
+            device.exposureMode = .autoExpose
+          } else if device.isExposureModeSupported(.locked) {
+            device.exposureMode = .locked
+          }
+        } else {
+          if device.isFocusModeSupported(.continuousAutoFocus) {
+            device.focusMode = .continuousAutoFocus
+          }
+          if device.isExposureModeSupported(.continuousAutoExposure) {
+            device.exposureMode = .continuousAutoExposure
+          }
+        }
+        device.unlockForConfiguration()
+      } catch {}
+
+      // Lock solidly once auto-focus/auto-expose settles on the subject (~350ms).
+      if locked {
+        self.sessionQueue.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+          guard let self = self, let dev = self.activeDevice else { return }
+          do {
+            try dev.lockForConfiguration()
+            if dev.focusMode == .autoFocus && dev.isFocusModeSupported(.locked) {
+              dev.focusMode = .locked
+            }
+            if dev.exposureMode == .autoExpose && dev.isExposureModeSupported(.locked) {
+              dev.exposureMode = .locked
+            }
+            dev.unlockForConfiguration()
+          } catch {}
+        }
+      }
+    }
+  }
+
+  static func availableStorageMB() -> Double {
+    let url = URL(fileURLWithPath: NSHomeDirectory())
+    if let vals = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+       let bytes = vals.volumeAvailableCapacityForImportantUsage {
+      return Double(bytes) / (1024.0 * 1024.0)
+    }
+    if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+       let free = attrs[.systemFreeSize] as? NSNumber {
+      return free.doubleValue / (1024.0 * 1024.0)
+    }
+    return 0.0
+  }
+
   /// Samples a clean 3×3 median/average normalized disparity (0.05..0.95) at `(x, y)`
   /// from hardware LiDAR `DisparityFloat32` (1/meters). Returns nil if invalid/empty.
   private static func sampleNormalizedDisparity(
@@ -10432,6 +10899,7 @@ final class NativeCinemaCameraEngine: NSObject,
     if let v = args["zebraStripes"] as? Bool { zebraStripes = v }
     if let v = args["falseColor"] as? Bool { falseColor = v }
     if let v = args["liveScope"] as? Bool { liveScopeEnabled = v }
+    if let v = args["splitCompare"] as? Bool { splitCompareEnabled = v }
     if let v = args["frameAspectRatio"] as? NSNumber { frameAspectRatio = v.doubleValue }
     if let v = args["anamorphicCrop"] as? Bool { trueCrop = v }
     if let v = args["apertureFStop"] as? NSNumber {
@@ -10699,6 +11167,7 @@ final class NativeCinemaCameraEngine: NSObject,
     let fps = (args["fps"] as? NSNumber)?.intValue ?? currentFps
     let bitrate = (args["bitrate"] as? NSNumber)?.intValue ?? 45_000_000
     let burnLut = (args["burnLut"] as? Bool) ?? true
+    let tlInterval = (args["timelapseInterval"] as? NSNumber)?.doubleValue ?? 0.0
 
     stateLock.lock()
     if isRecording && recordWriter != nil {
@@ -10717,6 +11186,13 @@ final class NativeCinemaCameraEngine: NSObject,
     recordFps = max(fps, 1)
     recordBitrate = max(bitrate, 12_000_000)
     burnLutOnRecord = burnLut
+    timelapseInterval = max(0.0, tlInterval)
+    lastTimelapseWallTime = 0.0
+    timelapseFrameIndex = 0
+    isRecordingPaused = false
+    needsPauseOffsetUpdate = false
+    pausedAccumulatedOffset = .zero
+    lastWrittenVideoPTS = nil
     recordURL = FileManager.default.temporaryDirectory
       .appendingPathComponent("CINELENS_REC_\(Int(Date().timeIntervalSince1970)).mov")
     recordWriter = nil
@@ -10754,10 +11230,29 @@ final class NativeCinemaCameraEngine: NSObject,
     }
   }
 
+  func pauseVideoRecording() {
+    stateLock.lock()
+    if isRecording && !isRecordingPaused {
+      isRecordingPaused = true
+    }
+    stateLock.unlock()
+  }
+
+  func resumeVideoRecording() {
+    stateLock.lock()
+    if isRecording && isRecordingPaused {
+      isRecordingPaused = false
+      needsPauseOffsetUpdate = true
+    }
+    stateLock.unlock()
+  }
+
   func stopVideoRecording(result: @escaping FlutterResult) {
     stateLock.lock()
     let active = isRecording
     isRecording = false
+    isRecordingPaused = false
+    needsPauseOffsetUpdate = false
     recordStartResult = nil
     stateLock.unlock()
 
@@ -10832,10 +11327,44 @@ final class NativeCinemaCameraEngine: NSObject,
     }
   }
 
+  private static func shiftSampleBuffer(_ sample: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer? {
+    if CMTimeCompare(offset, .zero) == 0 { return sample }
+    var count: CMItemCount = 0
+    CMSampleBufferGetSampleTimingInfoArray(sample, entryCount: 0, arrayToFill: nil, entriesNeededOut: &count)
+    guard count > 0 else { return sample }
+    var info = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: Int(count))
+    guard CMSampleBufferGetSampleTimingInfoArray(
+      sample,
+      entryCount: count,
+      arrayToFill: &info,
+      entriesNeededOut: &count
+    ) == noErr else {
+      return sample
+    }
+    for i in 0..<Int(count) {
+      if info[i].presentationTimeStamp.isValid {
+        info[i].presentationTimeStamp = CMTimeSubtract(info[i].presentationTimeStamp, offset)
+      }
+      if info[i].decodeTimeStamp.isValid {
+        info[i].decodeTimeStamp = CMTimeSubtract(info[i].decodeTimeStamp, offset)
+      }
+    }
+    var out: CMSampleBuffer?
+    let status = CMSampleBufferCreateCopyWithNewTiming(
+      allocator: kCFAllocatorDefault,
+      sampleBuffer: sample,
+      sampleTimingEntryCount: count,
+      sampleTimingArray: &info,
+      sampleBufferOut: &out
+    )
+    return status == noErr ? out : nil
+  }
+
   private func handleAudioSample(_ sampleBuffer: CMSampleBuffer) {
     guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
     stateLock.lock()
-    let rec = isRecording
+    let rec = isRecording && !isRecordingPaused && timelapseInterval <= 0.0 && !needsPauseOffsetUpdate
+    let offset = pausedAccumulatedOffset
     stateLock.unlock()
     guard rec else { return }
 
@@ -10845,13 +11374,14 @@ final class NativeCinemaCameraEngine: NSObject,
       let writer = self.recordWriter
       let aIn = self.recordAudioInput
       let start = self.recordStartPTS
-      let stillRec = self.isRecording
+      let stillRec = self.isRecording && !self.isRecordingPaused && self.timelapseInterval <= 0.0
       self.stateLock.unlock()
       guard stillRec, let w = writer, w.status == .writing,
             let audioIn = aIn, let sPTS = start else { return }
-      let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+      guard let adjusted = Self.shiftSampleBuffer(sampleBuffer, by: offset) else { return }
+      let pts = CMSampleBufferGetPresentationTimeStamp(adjusted)
       if CMTimeCompare(pts, sPTS) >= 0 && audioIn.isReadyForMoreMediaData {
-        audioIn.append(sampleBuffer)
+        audioIn.append(adjusted)
       }
     }
   }
@@ -10863,6 +11393,8 @@ final class NativeCinemaCameraEngine: NSObject,
     guard CMSampleBufferDataIsReady(sampleBuffer),
           let srcBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+    let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
     stateLock.lock()
     let liveMetal = liveMetalEnabled
     let look = activeLook
@@ -10872,7 +11404,10 @@ final class NativeCinemaCameraEngine: NSObject,
     let zebra = zebraStripes
     let fColor = falseColor
     let wantScope = liveScopeEnabled
+    let splitCmp = splitCompareEnabled
     let recording = isRecording
+    let paused = isRecordingPaused
+    let tlInterval = timelapseInterval
     let burnLut = burnLutOnRecord
     let cineOn = cinematicActive
     let fStop = apertureFStop
@@ -10885,8 +11420,6 @@ final class NativeCinemaCameraEngine: NSObject,
     lastRackTime = now
     if let disp = hardwareDisparity {
       latestDisparityBuffer = disp
-      // Live continuous LiDAR auto-tracking: when not manually rack-locked, smoothly
-      // track the real metric disparity of the subject at `(focusTargetX, focusTargetY)`!
       if cineOn && now > manualRackLockUntil && (frameCounter % 3 == 0) {
         if let sampled = Self.sampleNormalizedDisparity(from: disp, x: focusTargetX, y: focusTargetY) {
           targetFocusDisparity = targetFocusDisparity * 0.72 + sampled * 0.28
@@ -10912,8 +11445,37 @@ final class NativeCinemaCameraEngine: NSObject,
     frameCounter &+= 1
     let fIdx = frameCounter
 
-    let wantsGpuGrade = liveMetal || cineOn || peaking || zebra || fColor || wantScope || isLog
-    let canWrite = recording && !isWritingFrame
+    // Determine write eligibility & seamless PTS (handles Pause/Resume + 4K Timelapse!)
+    var shouldWriteFrame = false
+    var writePTS = rawPTS
+    if recording && !paused && !isWritingFrame {
+      if tlInterval > 0.0 {
+        if timelapseFrameIndex == 0 || (now - lastTimelapseWallTime) >= tlInterval {
+          lastTimelapseWallTime = now
+          writePTS = CMTime(value: timelapseFrameIndex, timescale: CMTimeScale(max(recordFps, 1)))
+          timelapseFrameIndex += 1
+          shouldWriteFrame = true
+        }
+      } else {
+        if needsPauseOffsetUpdate {
+          if let lastPTS = lastWrittenVideoPTS {
+            let frameDur = CMTime(value: 1, timescale: CMTimeScale(max(recordFps, 1)))
+            let expectedNext = CMTimeAdd(lastPTS, frameDur)
+            let candidate = CMTimeSubtract(rawPTS, pausedAccumulatedOffset)
+            let gap = CMTimeSubtract(candidate, expectedNext)
+            if CMTimeCompare(gap, .zero) > 0 {
+              pausedAccumulatedOffset = CMTimeAdd(pausedAccumulatedOffset, gap)
+            }
+          }
+          needsPauseOffsetUpdate = false
+        }
+        writePTS = CMTimeSubtract(rawPTS, pausedAccumulatedOffset)
+        shouldWriteFrame = true
+      }
+    }
+
+    let wantsGpuGrade = liveMetal || cineOn || peaking || zebra || fColor || wantScope || isLog || splitCmp
+    let canWrite = shouldWriteFrame
     if canWrite { isWritingFrame = true }
     let canPreview = wantsGpuGrade && !isRenderingPreview
     if canPreview { isRenderingPreview = true }
@@ -10950,7 +11512,7 @@ final class NativeCinemaCameraEngine: NSObject,
 
     let rawCI = CIImage(cvPixelBuffer: srcBuffer)
     let dispCI = hardwareDisparity.map { CIImage(cvPixelBuffer: $0) }
-    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    let pts = writePTS
 
     // 1. Async Single-Session HEVC Video Writer (never stalls videoQueue!)
     if canWrite {
@@ -11030,6 +11592,19 @@ final class NativeCinemaCameraEngine: NSObject,
           }
 
           var displayImage = Self.gradeLiveImage(ci, look: look, matrix: matrix, forPreview: true)
+
+          // Live 50/50 Before | After LUT Split-Screen Preview (left: RAW sensor, right: 3D LUT)
+          if splitCmp {
+            let splitX = floor(extent.midX)
+            let leftRect = CGRect(x: extent.minX, y: extent.minY, width: max(1, splitX - extent.minX), height: extent.height)
+            let dividerRect = CGRect(x: splitX - 1.0, y: extent.minY, width: 2.0, height: extent.height)
+            let amberLine = CIImage(color: CIColor(red: 0.90, green: 0.66, blue: 0.23, alpha: 0.95))
+              .cropped(to: dividerRect)
+            let rawLeft = ci.cropped(to: leftRect)
+            displayImage = amberLine
+              .composited(over: rawLeft.composited(over: displayImage))
+              .cropped(to: extent)
+          }
 
           if fColor, let fcCube = Self.falseColorCube(),
              let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
@@ -11430,17 +12005,19 @@ final class NativeCinemaCameraEngine: NSObject,
             kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
           ]
         )
-        let audioSettings: [String: Any] = [
-          AVFormatIDKey: kAudioFormatMPEG4AAC,
-          AVNumberOfChannelsKey: 1,
-          AVSampleRateKey: 44100,
-          AVEncoderBitRateKey: 192000,
-        ]
-        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-        aIn.expectsMediaDataInRealTime = true
-        if writer.canAdd(aIn) {
-          writer.add(aIn)
-          recordAudioInput = aIn
+        if timelapseInterval <= 0.0 {
+          let audioSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVNumberOfChannelsKey: 1,
+            AVSampleRateKey: 44100,
+            AVEncoderBitRateKey: 192000,
+          ]
+          let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+          aIn.expectsMediaDataInRealTime = true
+          if writer.canAdd(aIn) {
+            writer.add(aIn)
+            recordAudioInput = aIn
+          }
         }
         if writer.startWriting() {
           writer.startSession(atSourceTime: pts)
@@ -11488,7 +12065,9 @@ final class NativeCinemaCameraEngine: NSObject,
 
     stateLock.lock()
     if isRecording, recordWriter?.status == .writing, recordVideoInput?.isReadyForMoreMediaData == true {
-      recordAdaptor?.append(pixelBuf, withPresentationTime: pts)
+      if recordAdaptor?.append(pixelBuf, withPresentationTime: pts) == true {
+        lastWrittenVideoPTS = pts
+      }
     }
     stateLock.unlock()
   }

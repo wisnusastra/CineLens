@@ -1,5 +1,6 @@
 import 'package:cinelens_ios/core/l10n/app_strings.dart';
 import 'package:cinelens_ios/features/cinema_camera/data/datasources/cinema_tones_preset_source.dart';
+import 'package:cinelens_ios/features/cinema_camera/domain/entities/camera_recipe.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/cinema_tone.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/film_look.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/frame_format.dart';
@@ -165,15 +166,58 @@ void main() {
     });
 
     test('v3.3 native camera enums & OpticalLensOption work cleanly (PHOTO + VIDEO)', () {
-      const lens = OpticalLensOption(id: 'wide#2x', label: '2×', initialZoom: 2.0);
-      expect(lens.id, 'wide#2x');
-      expect(lens.label, '2×');
-      expect(lens.initialZoom, 2.0);
+      const lens = OpticalLensOption(
+        id: 'wide#1.5x',
+        label: '35mm',
+        initialZoom: 1.46,
+        focalMm: 35,
+      );
+      expect(lens.id, 'wide#1.5x');
+      expect(lens.label, '35mm');
+      expect(lens.focalLabel, '35mm');
+      expect(lens.initialZoom, closeTo(1.46, 1e-6));
       expect(CameraLensDirection.values, hasLength(2));
       expect(FlashMode.values, containsAll(<FlashMode>[FlashMode.off, FlashMode.auto, FlashMode.torch]));
       expect(CinemaCaptureMode.values, hasLength(2));
       expect(CinemaCaptureMode.photo.isPhoto, isTrue);
       expect(CinemaCaptureMode.video24fps.isVideo, isTrue);
+    });
+
+    test('v3.4 Cool Cinema tones, Recipes C1-C4, Favorite ordering & SMPTE timecode', () {
+      final tones = const CinemaTonesPresetSource().getHollywoodTones();
+      final ids = tones.map((t) => t.id).toSet();
+      expect(
+        ids,
+        containsAll(<String>[
+          'teal_orange',
+          'metro_teal',
+          'rooftop_cyan',
+          'nordic_ice',
+          'tokyo_petrol',
+          'cool_chrome',
+        ]),
+      );
+
+      final encoded = CameraRecipe.encodeList(CameraRecipe.defaults);
+      final decoded = CameraRecipe.decodeList(encoded);
+      expect(decoded, hasLength(4));
+      expect(decoded.first.slotCode, 'C1');
+      expect(decoded.first.toneId, 'metro_teal');
+
+      final camState = CinemaCameraState(
+        tones: tones,
+        selectedTone: tones.first,
+        frameRate: CaptureFrameRate.fps24,
+        recordingDuration: const Duration(minutes: 1, seconds: 2, milliseconds: 500),
+        favoriteToneIds: const <String>{'rooftop_cyan', 'nordic_ice'},
+      );
+      expect(camState.smpteTimecode, '00:01:02:12');
+      final ordered = camState.orderedTones;
+      expect(ordered.first.id, 'standard');
+      expect(
+        ordered.sublist(1, 3).map((t) => t.id),
+        containsAll(<String>['rooftop_cyan', 'nordic_ice']),
+      );
     });
   });
 }
