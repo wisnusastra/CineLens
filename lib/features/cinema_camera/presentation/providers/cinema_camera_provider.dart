@@ -1653,7 +1653,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       await setCaptureMode(targetMode);
     }
     if (recipe.isVideo) {
-      await setCaptureQuality(resolution: targetRes, frameRate: targetFps);
+      await setResolution(targetRes);
+      await setFrameRate(targetFps);
     }
     final latest = state.valueOrNull;
     if (!_disposed && latest != null) {
