@@ -102,6 +102,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       favoriteToneIds,
       recipes,
       freeStorageMB,
+      watermarkCfg,
     ) = await (
       repository.getAllTones(),
       repository.loadSavedPreferences(),
@@ -112,6 +113,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       repository.loadFavoriteToneIds(),
       repository.loadCameraRecipes(),
       repository.nativeCameraStorageFreeMB(),
+      repository.loadCameraWatermarkSettings(),
     ).wait;
 
     final selectedTone = tones.firstWhere(
@@ -235,6 +237,10 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       favoriteToneIds: favoriteToneIds,
       recipes: recipes,
       freeStorageMB: freeStorageMB,
+      watermarkStyle: watermarkCfg.style,
+      watermarkTheme: watermarkCfg.theme,
+      watermarkDateStamp: watermarkCfg.dateStamp,
+      photographerSignature: watermarkCfg.signature,
       iso: 400.0.clamp(capabilities.minIso, capabilities.maxIso).toDouble(),
       shutterSeconds: (1 / 48)
           .clamp(
@@ -1592,6 +1598,29 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     state = AsyncData(current.copyWith(timelapseInterval: seconds.clamp(0.0, 30.0)));
   }
 
+  void setCameraWatermark({
+    String? style,
+    String? theme,
+    bool? dateStamp,
+  }) {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(
+      current.copyWith(
+        watermarkStyle: style ?? current.watermarkStyle,
+        watermarkTheme: theme ?? current.watermarkTheme,
+        watermarkDateStamp: dateStamp ?? current.watermarkDateStamp,
+      ),
+    );
+    unawaited(
+      ref.read(cinemaCameraRepositoryProvider).saveCameraWatermarkSettings(
+            style: style,
+            theme: theme,
+            dateStamp: dateStamp,
+          ),
+    );
+  }
+
   Future<void> togglePauseVideoRecording() async {
     final current = state.valueOrNull;
     if (current == null || !current.isRecordingVideo || _proResRecording) return;
@@ -1801,6 +1830,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           'heif10Bit': current.heif10Bit,
           'hiRes48MP': current.hiRes48MP,
           'portraitMode': false,
+          'watermarkStyle': current.watermarkStyle,
+          'watermarkTheme': current.watermarkTheme,
+          'watermarkDateStamp': current.watermarkDateStamp,
+          'watermarkText': current.photographerSignature.isNotEmpty
+              ? current.photographerSignature
+              : (current.selectedTone.id == 'standard'
+                  ? ''
+                  : current.selectedTone.name),
           'quality': 0.96,
         },
       );

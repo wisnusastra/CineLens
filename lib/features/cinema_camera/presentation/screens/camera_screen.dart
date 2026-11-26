@@ -988,6 +988,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           state.captureMode.isPhoto)
         'STACK',
       if (state.heif10Bit && state.captureMode.isPhoto) '10B',
+      if (state.watermarkStyle != 'none' && state.captureMode.isPhoto) 'WM',
       if (state.proResEnabled && state.captureMode.isVideo) 'PRORES',
       if (state.appleLogEnabled) 'LOG',
       if (state.focusPeakingEnabled) 'PEAK',

@@ -27,6 +27,7 @@ import '../widgets/histogram_overlay.dart';
 import '../widgets/mask_overlay_painter.dart';
 import '../widgets/split_compare_view.dart';
 import '../widgets/tone_curve_editor.dart';
+import '../widgets/watermark_frame_picker.dart';
 
 class _EditorSnapshot {
   final PhotoEdit edit;
@@ -3369,45 +3370,20 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
       ),
       if (!_isVideo) ...[
         _sectionLabel(s.frameBorder),
-        SizedBox(
-          height: 36,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            itemCount: 5,
-            separatorBuilder: (_, __) => const SizedBox(width: 6),
-            itemBuilder: (_, idx) {
-              const styles = <(String, String)>[
-                ('none', 'None'),
-                ('leica_white', 'Leica White'),
-                ('dark_matte', 'Dark Matte'),
-                ('film_35mm', '35mm Film'),
-                ('polaroid', 'Polaroid'),
-              ];
-              final (id, label) = styles[idx];
-              final selected = _edit.frameStyle == id;
-              return ChoiceChip(
-                label: Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                selected: selected,
-                selectedColor: AppTheme.cinemaAmber,
-                backgroundColor: Colors.white.withValues(alpha: 0.08),
-                labelStyle: TextStyle(
-                  color: selected ? Colors.black : Colors.white70,
-                ),
-                onSelected: (_) => _update(
-                  _edit.copyWith(frameStyle: id),
-                  immediateUndo: true,
-                ),
-              );
-            },
+        const SizedBox(height: 4),
+        WatermarkFramePicker(
+          selectedStyle: _edit.frameStyle,
+          selectedTheme: _edit.frameTheme,
+          onStyleChanged: (id) => _update(
+            _edit.copyWith(frameStyle: id),
+            immediateUndo: true,
+          ),
+          onThemeChanged: (theme) => _update(
+            _edit.copyWith(frameTheme: theme),
+            immediateUndo: true,
           ),
         ),
+        const SizedBox(height: 6),
         if (_edit.frameStyle != 'none') ...[
           SwitchListTile(
             dense: true,

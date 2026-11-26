@@ -216,6 +216,12 @@ class CinemaCameraState {
   final List<CameraRecipe> recipes;
   final int? activeRecipeSlot;
 
+  // v3.5 Camera Auto-Watermark Frame (with auto iPhone device detection + EXIF)
+  final String watermarkStyle;
+  final String watermarkTheme;
+  final bool watermarkDateStamp;
+  final String photographerSignature;
+
   const CinemaCameraState({
     required this.tones,
     required this.selectedTone,
@@ -299,6 +305,10 @@ class CinemaCameraState {
     this.favoriteToneIds = const <String>{},
     this.recipes = CameraRecipe.defaults,
     this.activeRecipeSlot,
+    this.watermarkStyle = 'none',
+    this.watermarkTheme = 'white',
+    this.watermarkDateStamp = false,
+    this.photographerSignature = '',
   });
 
   /// Matrix the live preview uses.
@@ -539,6 +549,10 @@ class CinemaCameraState {
     List<CameraRecipe>? recipes,
     int? activeRecipeSlot,
     bool clearActiveRecipeSlot = false,
+    String? watermarkStyle,
+    String? watermarkTheme,
+    bool? watermarkDateStamp,
+    String? photographerSignature,
   }) {
     return CinemaCameraState(
       tones: tones ?? this.tones,
@@ -640,6 +654,11 @@ class CinemaCameraState {
       activeRecipeSlot: clearActiveRecipeSlot
           ? null
           : (activeRecipeSlot ?? this.activeRecipeSlot),
+      watermarkStyle: watermarkStyle ?? this.watermarkStyle,
+      watermarkTheme: watermarkTheme ?? this.watermarkTheme,
+      watermarkDateStamp: watermarkDateStamp ?? this.watermarkDateStamp,
+      photographerSignature:
+          photographerSignature ?? this.photographerSignature,
     );
   }
 }

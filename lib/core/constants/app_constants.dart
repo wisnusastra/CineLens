@@ -31,6 +31,10 @@ class AppConstants {
   static const String prefFavoriteToneIds = 'favorite_cinema_tone_ids_v1';
   static const String prefCameraRecipesJson = 'camera_recipes_c1_c4_v1';
   static const String prefPhotographerSignature = 'photographer_signature_v1';
+  static const String prefCameraWatermarkStyle = 'camera_watermark_style_v1';
+  static const String prefCameraWatermarkTheme = 'camera_watermark_theme_v1';
+  static const String prefCameraWatermarkDateStamp =
+      'camera_watermark_date_stamp_v1';
 
   /// Set once the first-install opening clip has been shown. Keeping this as a
   /// versioned key means a future opening can be shown again if needed.

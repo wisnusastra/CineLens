@@ -519,6 +519,7 @@ class PhotoEdit {
   final double skinProtection;
   final bool heif10Bit;
   final String frameStyle;
+  final String frameTheme;
   final bool frameExifCaption;
   final bool frameDateStamp;
   final String frameCustomText;
@@ -587,7 +588,8 @@ class PhotoEdit {
     this.skinProtection = 0.0,
     this.heif10Bit = false,
     this.frameStyle = 'none',
-    this.frameExifCaption = false,
+    this.frameTheme = 'white',
+    this.frameExifCaption = true,
     this.frameDateStamp = false,
     this.frameCustomText = '',
   });
@@ -669,6 +671,7 @@ class PhotoEdit {
     double? skinProtection,
     bool? heif10Bit,
     String? frameStyle,
+    String? frameTheme,
     bool? frameExifCaption,
     bool? frameDateStamp,
     String? frameCustomText,
@@ -749,6 +752,7 @@ class PhotoEdit {
       skinProtection: (skinProtection ?? this.skinProtection).clamp(0.0, 1.0),
       heif10Bit: heif10Bit ?? this.heif10Bit,
       frameStyle: frameStyle ?? this.frameStyle,
+      frameTheme: frameTheme ?? this.frameTheme,
       frameExifCaption: frameExifCaption ?? this.frameExifCaption,
       frameDateStamp: frameDateStamp ?? this.frameDateStamp,
       frameCustomText: frameCustomText ?? this.frameCustomText,
@@ -922,6 +926,7 @@ class PhotoEdit {
       'skinProtection': skinProtection,
       'heif10Bit': heif10Bit,
       'frameStyle': frameStyle,
+      'frameTheme': frameTheme,
       'frameExifCaption': frameExifCaption,
       'frameDateStamp': frameDateStamp,
       'frameCustomText': frameCustomText,
@@ -1066,7 +1071,10 @@ class PhotoEdit {
       frameStyle: json['frameStyle'] is String
           ? json['frameStyle'] as String
           : 'none',
-      frameExifCaption: json['frameExifCaption'] == true,
+      frameTheme: json['frameTheme'] is String
+          ? json['frameTheme'] as String
+          : 'white',
+      frameExifCaption: json['frameExifCaption'] != false,
       frameDateStamp: json['frameDateStamp'] == true,
       frameCustomText: json['frameCustomText'] is String
           ? json['frameCustomText'] as String

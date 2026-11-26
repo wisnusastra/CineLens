@@ -5,6 +5,8 @@ import 'package:cinelens_ios/features/cinema_camera/domain/entities/cinema_tone.
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/film_look.dart';
 import 'package:cinelens_ios/features/cinema_camera/domain/entities/frame_format.dart';
 import 'package:cinelens_ios/features/cinema_camera/presentation/providers/cinema_camera_state.dart';
+import 'package:cinelens_ios/features/photo_editor/domain/entities/photo_edit.dart';
+import 'package:cinelens_ios/features/photo_editor/presentation/widgets/watermark_frame_picker.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -218,6 +220,36 @@ void main() {
         ordered.sublist(1, 3).map((t) => t.id),
         containsAll(<String>['rooftop_cyan', 'nordic_ice']),
       );
+    });
+
+    test('v3.5 WatermarkFramePreset catalog & PhotoEdit frameTheme round-trip', () {
+      final ids = WatermarkFramePreset.all.map((p) => p.id).toSet();
+      expect(
+        ids,
+        containsAll(<String>[
+          'cinema_bar',
+          'side_strip',
+          'cinema_gallery',
+          'corner_glass',
+          'film_35mm',
+          'film_120',
+          'cinema_slate',
+          'polaroid',
+          'leica_white',
+          'dark_matte',
+          'minimal_left',
+          'minimal_center',
+        ]),
+      );
+      final edit = PhotoEdit.neutral.copyWith(
+        frameStyle: 'cinema_bar',
+        frameTheme: 'glass',
+        frameCustomText: 'WISNU SASTRA',
+      );
+      final restored = PhotoEdit.fromJson(edit.toJson());
+      expect(restored.frameStyle, 'cinema_bar');
+      expect(restored.frameTheme, 'glass');
+      expect(restored.frameCustomText, 'WISNU SASTRA');
     });
   });
 }

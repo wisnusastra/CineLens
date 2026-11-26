@@ -1503,6 +1503,35 @@ class CinemaCameraRepository {
     );
   }
 
+  Future<({String style, String theme, bool dateStamp, String signature})>
+      loadCameraWatermarkSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (
+      style: prefs.getString(AppConstants.prefCameraWatermarkStyle) ?? 'none',
+      theme: prefs.getString(AppConstants.prefCameraWatermarkTheme) ?? 'white',
+      dateStamp:
+          prefs.getBool(AppConstants.prefCameraWatermarkDateStamp) ?? false,
+      signature: prefs.getString(AppConstants.prefPhotographerSignature) ?? '',
+    );
+  }
+
+  Future<void> saveCameraWatermarkSettings({
+    String? style,
+    String? theme,
+    bool? dateStamp,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (style != null) {
+      await prefs.setString(AppConstants.prefCameraWatermarkStyle, style);
+    }
+    if (theme != null) {
+      await prefs.setString(AppConstants.prefCameraWatermarkTheme, theme);
+    }
+    if (dateStamp != null) {
+      await prefs.setBool(AppConstants.prefCameraWatermarkDateStamp, dateStamp);
+    }
+  }
+
   Future<void> _ensureGalleryPermission() async {
     final hasAccess = await Gal.hasAccess(toAlbum: true);
     if (!hasAccess) {

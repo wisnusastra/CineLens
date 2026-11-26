@@ -2335,7 +2335,11 @@ final class ExportProgressReporter {
     portraitMode: Bool = false,
     apertureFStop: Double = 2.4,
     focusX: Double = 0.5,
-    focusY: Double = 0.5
+    focusY: Double = 0.5,
+    watermarkStyle: String = "none",
+    watermarkTheme: String = "white",
+    watermarkText: String = "",
+    watermarkDateStamp: Bool = false
   ) -> Data? {
     defer {
       AppDelegate.p3GradingContext.clearCaches()
@@ -2426,6 +2430,22 @@ final class ExportProgressReporter {
             .composited(over: blackBackground)
         }
       }
+    }
+
+    // Optional Auto-Watermark Frame straight from Camera capture!
+    if watermarkStyle != "none" || watermarkDateStamp {
+      var borderParams = PhotoEditor.Params()
+      borderParams.frameStyle = watermarkStyle
+      borderParams.frameTheme = watermarkTheme
+      borderParams.frameExifCaption = true
+      borderParams.frameDateStamp = watermarkDateStamp
+      borderParams.frameCustomText = watermarkText
+      output = PhotoEditor.applyFrameBorder(
+        borderParams,
+        to: output,
+        sourcePath: nil,
+        sourceData: sourceMetadataBytes
+      )
     }
 
     // JPEG encoders require extent origin at (0, 0).
@@ -6440,7 +6460,8 @@ enum PhotoEditor {
     var skinProtection: Double = 0.0
     var heif10Bit: Bool = false
     var frameStyle: String = "none"
-    var frameExifCaption: Bool = false
+    var frameTheme: String = "white"
+    var frameExifCaption: Bool = true
     var frameDateStamp: Bool = false
     var frameCustomText: String = ""
 
@@ -6573,7 +6594,8 @@ enum PhotoEditor {
       params.skinProtection = positive("skinProtection")
       params.heif10Bit = (raw["heif10Bit"] as? Bool) ?? false
       params.frameStyle = (raw["frameStyle"] as? String) ?? "none"
-      params.frameExifCaption = (raw["frameExifCaption"] as? Bool) ?? false
+      params.frameTheme = (raw["frameTheme"] as? String) ?? "white"
+      params.frameExifCaption = (raw["frameExifCaption"] as? Bool) ?? true
       params.frameDateStamp = (raw["frameDateStamp"] as? Bool) ?? false
       params.frameCustomText = (raw["frameCustomText"] as? String) ?? ""
       return params
@@ -7375,12 +7397,75 @@ enum PhotoEditor {
     return data
   }
 
-  /// Renders Leica Gallery White, Dark Matte, 35mm Film Sprocket, or Polaroid
-  /// frames plus optional EXIF lens/exposure line and vintage `'YY MM DD` stamp.
+  /// Resolves the exact human-readable iPhone / camera model name.
+  /// Prefers EXIF `{TIFF} Model` for photos imported from external cameras
+  /// (Sony/Fuji/Canon/vivo/etc.); maps generic iPhone hardware identifiers
+  /// (`iPhone15,3` -> `iPhone 14 Pro Max`) automatically via `utsname`.
+  static func detectDeviceModel(from props: [CFString: Any]?) -> String {
+    if let tiff = props?[kCGImagePropertyTIFFDictionary] as? [CFString: Any],
+       let modelRaw = (tiff[kCGImagePropertyTIFFModel] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !modelRaw.isEmpty,
+       modelRaw.lowercased() != "iphone" {
+      if let makeRaw = (tiff[kCGImagePropertyTIFFMake] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+         !makeRaw.isEmpty,
+         makeRaw.lowercased() != "apple",
+         !modelRaw.lowercased().hasPrefix(makeRaw.lowercased()) {
+        return "\(makeRaw) \(modelRaw)"
+      }
+      return modelRaw
+    }
+
+    var systemInfo = utsname()
+    uname(&systemInfo)
+    let machine = withUnsafePointer(to: &systemInfo.machine) {
+      $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(validatingUTF8: $0) ?? "" }
+    }
+    let map: [String: String] = [
+      "iPhone18,1": "iPhone 17 Pro",
+      "iPhone18,2": "iPhone 17 Pro Max",
+      "iPhone18,3": "iPhone 17",
+      "iPhone18,4": "iPhone 17 Air",
+      "iPhone17,1": "iPhone 16 Pro",
+      "iPhone17,2": "iPhone 16 Pro Max",
+      "iPhone17,3": "iPhone 16",
+      "iPhone17,4": "iPhone 16 Plus",
+      "iPhone17,5": "iPhone 16e",
+      "iPhone16,1": "iPhone 15 Pro",
+      "iPhone16,2": "iPhone 15 Pro Max",
+      "iPhone15,2": "iPhone 14 Pro",
+      "iPhone15,3": "iPhone 14 Pro Max",
+      "iPhone15,4": "iPhone 15",
+      "iPhone15,5": "iPhone 15 Plus",
+      "iPhone14,2": "iPhone 13 Pro",
+      "iPhone14,3": "iPhone 13 Pro Max",
+      "iPhone14,4": "iPhone 13 mini",
+      "iPhone14,5": "iPhone 13",
+      "iPhone14,6": "iPhone SE",
+      "iPhone14,7": "iPhone 14",
+      "iPhone14,8": "iPhone 14 Plus",
+      "iPhone13,1": "iPhone 12 mini",
+      "iPhone13,2": "iPhone 12",
+      "iPhone13,3": "iPhone 12 Pro",
+      "iPhone13,4": "iPhone 12 Pro Max",
+      "iPhone12,1": "iPhone 11",
+      "iPhone12,3": "iPhone 11 Pro",
+      "iPhone12,5": "iPhone 11 Pro Max",
+      "iPhone12,8": "iPhone SE",
+    ]
+    if let mapped = map[machine] { return mapped }
+    if machine.hasPrefix("iPhone") { return "iPhone Pro" }
+    return UIDevice.current.model
+  }
+
+  /// Renders 12 Studio & Film-Heritage Watermark Frames (`White` | `Black` | `Glass`)
+  /// with automatic device model detection (`iPhone 14 Pro Max`), real 2-line EXIF
+  /// optics/exposure readouts (`24mm f/1.8` / `1/250s ISO 100`), film-stock badges,
+  /// custom photographer signature, and optional vintage `'YY MM DD` quartz stamp.
   static func applyFrameBorder(
     _ params: Params,
     to image: CIImage,
-    sourcePath: String?
+    sourcePath: String?,
+    sourceData: Data? = nil
   ) -> CIImage {
     let clean = reorigin(image)
     let ext = clean.extent
@@ -7399,9 +7484,23 @@ enum PhotoEditor {
     let imgH = ext.height
     let shortSide = min(imgW, imgH)
 
-    // Read EXIF & date from original file if available.
-    var exifParts: [String] = []
+    // Read EXIF, TIFF camera model & capture date from file or raw capture bytes.
+    var props: [CFString: Any]?
+    if let p = sourcePath,
+       let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: p) as CFURL, nil) {
+      props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+    } else if let d = sourceData,
+              let src = CGImageSourceCreateWithData(d as CFData, nil) {
+      props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+    }
+
+    let deviceName = detectDeviceModel(from: props)
+    var focalText = ""
+    var apertureText = ""
+    var shutterText = ""
+    var isoText = ""
     var dateStampText = ""
+
     let fallbackDate: Date = {
       if let p = sourcePath,
          let attrs = try? FileManager.default.attributesOfItem(atPath: p),
@@ -7411,30 +7510,26 @@ enum PhotoEditor {
       return Date()
     }()
 
-    if let p = sourcePath,
-       let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: p) as CFURL, nil),
-       let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-       let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
-      if let fl35 = (exif[kCGImagePropertyExifFocalLenIn35mmFilm] as? NSNumber)?.intValue {
-        exifParts.append("\(fl35)mm")
-      } else if let fl = (exif[kCGImagePropertyExifFocalLength] as? NSNumber)?.doubleValue {
-        exifParts.append(String(format: "%.0fmm", fl))
+    if let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+      if let fl35 = (exif[kCGImagePropertyExifFocalLenIn35mmFilm] as? NSNumber)?.intValue, fl35 > 0 {
+        focalText = "\(fl35)mm"
+      } else if let fl = (exif[kCGImagePropertyExifFocalLength] as? NSNumber)?.doubleValue, fl > 0 {
+        focalText = String(format: "%.0fmm", fl)
       }
-      if let fn = (exif[kCGImagePropertyExifFNumber] as? NSNumber)?.doubleValue {
-        exifParts.append(String(format: "f/%.1f", fn))
+      if let fn = (exif[kCGImagePropertyExifFNumber] as? NSNumber)?.doubleValue, fn > 0 {
+        apertureText = String(format: "f/%.2g", fn)
       }
       if let exp = (exif[kCGImagePropertyExifExposureTime] as? NSNumber)?.doubleValue, exp > 0 {
         if exp < 1.0 {
-          exifParts.append("1/\(max(1, Int((1.0 / exp).rounded())))s")
+          shutterText = "1/\(max(1, Int((1.0 / exp).rounded())))s"
         } else {
-          exifParts.append(String(format: "%.1fs", exp))
+          shutterText = String(format: "%.1fs", exp)
         }
       }
       if let isos = exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber], let iso = isos.first {
-        exifParts.append("ISO \(iso.intValue)")
+        isoText = "ISO \(iso.intValue)"
       }
       if let dt = exif[kCGImagePropertyExifDateTimeOriginal] as? String, dt.count >= 10 {
-        // "YYYY:MM:DD HH:mm:ss" -> "'YY MM DD"
         let yy = String(dt.dropFirst(2).prefix(2))
         let mm = String(dt.dropFirst(5).prefix(2))
         let dd = String(dt.dropFirst(8).prefix(2))
@@ -7446,85 +7541,458 @@ enum PhotoEditor {
       fmt.dateFormat = "''yy MM dd"
       dateStampText = fmt.string(from: fallbackDate)
     }
-    if !params.frameCustomText.isEmpty {
-      exifParts.append(params.frameCustomText.uppercased())
-    }
-    let captionLine = exifParts.isEmpty ? "CINELENS PRO" : exifParts.joined(separator: "  ·  ")
 
+    let exifLine1Parts = [focalText, apertureText].filter { !$0.isEmpty }
+    let exifLine2Parts = [shutterText, isoText].filter { !$0.isEmpty }
+    let exifLine1 = exifLine1Parts.isEmpty ? "24mm f/1.8" : exifLine1Parts.joined(separator: " ")
+    let exifLine2 = exifLine2Parts.isEmpty ? "CINELENS PRO" : exifLine2Parts.joined(separator: " ")
+    let allExif = [focalText, apertureText, shutterText, isoText].filter { !$0.isEmpty }
+    let subtitleText = params.frameCustomText.isEmpty
+      ? "CineLens Cinema Optics"
+      : params.frameCustomText
     let style = params.frameStyle
-    let padSide: CGFloat
-    let padTop: CGFloat
-    let padBottom: CGFloat
-    let bgColor: UIColor
-    let primaryTextColor: UIColor
-    let accentDotColor = UIColor(red: 0.90, green: 0.22, blue: 0.18, alpha: 1.0)
+    let theme = params.frameTheme // "white" | "black" | "glass"
+    let isDarkTheme = (theme == "black" || theme == "glass" || style == "dark_matte" || style == "film_35mm" || style == "film_120" || style == "cinema_slate")
+    let isGlassTheme = (theme == "glass" || style == "corner_glass")
+
+    // Compute frame geometry per style
+    var padLeft: CGFloat = 0
+    var padRight: CGFloat = 0
+    var padTop: CGFloat = 0
+    var padBottom: CGFloat = 0
 
     switch style {
-    case "leica_white":
-      padSide = round(shortSide * 0.055)
-      padTop = padSide
-      padBottom = round(shortSide * (params.frameExifCaption ? 0.145 : 0.075))
-      bgColor = UIColor(white: 0.985, alpha: 1.0)
-      primaryTextColor = UIColor(white: 0.16, alpha: 1.0)
-    case "dark_matte":
-      padSide = round(shortSide * 0.055)
-      padTop = padSide
-      padBottom = round(shortSide * (params.frameExifCaption ? 0.145 : 0.075))
-      bgColor = UIColor(red: 0.045, green: 0.045, blue: 0.055, alpha: 1.0)
-      primaryTextColor = UIColor(white: 0.88, alpha: 1.0)
+    case "cinema_bar", "minimal_left", "minimal_center":
+      if theme != "glass" {
+        padBottom = round(shortSide * 0.135)
+      }
+    case "cinema_gallery", "leica_white", "dark_matte":
+      if theme != "glass" {
+        padLeft = round(shortSide * 0.048)
+        padRight = padLeft
+        padTop = padLeft
+        padBottom = round(shortSide * 0.145)
+      }
+    case "side_strip":
+      if theme != "glass" {
+        padRight = round(shortSide * 0.145)
+      }
+    case "corner_glass":
+      break // Always edge-to-edge glass overlay
     case "film_35mm":
-      padSide = round(shortSide * 0.075)
-      padTop = round(shortSide * 0.065)
-      padBottom = round(shortSide * 0.085)
-      bgColor = UIColor(white: 0.03, alpha: 1.0)
-      primaryTextColor = UIColor(red: 0.90, green: 0.66, blue: 0.23, alpha: 0.92)
+      padLeft = round(shortSide * 0.078)
+      padRight = padLeft
+      padTop = round(shortSide * 0.068)
+      padBottom = round(shortSide * 0.088)
+    case "film_120":
+      padLeft = round(shortSide * 0.046)
+      padRight = padLeft
+      padTop = round(shortSide * 0.074)
+      padBottom = round(shortSide * 0.095)
+    case "cinema_slate":
+      padLeft = round(shortSide * 0.028)
+      padRight = padLeft
+      padTop = round(shortSide * 0.028)
+      padBottom = round(shortSide * 0.155)
     case "polaroid":
-      padSide = round(shortSide * 0.065)
-      padTop = round(shortSide * 0.065)
-      padBottom = round(shortSide * 0.22)
-      bgColor = UIColor(red: 0.975, green: 0.968, blue: 0.945, alpha: 1.0)
-      primaryTextColor = UIColor(white: 0.22, alpha: 1.0)
+      padLeft = round(shortSide * 0.062)
+      padRight = padLeft
+      padTop = padLeft
+      padBottom = round(shortSide * 0.225)
     default:
-      padSide = 0
-      padTop = 0
-      padBottom = 0
-      bgColor = .black
-      primaryTextColor = .white
+      break
     }
 
-    let totalW = imgW + padSide * 2
+    let totalW = imgW + padLeft + padRight
     let totalH = imgH + padTop + padBottom
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1.0
     format.opaque = true
     let renderer = UIGraphicsImageRenderer(size: CGSize(width: totalW, height: totalH), format: format)
 
+    // Color palette based on style & White/Black/Glass theme
+    let bgColor: UIColor
+    let primaryColor: UIColor
+    let secondaryColor: UIColor
+    let badgeBgColor: UIColor
+    let badgeTextColor: UIColor
+    let dividerColor: UIColor
+
+    if style == "film_35mm" || style == "film_120" {
+      bgColor = UIColor(red: 0.035, green: 0.035, blue: 0.04, alpha: 1.0)
+      primaryColor = UIColor(red: 0.94, green: 0.69, blue: 0.24, alpha: 0.95)
+      secondaryColor = UIColor(red: 0.94, green: 0.69, blue: 0.24, alpha: 0.68)
+      badgeBgColor = UIColor(red: 0.90, green: 0.66, blue: 0.23, alpha: 1.0)
+      badgeTextColor = .black
+      dividerColor = UIColor(red: 0.94, green: 0.69, blue: 0.24, alpha: 0.30)
+    } else if style == "cinema_slate" {
+      bgColor = UIColor(red: 0.045, green: 0.047, blue: 0.055, alpha: 1.0)
+      primaryColor = UIColor(white: 0.96, alpha: 1.0)
+      secondaryColor = UIColor(white: 0.62, alpha: 1.0)
+      badgeBgColor = UIColor(red: 0.90, green: 0.66, blue: 0.23, alpha: 1.0)
+      badgeTextColor = .black
+      dividerColor = UIColor(white: 1.0, alpha: 0.16)
+    } else if style == "polaroid" && theme != "black" {
+      bgColor = UIColor(red: 0.975, green: 0.968, blue: 0.945, alpha: 1.0)
+      primaryColor = UIColor(white: 0.16, alpha: 1.0)
+      secondaryColor = UIColor(white: 0.48, alpha: 1.0)
+      badgeBgColor = UIColor(red: 0.90, green: 0.22, blue: 0.18, alpha: 1.0)
+      badgeTextColor = .white
+      dividerColor = UIColor(white: 0.0, alpha: 0.12)
+    } else if isDarkTheme {
+      bgColor = UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1.0)
+      primaryColor = UIColor(white: 0.96, alpha: 1.0)
+      secondaryColor = UIColor(white: 0.66, alpha: 1.0)
+      badgeBgColor = UIColor(red: 0.90, green: 0.66, blue: 0.23, alpha: 1.0)
+      badgeTextColor = .black
+      dividerColor = UIColor(white: 1.0, alpha: 0.18)
+    } else {
+      bgColor = UIColor(white: 0.985, alpha: 1.0)
+      primaryColor = UIColor(white: 0.10, alpha: 1.0)
+      secondaryColor = UIColor(white: 0.48, alpha: 1.0)
+      badgeBgColor = UIColor(red: 0.06, green: 0.42, blue: 0.88, alpha: 1.0)
+      badgeTextColor = .white
+      dividerColor = UIColor(white: 0.0, alpha: 0.14)
+    }
+
+    let accentRed = UIColor(red: 0.90, green: 0.22, blue: 0.18, alpha: 1.0)
+    let accentAmber = UIColor(red: 0.90, green: 0.66, blue: 0.23, alpha: 1.0)
+
+    func drawBadge(_ text: String, x: CGFloat, centerY: CGFloat, fontSize: CGFloat, bg: UIColor, fg: UIColor) -> CGFloat {
+      let font = UIFont.systemFont(ofSize: fontSize, weight: .black)
+      let attrs: [NSAttributedString.Key: Any] = [
+        .font: font,
+        .foregroundColor: fg,
+        .kern: 0.8
+      ]
+      let ns = text as NSString
+      let sz = ns.size(withAttributes: attrs)
+      let padX = fontSize * 0.55
+      let padY = fontSize * 0.28
+      let rect = CGRect(
+        x: x,
+        y: centerY - (sz.height + padY * 2) * 0.5,
+        width: sz.width + padX * 2,
+        height: sz.height + padY * 2
+      )
+      bg.setFill()
+      UIBezierPath(roundedRect: rect, cornerRadius: rect.height * 0.26).fill()
+      ns.draw(at: CGPoint(x: rect.minX + padX, y: rect.minY + padY), withAttributes: attrs)
+      return rect.width
+    }
+
+    /// Draws the signature 2-column editorial footer (Device+Subtitle left | Badge+2-line EXIF right).
+    func drawEditorialTwoColumn(in barRect: CGRect, textPrimary: UIColor, textSecondary: UIColor, divColor: UIColor, badgeBg: UIColor, badgeFg: UIColor) {
+      let sideInset = max(14.0, shortSide * 0.042)
+      let titleSize = max(12.0, shortSide * 0.0285)
+      let subSize = max(9.0, shortSide * 0.0175)
+      let exif1Size = max(10.5, shortSide * 0.0225)
+      let exif2Size = max(8.5, shortSide * 0.0165)
+
+      let titleAttrs: [NSAttributedString.Key: Any] = [
+        .font: UIFont.systemFont(ofSize: titleSize, weight: .bold),
+        .foregroundColor: textPrimary
+      ]
+      let subAttrs: [NSAttributedString.Key: Any] = [
+        .font: UIFont.systemFont(ofSize: subSize, weight: .medium),
+        .foregroundColor: textSecondary
+      ]
+      let titleNS = deviceName as NSString
+      let subNS = subtitleText as NSString
+      let tSz = titleNS.size(withAttributes: titleAttrs)
+      let sSz = subNS.size(withAttributes: subAttrs)
+      let leftTotalH = tSz.height + sSz.height + shortSide * 0.004
+      let leftTop = barRect.midY - leftTotalH * 0.5
+      titleNS.draw(at: CGPoint(x: barRect.minX + sideInset, y: leftTop), withAttributes: titleAttrs)
+      subNS.draw(at: CGPoint(x: barRect.minX + sideInset, y: leftTop + tSz.height + shortSide * 0.004), withAttributes: subAttrs)
+
+      // Right side: 2-line EXIF + vertical divider + Cinema badge
+      let e1Attrs: [NSAttributedString.Key: Any] = [
+        .font: UIFont.monospacedDigitSystemFont(ofSize: exif1Size, weight: .bold),
+        .foregroundColor: textPrimary
+      ]
+      let e2Attrs: [NSAttributedString.Key: Any] = [
+        .font: UIFont.monospacedDigitSystemFont(ofSize: exif2Size, weight: .medium),
+        .foregroundColor: textSecondary
+      ]
+      let e1NS = exifLine1 as NSString
+      let e2NS = exifLine2 as NSString
+      let e1Sz = e1NS.size(withAttributes: e1Attrs)
+      let e2Sz = e2NS.size(withAttributes: e2Attrs)
+      let exifW = max(e1Sz.width, e2Sz.width)
+      let exifH = e1Sz.height + e2Sz.height + shortSide * 0.004
+      let exifX = barRect.maxX - sideInset - exifW
+      let exifTop = barRect.midY - exifH * 0.5
+      if params.frameExifCaption {
+        e1NS.draw(at: CGPoint(x: exifX, y: exifTop), withAttributes: e1Attrs)
+        e2NS.draw(at: CGPoint(x: exifX, y: exifTop + e1Sz.height + shortSide * 0.004), withAttributes: e2Attrs)
+      }
+
+      let divX = params.frameExifCaption ? (exifX - shortSide * 0.018) : (barRect.maxX - sideInset)
+      if params.frameExifCaption {
+        divColor.setFill()
+        UIBezierPath(
+          rect: CGRect(
+            x: divX,
+            y: barRect.midY - exifH * 0.48,
+            width: max(1.0, shortSide * 0.0018),
+            height: exifH * 0.96
+          )
+        ).fill()
+      }
+
+      let badgeLabel = "CINELENS"
+      let badgeFontSize = max(8.5, shortSide * 0.0155)
+      let probeSz = (badgeLabel as NSString).size(withAttributes: [
+        .font: UIFont.systemFont(ofSize: badgeFontSize, weight: .black),
+        .kern: 0.8
+      ])
+      let badgeW = probeSz.width + badgeFontSize * 1.10
+      let badgeX = divX - shortSide * 0.018 - badgeW
+      _ = drawBadge(badgeLabel, x: badgeX, centerY: barRect.midY, fontSize: badgeFontSize, bg: badgeBg, fg: badgeFg)
+    }
+
     let rendered = renderer.image { ctx in
       bgColor.setFill()
       ctx.fill(CGRect(x: 0, y: 0, width: totalW, height: totalH))
 
-      let photoRect = CGRect(x: padSide, y: padTop, width: imgW, height: imgH)
+      let photoRect = CGRect(x: padLeft, y: padTop, width: imgW, height: imgH)
       UIImage(cgImage: cgImg).draw(in: photoRect)
 
-      // 35mm film sprocket holes along left & right borders
+      // 1. 35mm Kodak Sprocket Negative Frame
       if style == "film_35mm" {
-        let holeW = max(4.0, padSide * 0.34)
+        let holeW = max(4.0, padLeft * 0.34)
         let holeH = holeW * 1.42
         let step = holeH * 2.15
         UIColor(white: 0.92, alpha: 1.0).setFill()
         var y = padTop
-        while y + holeH < totalH - padBottom * 0.5 {
-          let leftHole = UIBezierPath(
-            roundedRect: CGRect(x: (padSide - holeW) * 0.5, y: y, width: holeW, height: holeH),
+        while y + holeH < totalH - padBottom * 0.45 {
+          UIBezierPath(
+            roundedRect: CGRect(x: (padLeft - holeW) * 0.5, y: y, width: holeW, height: holeH),
             cornerRadius: holeW * 0.22
-          )
-          let rightHole = UIBezierPath(
-            roundedRect: CGRect(x: totalW - (padSide + holeW) * 0.5, y: y, width: holeW, height: holeH),
+          ).fill()
+          UIBezierPath(
+            roundedRect: CGRect(x: totalW - (padRight + holeW) * 0.5, y: y, width: holeW, height: holeH),
             cornerRadius: holeW * 0.22
-          )
-          leftHole.fill()
-          rightHole.fill()
+          ).fill()
           y += step
+        }
+        // Top film edge markings: "36A  ◄ CINELENS 400  ·  iPhone 14 Pro Max"
+        let edgeSize = max(9.5, shortSide * 0.019)
+        let edgeAttrs: [NSAttributedString.Key: Any] = [
+          .font: UIFont(name: "Menlo-Bold", size: edgeSize) ?? UIFont.monospacedDigitSystemFont(ofSize: edgeSize, weight: .bold),
+          .foregroundColor: primaryColor,
+          .kern: 1.4
+        ]
+        let topText = "36A   ◄   \(deviceName.uppercased())   ·   \(subtitleText.uppercased())" as NSString
+        let tSz = topText.size(withAttributes: edgeAttrs)
+        topText.draw(at: CGPoint(x: (totalW - tSz.width) * 0.5, y: (padTop - tSz.height) * 0.5), withAttributes: edgeAttrs)
+
+        let botText = (allExif.isEmpty ? "CINELENS 35MM FILM" : allExif.joined(separator: "  ·  ")) as NSString
+        let bSz = botText.size(withAttributes: edgeAttrs)
+        botText.draw(at: CGPoint(x: (totalW - bSz.width) * 0.5, y: photoRect.maxY + (padBottom - bSz.height) * 0.5), withAttributes: edgeAttrs)
+      }
+
+      // 2. 120 Medium Format Negative Rabbet
+      if style == "film_120" {
+        let edgeSize = max(9.5, shortSide * 0.019)
+        let edgeAttrs: [NSAttributedString.Key: Any] = [
+          .font: UIFont(name: "Menlo-Bold", size: edgeSize) ?? UIFont.monospacedDigitSystemFont(ofSize: edgeSize, weight: .bold),
+          .foregroundColor: primaryColor,
+          .kern: 1.5
+        ]
+        let topL = "◄  120  ·  \(deviceName.uppercased())" as NSString
+        let topR = "EXP 08  ►" as NSString
+        let tlSz = topL.size(withAttributes: edgeAttrs)
+        let trSz = topR.size(withAttributes: edgeAttrs)
+        topL.draw(at: CGPoint(x: padLeft, y: (padTop - tlSz.height) * 0.5), withAttributes: edgeAttrs)
+        topR.draw(at: CGPoint(x: totalW - padRight - trSz.width, y: (padTop - trSz.height) * 0.5), withAttributes: edgeAttrs)
+
+        let botL = subtitleText.uppercased() as NSString
+        let botR = "\(exifLine1)  ·  \(exifLine2)" as NSString
+        let blSz = botL.size(withAttributes: edgeAttrs)
+        let brSz = botR.size(withAttributes: edgeAttrs)
+        botL.draw(at: CGPoint(x: padLeft, y: photoRect.maxY + (padBottom - blSz.height) * 0.5), withAttributes: edgeAttrs)
+        botR.draw(at: CGPoint(x: totalW - padRight - brSz.width, y: photoRect.maxY + (padBottom - brSz.height) * 0.5), withAttributes: edgeAttrs)
+      }
+
+      // 3. Hollywood Director's Clapperboard Slate
+      if style == "cinema_slate" {
+        let slateTop = photoRect.maxY
+        let stripeH = max(4.0, shortSide * 0.010)
+        let stripeW = max(14.0, shortSide * 0.045)
+        var sx = padLeft
+        var toggle = true
+        while sx < totalW - padRight {
+          (toggle ? accentAmber : UIColor(white: 0.14, alpha: 1.0)).setFill()
+          UIBezierPath(rect: CGRect(x: sx, y: slateTop + shortSide * 0.010, width: min(stripeW, totalW - padRight - sx), height: stripeH)).fill()
+          sx += stripeW
+          toggle.toggle()
+        }
+        let barRect = CGRect(x: padLeft, y: slateTop + stripeH + shortSide * 0.016, width: imgW, height: padBottom - stripeH - shortSide * 0.020)
+        drawEditorialTwoColumn(
+          in: barRect,
+          textPrimary: primaryColor,
+          textSecondary: secondaryColor,
+          divColor: dividerColor,
+          badgeBg: accentAmber,
+          badgeFg: .black
+        )
+      }
+
+      // 4. Classic Editorial Bar & Gallery Frame (supports White | Black | Glass!)
+      if style == "cinema_bar" || style == "cinema_gallery" {
+        if isGlassTheme {
+          let margin = round(shortSide * 0.032)
+          let barH = round(shortSide * 0.125)
+          let pillRect = CGRect(x: margin, y: totalH - margin - barH, width: totalW - margin * 2, height: barH)
+          UIColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 0.68).setFill()
+          let path = UIBezierPath(roundedRect: pillRect, cornerRadius: barH * 0.22)
+          path.fill()
+          UIColor(white: 1.0, alpha: 0.22).setStroke()
+          path.lineWidth = max(1.0, shortSide * 0.002)
+          path.stroke()
+          drawEditorialTwoColumn(
+            in: pillRect,
+            textPrimary: .white,
+            textSecondary: UIColor(white: 0.80, alpha: 1.0),
+            divColor: UIColor(white: 1.0, alpha: 0.25),
+            badgeBg: accentAmber,
+            badgeFg: .black
+          )
+        } else {
+          let barRect = CGRect(x: padLeft, y: photoRect.maxY, width: imgW, height: padBottom)
+          drawEditorialTwoColumn(
+            in: barRect,
+            textPrimary: primaryColor,
+            textSecondary: secondaryColor,
+            divColor: dividerColor,
+            badgeBg: badgeBgColor,
+            badgeFg: badgeTextColor
+          )
+        }
+      }
+
+      // 5. Editorial Side Strip (vertical strip on right edge!)
+      if style == "side_strip" {
+        let stripRect = isGlassTheme
+          ? CGRect(x: totalW - round(shortSide * 0.135) - round(shortSide * 0.024), y: round(shortSide * 0.024), width: round(shortSide * 0.135), height: totalH - round(shortSide * 0.048))
+          : CGRect(x: photoRect.maxX, y: 0, width: padRight, height: totalH)
+        if isGlassTheme {
+          UIColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 0.68).setFill()
+          let p = UIBezierPath(roundedRect: stripRect, cornerRadius: stripRect.width * 0.2)
+          p.fill()
+          UIColor(white: 1.0, alpha: 0.22).setStroke()
+          p.lineWidth = max(1.0, shortSide * 0.002)
+          p.stroke()
+        }
+        let cg = ctx.cgContext
+        cg.saveGState()
+        cg.translateBy(x: stripRect.midX, y: stripRect.minY + shortSide * 0.045)
+        cg.rotate(by: .pi / 2.0)
+        let tColor = isGlassTheme ? UIColor.white : primaryColor
+        let sColor = isGlassTheme ? UIColor(white: 0.78, alpha: 1.0) : secondaryColor
+        let devAttrs: [NSAttributedString.Key: Any] = [
+          .font: UIFont.systemFont(ofSize: max(11.0, shortSide * 0.024), weight: .bold),
+          .foregroundColor: tColor
+        ]
+        let exAttrs: [NSAttributedString.Key: Any] = [
+          .font: UIFont.monospacedDigitSystemFont(ofSize: max(9.0, shortSide * 0.0165), weight: .medium),
+          .foregroundColor: sColor
+        ]
+        let devNS = deviceName as NSString
+        let exNS = "\(exifLine1)  ·  \(exifLine2)" as NSString
+        let dSz = devNS.size(withAttributes: devAttrs)
+        let eSz = exNS.size(withAttributes: exAttrs)
+        devNS.draw(at: CGPoint(x: 0, y: -(dSz.height + eSz.height) * 0.5), withAttributes: devAttrs)
+        exNS.draw(at: CGPoint(x: 0, y: -(dSz.height + eSz.height) * 0.5 + dSz.height + 2), withAttributes: exAttrs)
+        cg.restoreGState()
+
+        // Signature square badge at bottom of side strip
+        let sq = stripRect.width * 0.46
+        let sqRect = CGRect(x: stripRect.midX - sq * 0.5, y: stripRect.maxY - sq - shortSide * 0.035, width: sq, height: sq)
+        (isGlassTheme ? accentAmber : badgeBgColor).setFill()
+        UIBezierPath(roundedRect: sqRect, cornerRadius: sq * 0.22).fill()
+        let markAttrs: [NSAttributedString.Key: Any] = [
+          .font: UIFont.systemFont(ofSize: sq * 0.42, weight: .black),
+          .foregroundColor: isGlassTheme ? UIColor.black : badgeTextColor
+        ]
+        let mark = "CL" as NSString
+        let mSz = mark.size(withAttributes: markAttrs)
+        mark.draw(at: CGPoint(x: sqRect.midX - mSz.width * 0.5, y: sqRect.midY - mSz.height * 0.5), withAttributes: markAttrs)
+      }
+
+      // 6. Corner Glass HUD (sleek frosted floating corner chips)
+      if style == "corner_glass" {
+        let margin = round(shortSide * 0.036)
+        let pillH = round(shortSide * 0.088)
+        let padX = round(shortSide * 0.028)
+        let titleFont = UIFont.systemFont(ofSize: max(11.0, shortSide * 0.023), weight: .bold)
+        let subFont = UIFont.monospacedDigitSystemFont(ofSize: max(8.5, shortSide * 0.016), weight: .medium)
+        let tNS = deviceName as NSString
+        let sNS = "\(exifLine1)  ·  \(exifLine2)" as NSString
+        let tSz = tNS.size(withAttributes: [.font: titleFont])
+        let sSz = sNS.size(withAttributes: [.font: subFont])
+        let pillW = max(tSz.width, sSz.width) + padX * 2 + shortSide * 0.02
+        let pillRect = CGRect(x: margin, y: totalH - margin - pillH, width: pillW, height: pillH)
+        UIColor(red: 0.05, green: 0.06, blue: 0.08, alpha: 0.66).setFill()
+        let path = UIBezierPath(roundedRect: pillRect, cornerRadius: pillH * 0.26)
+        path.fill()
+        UIColor(white: 1.0, alpha: 0.24).setStroke()
+        path.lineWidth = max(1.0, shortSide * 0.002)
+        path.stroke()
+        // Amber vertical accent bar inside glass pill
+        accentAmber.setFill()
+        UIBezierPath(roundedRect: CGRect(x: pillRect.minX + padX * 0.55, y: pillRect.minY + pillH * 0.22, width: max(3.0, shortSide * 0.005), height: pillH * 0.56), cornerRadius: 2).fill()
+        let tx = pillRect.minX + padX + shortSide * 0.01
+        let ty = pillRect.midY - (tSz.height + sSz.height + 2) * 0.5
+        tNS.draw(at: CGPoint(x: tx, y: ty), withAttributes: [.font: titleFont, .foregroundColor: UIColor.white])
+        sNS.draw(at: CGPoint(x: tx, y: ty + tSz.height + 2), withAttributes: [.font: subFont, .foregroundColor: UIColor(white: 0.80, alpha: 1.0)])
+      }
+
+      // 7. Leica Red-Dot, Dark Matte, Polaroid, Minimal Left & Minimal Center
+      if style == "leica_white" || style == "dark_matte" || style == "polaroid" || style == "minimal_left" || style == "minimal_center" {
+        let barRect = isGlassTheme
+          ? CGRect(x: round(shortSide * 0.032), y: totalH - round(shortSide * 0.145), width: totalW - round(shortSide * 0.064), height: round(shortSide * 0.11))
+          : CGRect(x: padLeft, y: photoRect.maxY, width: imgW, height: padBottom)
+        if isGlassTheme {
+          UIColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 0.66).setFill()
+          UIBezierPath(roundedRect: barRect, cornerRadius: barRect.height * 0.22).fill()
+        }
+        let tColor = isGlassTheme ? UIColor.white : primaryColor
+        let sColor = isGlassTheme ? UIColor(white: 0.78, alpha: 1.0) : secondaryColor
+        let titleSize = max(11.0, shortSide * 0.025)
+        let subSize = max(9.0, shortSide * 0.0175)
+        let titleAttrs: [NSAttributedString.Key: Any] = [
+          .font: UIFont.systemFont(ofSize: titleSize, weight: .bold),
+          .foregroundColor: tColor,
+          .kern: 0.6
+        ]
+        let subAttrs: [NSAttributedString.Key: Any] = [
+          .font: UIFont(name: "Menlo-Regular", size: subSize) ?? UIFont.monospacedDigitSystemFont(ofSize: subSize, weight: .medium),
+          .foregroundColor: sColor,
+          .kern: 0.8
+        ]
+        let titleStr = (params.frameCustomText.isEmpty ? deviceName : "\(deviceName)  ·  \(params.frameCustomText)") as NSString
+        let subStr = (params.frameExifCaption ? "\(exifLine1)   ·   \(exifLine2)" : subtitleText) as NSString
+        let tSz = titleStr.size(withAttributes: titleAttrs)
+        let sSz = subStr.size(withAttributes: subAttrs)
+        let stackH = tSz.height + sSz.height + shortSide * 0.008
+        let topY = barRect.midY - stackH * 0.5
+
+        if style == "minimal_left" {
+          let inset = max(14.0, shortSide * 0.042)
+          titleStr.draw(at: CGPoint(x: barRect.minX + inset, y: topY), withAttributes: titleAttrs)
+          subStr.draw(at: CGPoint(x: barRect.minX + inset, y: topY + tSz.height + shortSide * 0.008), withAttributes: subAttrs)
+        } else {
+          let tx = barRect.midX - tSz.width * 0.5
+          if style == "leica_white" || style == "dark_matte" {
+            let dotR = titleSize * 0.28
+            (style == "leica_white" ? accentRed : accentAmber).setFill()
+            UIBezierPath(ovalIn: CGRect(x: tx - dotR * 3.4, y: topY + (tSz.height - dotR * 2) * 0.5, width: dotR * 2, height: dotR * 2)).fill()
+          }
+          titleStr.draw(at: CGPoint(x: tx, y: topY), withAttributes: titleAttrs)
+          subStr.draw(at: CGPoint(x: barRect.midX - sSz.width * 0.5, y: topY + tSz.height + shortSide * 0.008), withAttributes: subAttrs)
         }
       }
 
@@ -7545,33 +8013,6 @@ enum PhotoEditor {
         let dx = photoRect.maxX - sz.width - shortSide * 0.038
         let dy = photoRect.maxY - sz.height - shortSide * 0.032
         ns.draw(at: CGPoint(x: dx, y: dy), withAttributes: attrs)
-      }
-
-      // Editorial EXIF caption bar below photo
-      if style != "none" && (params.frameExifCaption || style == "film_35mm") {
-        let fontSize = max(10.0, shortSide * 0.020)
-        let font = UIFont(name: "Menlo-Bold", size: fontSize) ?? UIFont.systemFont(ofSize: fontSize, weight: .semibold)
-        let attrs: [NSAttributedString.Key: Any] = [
-          .font: font,
-          .foregroundColor: primaryTextColor,
-          .kern: 1.2
-        ]
-        let ns = captionLine as NSString
-        let sz = ns.size(withAttributes: attrs)
-        let cy = photoRect.maxY + (padBottom - sz.height) * 0.52
-        if style == "leica_white" || style == "dark_matte" {
-          let dotR = fontSize * 0.32
-          accentDotColor.setFill()
-          UIBezierPath(
-            ovalIn: CGRect(
-              x: (totalW - sz.width) * 0.5 - dotR * 3.6,
-              y: cy + (sz.height - dotR * 2) * 0.5,
-              width: dotR * 2,
-              height: dotR * 2
-            )
-          ).fill()
-        }
-        ns.draw(at: CGPoint(x: (totalW - sz.width) * 0.5, y: cy), withAttributes: attrs)
       }
     }
 
@@ -10952,6 +11393,10 @@ final class NativeCinemaCameraEngine: NSObject,
     let toneId = args["toneId"] as? String
     let intensity = (args["intensity"] as? NSNumber)?.doubleValue ?? 1.0
     let appleLogInput = (args["appleLogInput"] as? Bool) ?? false
+    let watermarkStyle = (args["watermarkStyle"] as? String) ?? "none"
+    let watermarkTheme = (args["watermarkTheme"] as? String) ?? "white"
+    let watermarkText = (args["watermarkText"] as? String) ?? ""
+    let watermarkDateStamp = (args["watermarkDateStamp"] as? Bool) ?? false
     let effects = FilmEffects.from(args)
     let importedLut = ImportedLut.from(args)
     let captureOrientation = Self.resolveMainThreadOrientation()
@@ -11050,7 +11495,11 @@ final class NativeCinemaCameraEngine: NSObject,
                 portraitMode: false,
                 apertureFStop: 2.8,
                 focusX: focusX,
-                focusY: focusY
+                focusY: focusY,
+                watermarkStyle: watermarkStyle,
+                watermarkTheme: watermarkTheme,
+                watermarkText: watermarkText,
+                watermarkDateStamp: watermarkDateStamp
               )
             }
             DispatchQueue.main.async {
@@ -11133,7 +11582,11 @@ final class NativeCinemaCameraEngine: NSObject,
               portraitMode: false,
               apertureFStop: 2.8,
               focusX: focusX,
-              focusY: focusY
+              focusY: focusY,
+              watermarkStyle: watermarkStyle,
+              watermarkTheme: watermarkTheme,
+              watermarkText: watermarkText,
+              watermarkDateStamp: watermarkDateStamp
             )
           }
           DispatchQueue.main.async {

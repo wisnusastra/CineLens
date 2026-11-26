@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.4.0 PRO';
+  static const String appVersion = '3.5.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,21 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.4.0 PRO',
+        version: 'v3.5.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Watermark Frame Studio (12 Gaya Editorial & Film): deteksi otomatis model iPhone/kamera asli (mis. iPhone 14 Pro Max) + EXIF 2 baris (24mm f/1.8 / 1/250s ISO 100) + pilihan tema White | Black | Glass',
+                'Kategori Signature Cinema (Classic Bar, Side Strip, Gallery Frame, Corner Glass), Film Heritage (35mm Kodak, 120 Medium Format, Director Slate, Polaroid) & Minimal — tersedia langsung di Kamera (auto-stamp saat foto) maupun Gallery Editor',
+              ]
+            : const [
+                'Watermark Frame Studio (12 Editorial & Film Styles): automatic iPhone/camera model detection (e.g. iPhone 14 Pro Max) + 2-line EXIF specs (24mm f/1.8 / 1/250s ISO 100) + White | Black | Glass themes',
+                'Grouped into Signature Cinema (Classic Bar, Side Strip, Gallery Frame, Corner Glass), Film Heritage (35mm Kodak, 120 Medium Format, Director Slate, Polaroid) & Minimal — available both as live Camera auto-watermark and in Gallery Editor',
+              ],
+      ),
+      (
+        version: 'v3.4.0 PRO',
+        tag: 'COLOR & PRO',
         items: isId
             ? const [
                 'Rombak total 3D LUT Orange & Teal sesuai palet sinema asli (#FD5901/#F78104/#FAAB36 × #249EA0/#008083/#005F60) + 5 Film Stock Cool Non-Warm baru: Metro Teal Night, Blue Hour Rooftop, Nordic Slate, Tokyo Petrol 500T & Cool Chrome 100',

@@ -15,6 +15,7 @@ import '../../../cinema_camera/presentation/providers/cinema_camera_provider.dar
 import '../../../cinema_camera/presentation/providers/cinema_camera_state.dart';
 import '../../../cinema_camera/presentation/widgets/dop_overlays.dart';
 import '../../../cinema_camera/presentation/widgets/preset_library_io_sheet.dart';
+import '../../../photo_editor/presentation/widgets/watermark_frame_picker.dart';
 import '../../domain/entities/camera_options_state.dart';
 import '../providers/camera_options_provider.dart';
 
@@ -811,6 +812,28 @@ class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
               selected: state.liveScopeEnabled,
               onTap: () =>
                   notifier.setDopOverlay(liveScope: !state.liveScopeEnabled),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        WatermarkFramePicker(
+          selectedStyle: state.watermarkStyle,
+          selectedTheme: state.watermarkTheme,
+          compact: true,
+          onStyleChanged: (style) => notifier.setCameraWatermark(style: style),
+          onThemeChanged: (theme) => notifier.setCameraWatermark(theme: theme),
+        ),
+        const SizedBox(height: 8),
+        _ToggleGrid(
+          haptics: haptics,
+          cards: [
+            _SwitchCardData(
+              title: s.dateStamp,
+              subtitle: "'YY MM DD",
+              active: state.watermarkDateStamp,
+              onTap: () => notifier.setCameraWatermark(
+                dateStamp: !state.watermarkDateStamp,
+              ),
             ),
           ],
         ),
