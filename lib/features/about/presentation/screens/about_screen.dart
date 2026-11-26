@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.1.1 PRO';
+  static const String appVersion = '3.1.2 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,21 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.1.1 PRO',
+        version: 'v3.1.2 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix Cinematic Video blur memotong objek dekat (kurva LiDAR DOF dilebarkan hingga 28 cm + feather 5px agar gelas/objek utuh tajam dari atas ke bawah)',
+                'Aktifkan Smooth Continuous Autofocus otomatis saat masuk mode Video/Cinematic (lensa langsung tajam dari detik ke-0 tanpa perlu tap dulu)',
+              ]
+            : const [
+                'Refined Cinematic Video LiDAR DOF curve (uncapped down to 28cm + softer 5px mask feather so close subjects stay sharp top-to-bottom with zero slice line)',
+                'Enabled instant Smooth Continuous Autofocus on Video/Cinematic entry so the lens locks sharp from frame 1',
+              ],
+      ),
+      (
+        version: 'v3.1.1 PRO',
+        tag: 'ROTATION & REC',
         items: isId
             ? const [
                 'Fix Portrait Photo miring 90° & ketarik (apply EXIF orientation asli pada output Apple CIDepthBlurEffect)',

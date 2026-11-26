@@ -10111,6 +10111,17 @@ final class NativeCinemaCameraEngine: NSObject,
             targetDevice.activeVideoMinFrameDuration = dur
             targetDevice.activeVideoMaxFrameDuration = dur
           }
+          // Engage instant smooth continuous autofocus on video/cinematic startup so
+          // the lens locks immediately onto the center subject without needing a tap!
+          if targetDevice.isFocusPointOfInterestSupported {
+            targetDevice.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
+          }
+          if targetDevice.isFocusModeSupported(.continuousAutoFocus) {
+            targetDevice.focusMode = .continuousAutoFocus
+          }
+          if targetDevice.isSmoothAutoFocusSupported {
+            targetDevice.isSmoothAutoFocusEnabled = true
+          }
         }
         targetDevice.unlockForConfiguration()
       } catch {}
@@ -10359,17 +10370,17 @@ final class NativeCinemaCameraEngine: NSObject,
     let dw = CVPixelBufferGetWidth(dispBuf)
     let dh = CVPixelBufferGetHeight(dispBuf)
     let bpr = CVPixelBufferGetBytesPerRow(dispBuf)
-    guard dw > 2, dh > 2 else { return nil }
+    guard dw > 4, dh > 4 else { return nil }
     let fmt = CVPixelBufferGetPixelFormatType(dispBuf)
     guard fmt == kCVPixelFormatType_DisparityFloat32 else { return nil }
 
-    let cx = min(max(Int(x * Double(dw)), 1), dw - 2)
-    let cy = min(max(Int(y * Double(dh)), 1), dh - 2)
+    let cx = min(max(Int(x * Double(dw)), 2), dw - 3)
+    let cy = min(max(Int(y * Double(dh)), 2), dh - 3)
     var samples: [Double] = []
-    samples.reserveCapacity(9)
-    for dy in -1...1 {
+    samples.reserveCapacity(25)
+    for dy in -2...2 {
       let rowPtr = base.advanced(by: (cy + dy) * bpr).assumingMemoryBound(to: Float32.self)
-      for dx in -1...1 {
+      for dx in -2...2 {
         let v = Double(rowPtr[cx + dx])
         if v.isFinite && v > 0.02 && v < 8.0 {
           samples.append(v)
@@ -10379,8 +10390,9 @@ final class NativeCinemaCameraEngine: NSObject,
     guard !samples.isEmpty else { return nil }
     samples.sort()
     let median = samples[samples.count / 2]
-    // Scale 1/distance (0.15..2.2 1/m ≈ 0.45m..6.5m) smoothly into 0.05..0.95.
-    return min(max(median * 0.45, 0.05), 0.95)
+    // Scale 1/distance (0.15..3.5 1/m ≈ 0.28m..6.5m) smoothly into 0.04..0.96
+    // so close tabletop objects (30-45cm) never clip/saturate!
+    return min(max(median * 0.28, 0.04), 0.96)
   }
 
   /// Smooth Metric LiDAR Z-Depth Rack Focus:
@@ -11140,7 +11152,7 @@ final class NativeCinemaCameraEngine: NSObject,
 
     if let rawDisp = disparity, rawDisp.extent.width > 4, rawDisp.extent.height > 4 {
       // REAL HARDWARE LiDAR CONTINUOUS 2-TIER OPTICAL DEPTH BLUR!
-      // Map hardware disparity (0..2.2 1/m -> 0..1) smoothly to frame extent.
+      // Map hardware disparity (0..3.5 1/m ≈ 28cm..inf -> 0..1) without clipping close subjects!
       let sx = extent.width / rawDisp.extent.width
       let sy = extent.height / rawDisp.extent.height
       let dispNorm = rawDisp
@@ -11150,9 +11162,9 @@ final class NativeCinemaCameraEngine: NSObject,
         .applyingFilter(
           "CIColorMatrix",
           parameters: [
-            "inputRVector": CIVector(x: 0.45, y: 0, z: 0, w: 0),
-            "inputGVector": CIVector(x: 0.45, y: 0, z: 0, w: 0),
-            "inputBVector": CIVector(x: 0.45, y: 0, z: 0, w: 0),
+            "inputRVector": CIVector(x: 0.28, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0.28, y: 0, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0.28, y: 0, z: 0, w: 0),
             "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
             "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
           ]
@@ -11167,7 +11179,7 @@ final class NativeCinemaCameraEngine: NSObject,
         .cropped(to: extent)
 
       // Continuous physical Z-distance from focal plane: |disparity - focusDisparity|
-      let focusVal = CGFloat(min(max(focusDisparity, 0.05), 0.95))
+      let focusVal = CGFloat(min(max(focusDisparity, 0.04), 0.96))
       let focusPlane = CIImage(color: CIColor(red: focusVal, green: focusVal, blue: focusVal, alpha: 1))
         .cropped(to: extent)
       let absDist = dispNorm.applyingFilter(
@@ -11175,8 +11187,9 @@ final class NativeCinemaCameraEngine: NSObject,
         parameters: [kCIInputBackgroundImageKey: focusPlane]
       ).cropped(to: extent)
 
-      // Tier 1 mask (sharp zone -> soft mid-distance optical falloff)
-      let nearSlope = CGFloat(-5.2 * (0.45 + strength))
+      // Tier 1 mask: natural wide cinema DOF zone (keeps whole subject sharp from top
+      // to base with zero hard horizontal slice!) with smooth 5px optical feather.
+      let nearSlope = CGFloat(-3.4 * (0.45 + strength))
       let nearSharpMask = absDist.applyingFilter(
         "CIColorMatrix",
         parameters: [
@@ -11184,7 +11197,7 @@ final class NativeCinemaCameraEngine: NSObject,
           "inputGVector": CIVector(x: 0, y: nearSlope, z: 0, w: 0),
           "inputBVector": CIVector(x: 0, y: 0, z: nearSlope, w: 0),
           "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-          "inputBiasVector": CIVector(x: 1.24, y: 1.24, z: 1.24, w: 1)
+          "inputBiasVector": CIVector(x: 1.38, y: 1.38, z: 1.38, w: 1)
         ]
       ).applyingFilter(
         "CIColorClamp",
@@ -11193,11 +11206,11 @@ final class NativeCinemaCameraEngine: NSObject,
           "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
         ]
       ).clampedToExtent()
-        .applyingGaussianBlur(sigma: 1.8)
+        .applyingGaussianBlur(sigma: 5.0)
         .cropped(to: extent)
 
-      // Tier 2 mask (mid-distance -> creamy deep-background optical bokeh)
-      let farSlope = CGFloat(-2.6 * (0.45 + strength))
+      // Tier 2 mask: gradual mid-distance -> creamy deep-background optical bokeh.
+      let farSlope = CGFloat(-1.8 * (0.45 + strength))
       let farBlendMask = absDist.applyingFilter(
         "CIColorMatrix",
         parameters: [
@@ -11205,7 +11218,7 @@ final class NativeCinemaCameraEngine: NSObject,
           "inputGVector": CIVector(x: 0, y: farSlope, z: 0, w: 0),
           "inputBVector": CIVector(x: 0, y: 0, z: farSlope, w: 0),
           "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-          "inputBiasVector": CIVector(x: 1.48, y: 1.48, z: 1.48, w: 1)
+          "inputBiasVector": CIVector(x: 1.52, y: 1.52, z: 1.52, w: 1)
         ]
       ).applyingFilter(
         "CIColorClamp",
@@ -11214,7 +11227,7 @@ final class NativeCinemaCameraEngine: NSObject,
           "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
         ]
       ).clampedToExtent()
-        .applyingGaussianBlur(sigma: 2.5)
+        .applyingGaussianBlur(sigma: 6.5)
         .cropped(to: extent)
 
       let blurScale: CGFloat = 0.25
