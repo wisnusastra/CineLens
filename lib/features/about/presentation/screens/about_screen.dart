@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.1.3 PRO';
+  static const String appVersion = '3.2.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,21 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.1.3 PRO',
+        version: 'v3.2.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix mode Landscape miring 90°: rotasi otomatis 4 arah real-time untuk preview kamera, sensor LiDAR, hasil foto/video, dan titik tap-to-focus',
+                'Rombak total UI Landscape 3 kolom ala Blackmagic Camera (Rail Kiri: Grid/Flash/Timer/HL/180°, Tengah: Viewfinder bebas hambatan + pill Lensa/Mode/LUT lipat, Rail Kanan: Shutter jempol + M + Flip + Galeri) aman dari Dynamic Island & nol tombol bertumpuk',
+              ]
+            : const [
+                'Fixed sideways 90° Landscape camera preview: full real-time 4-orientation tracking for live preview, LiDAR depth, still/video capture, and tap-to-focus coordinates',
+                'Complete 3-column Pro Landscape UI redesign (Left Tools Rail, Unobstructed Center Viewfinder + collapsible LUT tray, Right Thumb Shutter Grip) with Dynamic Island SafeArea and zero overlapping controls',
+              ],
+      ),
+      (
+        version: 'v3.1.3 PRO',
+        tag: 'RECOVERY',
         items: isId
             ? const [
                 'Fix error no_frames / kamera berhenti setelah putar preview video (hapus bentrok AVAudioRecorder kedua & auto-resume sesi kamera saat kembali dari Preview/Galeri atau selesai interupsi iOS)',

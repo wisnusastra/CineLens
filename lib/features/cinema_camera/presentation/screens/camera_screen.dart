@@ -148,32 +148,246 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     CinemaCameraState state,
     CameraOptionsState options,
   ) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final size = Size(constraints.maxWidth, constraints.maxHeight);
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            _buildViewfinderStack(
-              state: state,
-              options: options,
-              viewport: size,
-              isLandscape: true,
+    final haptics = options.hapticFeedback;
+    return Column(
+      children: [
+        // 1. Sleek Top Precision Telemetry Strip (respects Dynamic Island left/right safe area)
+        _buildTelemetryStrip(state, haptics, compact: true),
+        // 2. Pro 3-Column Cinema Studio Deck: Left Tools Rail | Full Viewfinder | Right Shutter Grip
+        Expanded(
+          child: Row(
+            children: [
+              // Left Quick-Tools Rail (clears Dynamic Island on Landscape Right)
+              _buildLandscapeLeftRail(state, haptics),
+              // Center Unobstructed 16:9 Viewfinder
+              Expanded(
+                child: ClipRect(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final size =
+                          Size(constraints.maxWidth, constraints.maxHeight);
+                      return _buildViewfinderStack(
+                        state: state,
+                        options: options,
+                        viewport: size,
+                        isLandscape: true,
+                      );
+                    },
+                  ),
+                ),
+              ),
+              // Right Tactile Cinema Grip Rail (clears Dynamic Island on Landscape Left)
+              _buildLandscapeRightRail(state, haptics),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLandscapeLeftRail(CinemaCameraState state, bool haptics) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppTheme.backgroundBlack,
+        border: Border(
+          right: BorderSide(color: AppTheme.hairline, width: 0.7),
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        bottom: false,
+        right: false,
+        child: SizedBox(
+          width: 56,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _GlassMiniButton(
+                  icon: Icons.grid_3x3_rounded,
+                  active: state.showGrid,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    _notifier.toggleGrid();
+                  },
+                ),
+                _GlassMiniButton(
+                  icon: _flashIcon(state.flashMode),
+                  active: state.flashMode != FlashMode.off,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    _notifier.cycleFlashMode();
+                  },
+                ),
+                _GlassTextChip(
+                  label: state.timerSeconds == 0
+                      ? '⏱'
+                      : '${state.timerSeconds}s',
+                  active: state.timerSeconds > 0,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    _notifier.cycleTimerSeconds();
+                  },
+                ),
+                _GlassTextChip(
+                  label: 'HL',
+                  active: state.highlightMeteringEnabled,
+                  onTap: () {
+                    if (haptics) HapticFeedback.selectionClick();
+                    _notifier.setHighlightMeteringEnabled(
+                      !state.highlightMeteringEnabled,
+                    );
+                  },
+                ),
+                if (state.proCapabilities.available)
+                  _GlassTextChip(
+                    label: '180°',
+                    active: state.is180ShutterLocked,
+                    onTap: () {
+                      if (haptics) HapticFeedback.selectionClick();
+                      _notifier.toggle180DegreeShutter();
+                    },
+                  ),
+              ],
             ),
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: _buildTelemetryStrip(state, options.hapticFeedback,
-                  translucent: true),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLandscapeRightRail(CinemaCameraState state, bool haptics) {
+    final thumbPath = state.latestGalleryThumbPath;
+    final hasThumb = thumbPath != null &&
+        thumbPath.isNotEmpty &&
+        File(thumbPath).existsSync();
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppTheme.backgroundBlack,
+        border: Border(
+          left: BorderSide(color: AppTheme.hairline, width: 0.7),
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        bottom: false,
+        left: false,
+        child: SizedBox(
+          width: 112,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                // Top: M (Pro Control Drawer) + Flip Camera
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    GestureDetector(
+                      onTap: () => _openDrawer(0, haptics),
+                      child: Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: state.isManualCaptureActive
+                              ? AppTheme.cinemaAmber.withValues(alpha: 0.16)
+                              : AppTheme.cardDark,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: state.isManualCaptureActive
+                                ? AppTheme.cinemaAmber
+                                : Colors.white24,
+                            width: 1.0,
+                          ),
+                        ),
+                        child: Center(
+                          child: Text(
+                            'M',
+                            style: TextStyle(
+                              color: state.isManualCaptureActive
+                                  ? AppTheme.cinemaAmber
+                                  : Colors.white,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    _CircleControl(
+                      icon: Icons.cameraswitch_rounded,
+                      active: false,
+                      onTap: state.isRecordingVideo ? null : _switchCamera,
+                    ),
+                  ],
+                ),
+
+                // Center: Tactile Shutter / Record Ring right under right thumb
+                _buildShutterButton(state, haptics, size: 68),
+
+                // Bottom: LUT Tray Toggle + Gallery Thumbnail
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _CircleControl(
+                      icon: _trayVisible
+                          ? Icons.keyboard_arrow_down_rounded
+                          : Icons.palette_outlined,
+                      active: _trayVisible,
+                      onTap: () {
+                        if (haptics) HapticFeedback.selectionClick();
+                        setState(() => _trayVisible = !_trayVisible);
+                      },
+                    ),
+                    GestureDetector(
+                      onTap: state.isRecordingVideo
+                          ? null
+                          : () async {
+                              if (haptics) HapticFeedback.selectionClick();
+                              await context.push('/gallery');
+                              if (mounted) {
+                                _notifier.resumeCameraSession();
+                                unawaited(_notifier.refreshLatestThumb());
+                              }
+                            },
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: AppTheme.cardDark,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.22),
+                            width: 1.0,
+                          ),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: hasThumb
+                            ? Image.file(
+                                File(thumbPath),
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => const Icon(
+                                  Icons.photo_library_outlined,
+                                  color: Colors.white70,
+                                  size: 18,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.photo_library_outlined,
+                                color: Colors.white70,
+                                size: 18,
+                              ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: _buildBottomDeck(state, options, isLandscape: true),
-            ),
-          ],
-        );
-      },
+          ),
+        ),
+      ),
     );
   }
 
@@ -183,6 +397,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     CinemaCameraState state,
     bool haptics, {
     bool translucent = false,
+    bool compact = false,
   }) {
     final s = AppStrings.of(context);
     final isVideo = state.captureMode.isVideo;
@@ -209,7 +424,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       child: SafeArea(
         bottom: false,
         child: SizedBox(
-          height: 46,
+          height: compact ? 38 : 46,
           child: Row(
             children: [
               _TelemetryCell(
@@ -316,8 +531,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
 
         // Top-left active DOP monitors (Live Scope + micro status chips)
         Positioned(
-          top: isLandscape ? 54 : 10,
-          left: 12,
+          top: 10,
+          left: 10,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -333,50 +548,62 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         // Top-center Recording timer or Audio dB Meter
         if (state.isRecordingVideo)
           Positioned(
-            top: isLandscape ? 54 : 10,
+            top: 10,
             left: 0,
             right: 0,
             child: Center(child: _buildRecordingBadge(state)),
           )
         else if (isVideo && state.audioMeterEnabled)
           Positioned(
-            top: isLandscape ? 54 : 10,
-            right: 12,
+            top: 10,
+            right: 10,
             child: AudioMeterOverlay(peakDb: state.audioPeakDb),
           ),
 
         if (state.isRecordingVideo && state.audioMeterEnabled)
           Positioned(
-            top: isLandscape ? 54 : 10,
-            right: 12,
+            top: 10,
+            right: 10,
             child: AudioMeterOverlay(peakDb: state.audioPeakDb),
           ),
 
-        // Zoom indicator pill
-        if (state.isZoomed || _zoomIndicatorVisible)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: state.captureMode.isBokehMode ? 96 : 48,
-            child: Center(child: _buildZoomIndicator(state)),
-          ),
+        if (!isLandscape) ...[
+          // Portrait Zoom indicator pill
+          if (state.isZoomed || _zoomIndicatorVisible)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: state.captureMode.isBokehMode ? 96 : 48,
+              child: Center(child: _buildZoomIndicator(state)),
+            ),
 
-        // Portrait / Cinematic Mode floating Aperture (f/1.4 – f/16) & Rack Focus bar
-        if (state.captureMode.isBokehMode)
-          Positioned(
-            left: 14,
-            right: 14,
-            bottom: 48,
-            child: _buildApertureBar(state, options.hapticFeedback),
-          ),
+          // Portrait / Cinematic Mode floating Aperture (f/1.4 – f/16) & Rack Focus bar
+          if (state.captureMode.isBokehMode)
+            Positioned(
+              left: 14,
+              right: 14,
+              bottom: 48,
+              child: _buildApertureBar(state, options.hapticFeedback),
+            ),
 
-        // Bottom-of-viewfinder clean Lens Switcher + Quick Tools
-        Positioned(
-          left: 12,
-          right: 12,
-          bottom: 10,
-          child: _buildViewfinderBottomRow(state, options.hapticFeedback),
-        ),
+          // Portrait Bottom-of-viewfinder clean Lens Switcher + Quick Tools
+          Positioned(
+            left: 12,
+            right: 12,
+            bottom: 10,
+            child: _buildViewfinderBottomRow(state, options.hapticFeedback),
+          ),
+        ] else
+          // Landscape Clean Floating Bottom Controls (zero collision with Left/Right rails!)
+          Positioned(
+            left: 10,
+            right: 10,
+            bottom: 8,
+            child: _buildLandscapeCenterBottomControls(
+              state,
+              options.hapticFeedback,
+            ),
+          ),
 
         // Self-Timer countdown overlay
         if (_countdownRemaining > 0)
@@ -515,6 +742,121 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             ),
           )
           .toList(),
+    );
+  }
+
+  Widget _buildLandscapeCenterBottomControls(
+    CinemaCameraState state,
+    bool haptics,
+  ) {
+    final s = AppStrings.of(context);
+    final isBack = state.lensDirection == CameraLensDirection.back;
+    final showLenses = isBack && state.backLenses.length > 1;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (state.isZoomed || _zoomIndicatorVisible) ...[
+          _buildZoomIndicator(state),
+          const SizedBox(height: 6),
+        ],
+        if (state.captureMode.isBokehMode) ...[
+          _buildApertureBar(state, haptics),
+          const SizedBox(height: 6),
+        ],
+        if (_trayVisible) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.72),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white12, width: 0.8),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ToneSelectorStrip(
+                  tones: state.tones,
+                  selectedTone: state.selectedTone,
+                  onToneSelected: _notifier.selectTone,
+                  onOpenCustomCreator: _openCustomToneEditor,
+                  onDeleteCustomTone: _confirmDeleteTone,
+                  compact: true,
+                ),
+                const SizedBox(height: 4),
+                _buildMixSlider(state, s),
+              ],
+            ),
+          ),
+          const SizedBox(height: 6),
+        ],
+        // Clean single row: Lens Switcher + Mode Selector (zero collision!)
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (showLenses) ...[
+              Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.62),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white12, width: 0.8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (var i = 0; i < state.backLenses.length; i++)
+                      GestureDetector(
+                        onTap: state.isRecordingVideo
+                            ? null
+                            : () {
+                                if (haptics) HapticFeedback.selectionClick();
+                                _notifier.switchBackLens(i);
+                              },
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 140),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: state.activeBackLensIndex == i
+                                ? AppTheme.cinemaAmber
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Text(
+                            state.backLenses[i].label,
+                            style: AppTheme.monoStyle(
+                              color: state.activeBackLensIndex == i
+                                  ? Colors.black
+                                  : Colors.white70,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Flexible(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.62),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white12, width: 0.8),
+                ),
+                child: _buildModeSelector(state, s, haptics),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -1082,12 +1424,18 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     );
   }
 
-  Widget _buildShutterButton(CinemaCameraState state, bool haptics) {
+  Widget _buildShutterButton(
+    CinemaCameraState state,
+    bool haptics, {
+    double size = 74,
+  }) {
     final isVideo = state.captureMode.isVideo;
     final isBusy = state.isCapturing ||
         _isCapturingPhoto ||
         _isTogglingVideo ||
         state.isProcessingVideo;
+    final innerIdle = size - 16;
+    final innerRec = size * 0.35;
 
     return GestureDetector(
       onTap: isBusy
@@ -1096,8 +1444,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
               ? _handleVideoToggle(haptics)
               : _triggerPhotoWithTimer(haptics),
       child: Container(
-        width: 74,
-        height: 74,
+        width: size,
+        height: size,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           border: Border.all(
@@ -1108,12 +1456,13 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         child: Center(
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 160),
-            width: state.isRecordingVideo ? 26 : 58,
-            height: state.isRecordingVideo ? 26 : 58,
+            width: state.isRecordingVideo ? innerRec : innerIdle,
+            height: state.isRecordingVideo ? innerRec : innerIdle,
             decoration: BoxDecoration(
               color: isVideo ? AppTheme.cinemaRed : Colors.white,
-              borderRadius:
-                  BorderRadius.circular(state.isRecordingVideo ? 6 : 29),
+              borderRadius: BorderRadius.circular(
+                state.isRecordingVideo ? 6 : innerIdle / 2,
+              ),
             ),
           ),
         ),

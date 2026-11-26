@@ -5319,13 +5319,13 @@ enum FilmEngine {
         var outExt = depthOut.extent
         let srcPortrait = extent.height > extent.width
         let outPortrait = outExt.height > outExt.width
-        if srcPortrait != outPortrait {
-          var exifOrient: Int32 = 6 // Default iPhone portrait rear sensor EXIF orientation
-          if let imgSrc = CGImageSourceCreateWithData(data as CFData, nil),
-             let props = CGImageSourceCopyPropertiesAtIndex(imgSrc, 0, nil) as? [CFString: Any],
-             let rawOrient = props[kCGImagePropertyOrientation] as? NSNumber {
-            exifOrient = rawOrient.int32Value
-          }
+        var exifOrient: Int32 = srcPortrait ? 6 : 1
+        if let imgSrc = CGImageSourceCreateWithData(data as CFData, nil),
+           let props = CGImageSourceCopyPropertiesAtIndex(imgSrc, 0, nil) as? [CFString: Any],
+           let rawOrient = props[kCGImagePropertyOrientation] as? NSNumber {
+          exifOrient = rawOrient.int32Value
+        }
+        if srcPortrait != outPortrait || exifOrient == 3 {
           depthOut = depthOut.oriented(forExifOrientation: exifOrient)
           outExt = depthOut.extent
         }
@@ -9657,6 +9657,7 @@ final class NativeCinemaCameraEngine: NSObject,
 
   private var pendingTextureNotify = false
   private var sessionObservers: [NSObjectProtocol] = []
+  private var activeVideoOrientation: AVCaptureVideoOrientation = .portrait
 
   init(
     registry: FlutterTextureRegistry,
@@ -9668,7 +9669,57 @@ final class NativeCinemaCameraEngine: NSObject,
     self.appDelegate = appDelegate
     super.init()
     self.textureId = registry.register(self)
+    self.activeVideoOrientation = Self.resolveMainThreadOrientation()
     installSessionRecoveryObservers()
+  }
+
+  /// Reads the current UI interface orientation (must be called on Main Thread).
+  /// Note: UIInterfaceOrientation maps 1:1 to AVCaptureVideoOrientation, whereas
+  /// UIDeviceOrientation.landscapeLeft/Right are inverted relative to AVFoundation.
+  private static func resolveMainThreadOrientation() -> AVCaptureVideoOrientation {
+    if let scene = UIApplication.shared.connectedScenes
+      .compactMap({ $0 as? UIWindowScene })
+      .first(where: { $0.activationState == .foregroundActive })
+      ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
+      switch scene.interfaceOrientation {
+      case .landscapeRight: return .landscapeRight
+      case .landscapeLeft: return .landscapeLeft
+      case .portraitUpsideDown: return .portraitUpsideDown
+      case .portrait: return .portrait
+      default: break
+      }
+    }
+    switch UIDevice.current.orientation {
+    case .landscapeLeft: return .landscapeRight
+    case .landscapeRight: return .landscapeLeft
+    case .portraitUpsideDown: return .portraitUpsideDown
+    default: return .portrait
+    }
+  }
+
+  private func applyOrientationToConnections(_ orientation: AVCaptureVideoOrientation) {
+    if let vConn = videoOutput.connection(with: .video), vConn.isVideoOrientationSupported {
+      vConn.videoOrientation = orientation
+    }
+    if let dConn = depthOutput.connection(with: .depthData), dConn.isVideoOrientationSupported {
+      dConn.videoOrientation = orientation
+    }
+    if let pConn = photoOutput.connection(with: .video), pConn.isVideoOrientationSupported {
+      pConn.videoOrientation = orientation
+    }
+  }
+
+  private func syncOrientationIfNeeded() {
+    let target = Self.resolveMainThreadOrientation()
+    sessionQueue.async { [weak self] in
+      guard let self = self else { return }
+      self.stateLock.lock()
+      let rec = self.isRecording
+      self.stateLock.unlock()
+      guard !rec, target != self.activeVideoOrientation else { return }
+      self.activeVideoOrientation = target
+      self.applyOrientationToConnections(target)
+    }
   }
 
   private func installSessionRecoveryObservers() {
@@ -9691,6 +9742,21 @@ final class NativeCinemaCameraEngine: NSObject,
         queue: nil,
         using: onRecover
       )
+    )
+    DispatchQueue.main.async {
+      UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+    }
+    sessionObservers.append(
+      nc.addObserver(
+        forName: UIDevice.orientationDidChangeNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        // Slight delay lets UIWindowScene.interfaceOrientation settle after rotation.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+          self?.syncOrientationIfNeeded()
+        }
+      }
     )
   }
 
@@ -9768,6 +9834,9 @@ final class NativeCinemaCameraEngine: NSObject,
   }
 
   func resume() {
+    DispatchQueue.main.async { [weak self] in
+      self?.syncOrientationIfNeeded()
+    }
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
       if self.currentMode == "video24fps" || self.currentMode == "cinematicVideo" {
@@ -9908,9 +9977,11 @@ final class NativeCinemaCameraEngine: NSObject,
     let requestedLensId = args["lensId"] as? String
     let requestedZoom = (args["initialZoom"] as? NSNumber)?.doubleValue ?? 1.0
     let hiRes48MP = (args["hiRes48MP"] as? Bool) ?? currentHiRes48MP
+    let desiredOrientation = Self.resolveMainThreadOrientation()
 
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
+      self.activeVideoOrientation = desiredOrientation
 
       guard let targetDevice = self.pickDevice(
         position: position,
@@ -10018,7 +10089,7 @@ final class NativeCinemaCameraEngine: NSObject,
         }
       }
       if let vConn = self.videoOutput.connection(with: .video) {
-        if vConn.isVideoOrientationSupported { vConn.videoOrientation = .portrait }
+        if vConn.isVideoOrientationSupported { vConn.videoOrientation = self.activeVideoOrientation }
         if vConn.isVideoMirroringSupported {
           vConn.automaticallyAdjustsVideoMirroring = false
           vConn.isVideoMirrored = (position == .front)
@@ -10117,7 +10188,7 @@ final class NativeCinemaCameraEngine: NSObject,
           self.depthOutput.alwaysDiscardsLateDepthData = true
           if let dConn = self.depthOutput.connection(with: .depthData) {
             dConn.isEnabled = true
-            if dConn.isVideoOrientationSupported { dConn.videoOrientation = .portrait }
+            if dConn.isVideoOrientationSupported { dConn.videoOrientation = self.activeVideoOrientation }
             if dConn.isVideoMirroringSupported {
               dConn.automaticallyAdjustsVideoMirroring = false
               dConn.isVideoMirrored = (position == .front)
@@ -10390,8 +10461,20 @@ final class NativeCinemaCameraEngine: NSObject,
   func setFocusPoint(x: Double, y: Double, focus: Bool, exposure: Bool) -> Bool {
     let clampedX = min(max(x, 0.0), 1.0)
     let clampedY = min(max(y, 0.0), 1.0)
-    // Convert portrait UI coords (top-left) to AVFoundation sensor coords (landscape right).
-    let sensorPoint = CGPoint(x: clampedY, y: 1.0 - clampedX)
+    let orient = Self.resolveMainThreadOrientation()
+    // Map normalized UI coordinates (top-left origin) to AVFoundation sensor coordinates
+    // (landscapeRight sensor origin) accurately for all 4 orientations!
+    let sensorPoint: CGPoint
+    switch orient {
+    case .landscapeRight:
+      sensorPoint = CGPoint(x: clampedX, y: clampedY)
+    case .landscapeLeft:
+      sensorPoint = CGPoint(x: 1.0 - clampedX, y: 1.0 - clampedY)
+    case .portraitUpsideDown:
+      sensorPoint = CGPoint(x: 1.0 - clampedY, y: clampedX)
+    default:
+      sensorPoint = CGPoint(x: clampedY, y: 1.0 - clampedX)
+    }
 
     sessionQueue.async { [weak self] in
       guard let self = self, let device = self.activeDevice else { return }
@@ -10557,6 +10640,7 @@ final class NativeCinemaCameraEngine: NSObject,
     let appleLogInput = (args["appleLogInput"] as? Bool) ?? false
     let effects = FilmEffects.from(args)
     let importedLut = ImportedLut.from(args)
+    let captureOrientation = Self.resolveMainThreadOrientation()
 
     sessionQueue.async { [weak self] in
       guard let self = self, let app = self.appDelegate else {
@@ -10565,7 +10649,7 @@ final class NativeCinemaCameraEngine: NSObject,
       }
 
       if let pConn = self.photoOutput.connection(with: .video) {
-        if pConn.isVideoOrientationSupported { pConn.videoOrientation = .portrait }
+        if pConn.isVideoOrientationSupported { pConn.videoOrientation = captureOrientation }
         if pConn.isVideoMirroringSupported {
           pConn.isVideoMirrored = (self.currentPosition == .front)
         }
