@@ -977,7 +977,10 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                   : () async {
                       if (haptics) HapticFeedback.selectionClick();
                       await context.push('/gallery');
-                      if (mounted) unawaited(_notifier.refreshLatestThumb());
+                      if (mounted) {
+                        _notifier.resumeCameraSession();
+                        unawaited(_notifier.refreshLatestThumb());
+                      }
                     },
               child: Container(
                 width: 46,
@@ -1307,6 +1310,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           isAnamorphic: state.isAnamorphicRatio,
         ),
       );
+      if (mounted) _notifier.resumeCameraSession();
     } catch (error) {
       _toast(_describe(error), isError: true);
     } finally {
@@ -1341,6 +1345,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             isAnamorphic: state.isAnamorphicRatio,
           ),
         );
+        if (mounted) _notifier.resumeCameraSession();
       } else {
         await _lockOrientationForRecording();
         if (!mounted) return;

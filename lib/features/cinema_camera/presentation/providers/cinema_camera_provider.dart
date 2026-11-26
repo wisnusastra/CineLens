@@ -1877,6 +1877,11 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     );
   }
 
+  void resumeCameraSession() {
+    if (_disposed) return;
+    unawaited(ref.read(cinemaCameraRepositoryProvider).nativeCameraResume());
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
     switch (lifecycleState) {

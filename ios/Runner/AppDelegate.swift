@@ -3513,6 +3513,10 @@ final class ExportProgressReporter {
   }
 
   private func startAudioMeterIfNeeded() {
+    // When NativeCinemaCameraEngine is active, NEVER spin up a second competing
+    // AVAudioRecorder (which fights AVCaptureSession's mic input & causes no_frames!).
+    // Audio peak dB is read directly from NativeCinemaCameraEngine.audioOutput!
+    if nativeEngine != nil { return }
     guard dopAudioRecorder == nil else { return }
     let session = AVAudioSession.sharedInstance()
     do {
@@ -3556,12 +3560,17 @@ final class ExportProgressReporter {
       deg = deg - nearest90
       payload["horizonDegrees"] = (deg * 10.0).rounded() / 10.0
     }
-    if dopAudioEnabled, let rec = dopAudioRecorder {
-      rec.updateMeters()
-      let peak = Double(rec.peakPower(forChannel: 0))
-      let avg = Double(rec.averagePower(forChannel: 0))
-      payload["audioPeakDb"] = max(-60.0, min(0.0, peak))
-      payload["audioAvgDb"] = max(-60.0, min(0.0, avg))
+    if dopAudioEnabled {
+      if let levels = nativeEngine?.currentAudioLevels() {
+        payload["audioPeakDb"] = max(-60.0, min(0.0, levels.peak))
+        payload["audioAvgDb"] = max(-60.0, min(0.0, levels.avg))
+      } else if let rec = dopAudioRecorder {
+        rec.updateMeters()
+        let peak = Double(rec.peakPower(forChannel: 0))
+        let avg = Double(rec.averagePower(forChannel: 0))
+        payload["audioPeakDb"] = max(-60.0, min(0.0, peak))
+        payload["audioAvgDb"] = max(-60.0, min(0.0, avg))
+      }
     }
     if !payload.isEmpty {
       nativeChannel?.invokeMethod("dopTelemetry", arguments: payload)
@@ -9647,6 +9656,7 @@ final class NativeCinemaCameraEngine: NSObject,
   }()
 
   private var pendingTextureNotify = false
+  private var sessionObservers: [NSObjectProtocol] = []
 
   init(
     registry: FlutterTextureRegistry,
@@ -9658,6 +9668,50 @@ final class NativeCinemaCameraEngine: NSObject,
     self.appDelegate = appDelegate
     super.init()
     self.textureId = registry.register(self)
+    installSessionRecoveryObservers()
+  }
+
+  private func installSessionRecoveryObservers() {
+    let nc = NotificationCenter.default
+    let onRecover: (Notification) -> Void = { [weak self] _ in
+      self?.resume()
+    }
+    sessionObservers.append(
+      nc.addObserver(
+        forName: .AVCaptureSessionInterruptionEnded,
+        object: session,
+        queue: nil,
+        using: onRecover
+      )
+    )
+    sessionObservers.append(
+      nc.addObserver(
+        forName: .AVCaptureSessionRuntimeError,
+        object: session,
+        queue: nil,
+        using: onRecover
+      )
+    )
+  }
+
+  /// Reads live audio dB levels directly from our single-session audioOutput
+  /// connection (zero second AVAudioRecorder, zero mic hardware collision!).
+  func currentAudioLevels() -> (peak: Double, avg: Double)? {
+    guard let aConn = audioOutput.connection(with: .audio),
+          let ch = aConn.audioChannels.first else { return nil }
+    return (Double(ch.peakHoldLevel), Double(ch.averagePowerLevel))
+  }
+
+  private func ensurePlayAndRecordAudioSession() {
+    let audioSession = AVAudioSession.sharedInstance()
+    do {
+      try audioSession.setCategory(
+        .playAndRecord,
+        mode: .videoRecording,
+        options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth]
+      )
+      try audioSession.setActive(true)
+    } catch {}
   }
 
   // MARK: - FlutterTexture
@@ -9716,6 +9770,9 @@ final class NativeCinemaCameraEngine: NSObject,
   func resume() {
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
+      if self.currentMode == "video24fps" || self.currentMode == "cinematicVideo" {
+        self.ensurePlayAndRecordAudioSession()
+      }
       if !self.session.isRunning && self.videoInput != nil {
         self.session.startRunning()
       }
@@ -9723,6 +9780,9 @@ final class NativeCinemaCameraEngine: NSObject,
   }
 
   func dispose() {
+    let nc = NotificationCenter.default
+    for obs in sessionObservers { nc.removeObserver(obs) }
+    sessionObservers.removeAll()
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
       if self.session.isRunning { self.session.stopRunning() }
@@ -9932,6 +9992,7 @@ final class NativeCinemaCameraEngine: NSObject,
       // Avoiding CoreAudio / mic hardware spin-up on Photo cold launch cuts startup lag by ~500ms,
       // while keeping Video + Audio inside ONE single AVCaptureSession once attached!
       if isVideo {
+        self.ensurePlayAndRecordAudioSession()
         if self.audioInput == nil,
            let mic = AVCaptureDevice.default(for: .audio),
            let aIn = try? AVCaptureDeviceInput(device: mic),
@@ -10750,6 +10811,10 @@ final class NativeCinemaCameraEngine: NSObject,
     isWritingFrame = false
     stateLock.unlock()
 
+    // Ensure the single capture session + audio session are actively running
+    // (recovers instantly if AVPlayer on /preview interrupted the session!).
+    resume()
+
     // Safety watchdog: never leave `isRecording = true` stuck if camera frames fail to arrive.
     DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
       guard let self = self else { return }
@@ -11210,7 +11275,7 @@ final class NativeCinemaCameraEngine: NSObject,
         .cropped(to: extent)
 
       // Tier 2 mask: gradual mid-distance -> creamy deep-background optical bokeh.
-      let farSlope = CGFloat(-1.8 * (0.45 + strength))
+      let farSlope = CGFloat(-2.3 * (0.45 + strength))
       let farBlendMask = absDist.applyingFilter(
         "CIColorMatrix",
         parameters: [
@@ -11218,7 +11283,7 @@ final class NativeCinemaCameraEngine: NSObject,
           "inputGVector": CIVector(x: 0, y: farSlope, z: 0, w: 0),
           "inputBVector": CIVector(x: 0, y: 0, z: farSlope, w: 0),
           "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-          "inputBiasVector": CIVector(x: 1.52, y: 1.52, z: 1.52, w: 1)
+          "inputBiasVector": CIVector(x: 1.44, y: 1.44, z: 1.44, w: 1)
         ]
       ).applyingFilter(
         "CIColorClamp",
@@ -11234,8 +11299,8 @@ final class NativeCinemaCameraEngine: NSObject,
       let small = image.transformed(by: CGAffineTransform(scaleX: blurScale, y: blurScale))
       let smallExt = small.extent
       let maxDim = Double(max(smallExt.width, smallExt.height))
-      let midSigma = max(0.8, strength * maxDim * 0.009)
-      let farSigma = max(1.8, strength * maxDim * 0.022)
+      let midSigma = max(1.0, strength * maxDim * 0.011)
+      let farSigma = max(2.2, strength * maxDim * 0.030)
 
       let midBlur = small.clampedToExtent()
         .applyingGaussianBlur(sigma: midSigma)

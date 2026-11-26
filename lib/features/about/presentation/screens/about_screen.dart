@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.1.2 PRO';
+  static const String appVersion = '3.1.3 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,21 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.1.2 PRO',
+        version: 'v3.1.3 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix error no_frames / kamera berhenti setelah putar preview video (hapus bentrok AVAudioRecorder kedua & auto-resume sesi kamera saat kembali dari Preview/Galeri atau selesai interupsi iOS)',
+                'Upgrade bokeh Cinematic f/1.4–f/2.0 lebih creamy di latar belakang jauh sambil menjaga tepi subjek tetap super tajam',
+              ]
+            : const [
+                'Fixed no_frames / stalled camera after returning from video preview (removed competing AVAudioRecorder & added automatic AVCaptureSession recovery on interruption/route return)',
+                'Enhanced Cinematic Video f/1.4–f/2.0 deep background creaminess while keeping razor-sharp subject edges',
+              ],
+      ),
+      (
+        version: 'v3.1.2 PRO',
+        tag: 'DOF & AF',
         items: isId
             ? const [
                 'Fix Cinematic Video blur memotong objek dekat (kurva LiDAR DOF dilebarkan hingga 28 cm + feather 5px agar gelas/objek utuh tajam dari atas ke bawah)',
