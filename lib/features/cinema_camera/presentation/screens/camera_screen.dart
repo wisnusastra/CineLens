@@ -347,8 +347,10 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                 ),
                 _GlassTextChip(
                   label: 'WM',
-                  active: state.watermarkStyle != 'none',
+                  active:
+                      state.watermarkStyle != 'none' || state.watermarkDateStamp,
                   onTap: () => _openWatermarkSheet(haptics),
+                  onLongPress: () => _quickDisableWatermark(haptics),
                 ),
                 if (state.captureMode.isVideo && state.proCapabilities.available)
                   _GlassTextChip(
@@ -914,11 +916,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     final feedWidth = isLandscape ? previewSize.height : previewSize.width;
     final feedHeight = isLandscape ? previewSize.width : previewSize.height;
 
-    final hasWatermarkOverlay =
-        state.watermarkStyle != 'none' || state.watermarkDateStamp;
     final textureFeed = SizedBox.expand(
       child: FittedBox(
-        fit: hasWatermarkOverlay ? BoxFit.contain : BoxFit.cover,
+        fit: BoxFit.cover,
         child: SizedBox(
           width: feedWidth,
           height: feedHeight,
@@ -996,7 +996,10 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           state.captureMode.isPhoto)
         'STACK',
       if (state.heif10Bit && state.captureMode.isPhoto) '10B',
-      if (state.watermarkStyle != 'none') 'WM',
+      if (state.watermarkStyle != 'none')
+        'WM · ${WatermarkFramePreset.labelFor(state.watermarkStyle).toUpperCase()}'
+      else if (state.watermarkDateStamp)
+        'DATE',
       if (state.proResEnabled && state.captureMode.isVideo) 'PRORES',
       if (state.appleLogEnabled) 'LOG',
       if (state.focusPeakingEnabled) 'PEAK',
@@ -1258,8 +1261,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         const SizedBox(width: 5),
         _GlassTextChip(
           label: 'WM',
-          active: state.watermarkStyle != 'none',
+          active: state.watermarkStyle != 'none' || state.watermarkDateStamp,
           onTap: () => _openWatermarkSheet(haptics),
+          onLongPress: () => _quickDisableWatermark(haptics),
         ),
         const SizedBox(width: 5),
         _GlassMiniButton(
@@ -1887,6 +1891,30 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     );
   }
 
+  void _quickDisableWatermark(bool haptics) {
+    final current = ref.read(cinemaCameraProvider).valueOrNull;
+    if (current == null ||
+        (current.watermarkStyle == 'none' && !current.watermarkDateStamp)) {
+      _openWatermarkSheet(haptics);
+      return;
+    }
+    if (haptics) HapticFeedback.mediumImpact();
+    _notifier.setCameraWatermark(style: 'none', dateStamp: false);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Watermark Frame dimatikan.',
+            style: TextStyle(fontSize: 12),
+          ),
+          backgroundColor: AppTheme.cardDark,
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(milliseconds: 1400),
+        ),
+      );
+  }
+
   void _openWatermarkSheet(bool haptics) {
     if (haptics) HapticFeedback.selectionClick();
     showModalBottomSheet<void>(
@@ -2391,17 +2419,20 @@ class _GlassTextChip extends StatelessWidget {
   final String label;
   final bool active;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
 
   const _GlassTextChip({
     required this.label,
     required this.active,
     required this.onTap,
+    this.onLongPress,
   });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
         decoration: BoxDecoration(

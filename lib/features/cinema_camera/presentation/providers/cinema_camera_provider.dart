@@ -371,9 +371,12 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     final spec1 = s.captureMode.isVideo
         ? '${s.resolution.isMaxSensor ? '4K' : s.resolution.label} · ${s.frameRate.label}FPS'
         : '${s.hiRes48MP ? '48MP' : '12MP'} · $activeLensLabel';
-    final spec2 = s.selectedTone.id == 'standard'
-        ? '$activeLensLabel · CINELENS PRO'
-        : '$activeLensLabel · ${s.selectedTone.name.toUpperCase()}';
+    final toneTag = s.selectedTone.id == 'standard'
+        ? 'CINELENS PRO'
+        : s.selectedTone.name.toUpperCase();
+    final shortTone =
+        toneTag.length > 14 ? toneTag.substring(0, 14).trim() : toneTag;
+    final spec2 = '$activeLensLabel · $shortTone';
     return <String, dynamic>{
       'liveMetal': s.liveMetalEnabled,
       'matrix': s.captureColorMatrix,

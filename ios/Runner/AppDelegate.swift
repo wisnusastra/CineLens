@@ -12418,7 +12418,7 @@ final class NativeCinemaCameraEngine: NSObject,
       }
     }
 
-    let wantsGpuGrade = liveMetal || cineOn || peaking || zebra || fColor || wantScope || isLog || splitCmp || wmStyle != "none" || wmDate
+    let wantsGpuGrade = liveMetal || cineOn || peaking || zebra || fColor || wantScope || isLog || splitCmp
     let canWrite = shouldWriteFrame
     if canWrite { isWritingFrame = true }
     let canPreview = wantsGpuGrade && !isRenderingPreview
@@ -12608,18 +12608,6 @@ final class NativeCinemaCameraEngine: NSObject,
               "CIAdditionCompositing",
               parameters: [kCIInputBackgroundImageKey: displayImage]
             ).cropped(to: extent)
-          }
-          if wmStyle != "none" || wmDate {
-            displayImage = PhotoEditor.applyVideoWatermarkFrame(
-              style: wmStyle,
-              theme: wmTheme,
-              customText: wmText,
-              dateStamp: wmDate,
-              showExif: true,
-              specLine1: wmSpec1,
-              specLine2: wmSpec2,
-              to: displayImage
-            )
           }
 
           guard let outBuf = self.nextPreviewBuffer(width: w, height: h) else { return }

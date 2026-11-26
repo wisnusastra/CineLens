@@ -143,9 +143,9 @@ class WatermarkFramePicker extends StatelessWidget {
                     color: AppTheme.cinemaAmber.withValues(alpha: 0.55),
                   ),
                 ),
-                child: const Text(
-                  'Watermark Frames',
-                  style: TextStyle(
+                child: Text(
+                  selectedStyle != 'none' ? 'Watermark' : 'Watermark Frames',
+                  style: const TextStyle(
                     color: AppTheme.cinemaAmber,
                     fontSize: 10.5,
                     fontWeight: FontWeight.w800,
@@ -153,6 +153,46 @@ class WatermarkFramePicker extends StatelessWidget {
                   ),
                 ),
               ),
+              if (selectedStyle != 'none') ...[
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    onStyleChanged('none');
+                  },
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: AppTheme.cinemaRed.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: AppTheme.cinemaRed.withValues(alpha: 0.55),
+                      ),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.close_rounded,
+                          size: 11,
+                          color: AppTheme.cinemaRed,
+                        ),
+                        SizedBox(width: 2),
+                        Text(
+                          'OFF',
+                          style: TextStyle(
+                            color: AppTheme.cinemaRed,
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.4,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
               const Spacer(),
               for (final t in const <(String, String)>[
                 ('white', 'White'),
@@ -232,7 +272,7 @@ class WatermarkFramePicker extends StatelessWidget {
               return GestureDetector(
                 onTap: () {
                   HapticFeedback.selectionClick();
-                  onStyleChanged(item.id);
+                  onStyleChanged(selected ? 'none' : item.id);
                 },
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 150),

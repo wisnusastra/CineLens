@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.5.2 PRO';
+  static const String appVersion = '3.5.3 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,23 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.5.2 PRO',
+        version: 'v3.5.3 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Fix preview kamera mengecil & bergaris hitam kiri-kanan saat WM aktif: viewfinder kamera kini selalu penuh (full-screen), bersih tanpa menumpuk tombol kontrol atau tergelapkan mask 1:1, sementara Watermark Frame tetap otomatis terpasang rapi ke setiap Foto & Video yang direkam',
+                'Fix matikan Watermark (WM): tap ulang kartu frame yang sedang aktif untuk langsung menonaktifkan (OFF), tambah tombol cepat OFF di bagian atas pemilih Watermark, plus tekan-tahan tombol WM di kamera untuk langsung mematikan Watermark',
+                'Badge aktif di kamera kini menampilkan nama frame yang sedang aktif (mis. WM · CLASSIC BAR)',
+              ]
+            : const [
+                'Fixed shrunk/pillarboxed camera preview when WM is active: live viewfinder now stays clean full-screen with zero overlap on HUD buttons or 1:1 frame mask, while Watermark Frames bake cleanly onto every captured Photo & recorded Video',
+                'Fixed Watermark toggle-off: tapping the currently active frame card a second time now turns Watermark OFF immediately, plus added a 1-tap OFF pill in the header and Long-Press WM shortcut on the viewfinder',
+                'Active camera badge now shows the exact selected frame name (e.g. WM · CLASSIC BAR)',
+              ],
+      ),
+      (
+        version: 'v3.5.2 PRO',
+        tag: 'VIDEO WM',
         items: isId
             ? const [
                 'Watermark Frame Video Penuh (Kamera + Live Preview + Gallery Video Editor): 12 frame editorial & film (White | Black | Glass + model iPhone + spesifikasi 4K/FPS + Date Stamp) kini tampil live di viewfinder dan terekam/terekspor mulus ke Video 4K/1080p tanpa distorsi',
