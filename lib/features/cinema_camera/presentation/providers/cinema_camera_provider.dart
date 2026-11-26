@@ -158,6 +158,15 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         'anamorphicCrop': proImaging.anamorphicCrop,
         'apertureFStop': proImaging.apertureFStop,
         'rackToBackground': false,
+        'watermarkStyle': watermarkCfg.style,
+        'watermarkTheme': watermarkCfg.theme,
+        'watermarkDateStamp': watermarkCfg.dateStamp,
+        'watermarkText': watermarkCfg.signature.isNotEmpty
+            ? watermarkCfg.signature
+            : (selectedTone.id == 'standard' ? '' : selectedTone.name),
+        'watermarkSpec1':
+            '${resolution.isMaxSensor ? '4K' : resolution.label} · ${frameRate.label}FPS',
+        'watermarkSpec2': '24mm · ${selectedTone.name.toUpperCase()}',
       },
     });
 
@@ -355,6 +364,16 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   }
 
   Map<String, dynamic> _liveMetalConfigFor(CinemaCameraState s) {
+    final activeLensLabel = s.backLenses.isNotEmpty
+        ? s.backLenses[s.activeBackLensIndex.clamp(0, s.backLenses.length - 1)]
+            .focalLabel
+        : '24mm';
+    final spec1 = s.captureMode.isVideo
+        ? '${s.resolution.isMaxSensor ? '4K' : s.resolution.label} · ${s.frameRate.label}FPS'
+        : '${s.hiRes48MP ? '48MP' : '12MP'} · $activeLensLabel';
+    final spec2 = s.selectedTone.id == 'standard'
+        ? '$activeLensLabel · CINELENS PRO'
+        : '$activeLensLabel · ${s.selectedTone.name.toUpperCase()}';
     return <String, dynamic>{
       'liveMetal': s.liveMetalEnabled,
       'matrix': s.captureColorMatrix,
@@ -369,6 +388,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       'splitCompare': s.splitCompareEnabled,
       'frameAspectRatio': s.effectiveFrameAspectRatio,
       'anamorphicCrop': s.anamorphicCrop,
+      'watermarkStyle': s.watermarkStyle,
+      'watermarkTheme': s.watermarkTheme,
+      'watermarkDateStamp': s.watermarkDateStamp,
+      'watermarkText': s.photographerSignature.isNotEmpty
+          ? s.photographerSignature
+          : (s.selectedTone.id == 'standard' ? '' : s.selectedTone.name),
+      'watermarkSpec1': spec1,
+      'watermarkSpec2': spec2,
     };
   }
 
@@ -1608,13 +1635,13 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   }) {
     final current = state.valueOrNull;
     if (current == null) return;
-    state = AsyncData(
-      current.copyWith(
-        watermarkStyle: style ?? current.watermarkStyle,
-        watermarkTheme: theme ?? current.watermarkTheme,
-        watermarkDateStamp: dateStamp ?? current.watermarkDateStamp,
-      ),
+    final next = current.copyWith(
+      watermarkStyle: style ?? current.watermarkStyle,
+      watermarkTheme: theme ?? current.watermarkTheme,
+      watermarkDateStamp: dateStamp ?? current.watermarkDateStamp,
     );
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
     unawaited(
       ref.read(cinemaCameraRepositoryProvider).saveCameraWatermarkSettings(
             style: style,

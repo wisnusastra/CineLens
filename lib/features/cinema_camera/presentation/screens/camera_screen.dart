@@ -345,13 +345,12 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                     _notifier.toggleSplitCompare();
                   },
                 ),
-                if (state.captureMode.isPhoto)
-                  _GlassTextChip(
-                    label: 'WM',
-                    active: state.watermarkStyle != 'none',
-                    onTap: () => _openWatermarkSheet(haptics),
-                  )
-                else if (state.proCapabilities.available)
+                _GlassTextChip(
+                  label: 'WM',
+                  active: state.watermarkStyle != 'none',
+                  onTap: () => _openWatermarkSheet(haptics),
+                ),
+                if (state.captureMode.isVideo && state.proCapabilities.available)
                   _GlassTextChip(
                     label: '180°',
                     active: state.is180ShutterLocked,
@@ -915,9 +914,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     final feedWidth = isLandscape ? previewSize.height : previewSize.width;
     final feedHeight = isLandscape ? previewSize.width : previewSize.height;
 
+    final hasWatermarkOverlay =
+        state.watermarkStyle != 'none' || state.watermarkDateStamp;
     final textureFeed = SizedBox.expand(
       child: FittedBox(
-        fit: BoxFit.cover,
+        fit: hasWatermarkOverlay ? BoxFit.contain : BoxFit.cover,
         child: SizedBox(
           width: feedWidth,
           height: feedHeight,
@@ -995,7 +996,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           state.captureMode.isPhoto)
         'STACK',
       if (state.heif10Bit && state.captureMode.isPhoto) '10B',
-      if (state.watermarkStyle != 'none' && state.captureMode.isPhoto) 'WM',
+      if (state.watermarkStyle != 'none') 'WM',
       if (state.proResEnabled && state.captureMode.isVideo) 'PRORES',
       if (state.appleLogEnabled) 'LOG',
       if (state.focusPeakingEnabled) 'PEAK',
@@ -1245,7 +1246,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             ),
           ),
         const Spacer(),
-        // Right: Split LUT + Watermark (Photo) / 180° (Video) + Zen Mode
+        // Right: Split LUT + Watermark (Photo & Video) + Zen Mode
         _GlassMiniButton(
           icon: Icons.compare_rounded,
           active: state.splitCompareEnabled,
@@ -1255,21 +1256,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           },
         ),
         const SizedBox(width: 5),
-        if (state.captureMode.isPhoto)
-          _GlassTextChip(
-            label: 'WM',
-            active: state.watermarkStyle != 'none',
-            onTap: () => _openWatermarkSheet(haptics),
-          )
-        else if (state.proCapabilities.available)
-          _GlassTextChip(
-            label: '180°',
-            active: state.is180ShutterLocked,
-            onTap: () {
-              if (haptics) HapticFeedback.selectionClick();
-              _notifier.toggle180DegreeShutter();
-            },
-          ),
+        _GlassTextChip(
+          label: 'WM',
+          active: state.watermarkStyle != 'none',
+          onTap: () => _openWatermarkSheet(haptics),
+        ),
         const SizedBox(width: 5),
         _GlassMiniButton(
           icon: Icons.visibility_off_outlined,
@@ -1950,7 +1941,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                       ),
                     ),
                     subtitle: const Text(
-                      "Auto-stamp 'YY MM DD + Device & EXIF saat memotret",
+                      "Auto-stamp 'YY MM DD + Device & EXIF untuk Foto & Video",
                       style: TextStyle(
                         color: AppTheme.textSecondary,
                         fontSize: 10.5,

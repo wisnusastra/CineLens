@@ -156,7 +156,7 @@ class CameraRecipe {
       isVideo: true,
       toneId: 'teal_orange',
       intensity: 1.0,
-      frameFormatName: 'widescreen169',
+      frameFormatName: 'full',
       resolutionName: 'uhd4K',
       fps: 24,
     ),

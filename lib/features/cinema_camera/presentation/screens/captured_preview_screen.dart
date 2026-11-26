@@ -26,6 +26,7 @@ class _CapturedPreviewScreenState extends ConsumerState<CapturedPreviewScreen> {
   bool _isVideoReady = false;
   bool _isInitializingVideo = false;
   bool _isGrabbingFrame = false;
+  bool _isMuted = false;
   bool _didEdit = false;
   String? _videoError;
 
@@ -72,7 +73,7 @@ class _CapturedPreviewScreenState extends ConsumerState<CapturedPreviewScreen> {
     final controller = VideoPlayerController.file(File(path));
     try {
       await controller.initialize();
-      await controller.setVolume(0);
+      await controller.setVolume(_isMuted ? 0.0 : 1.0);
       await controller.setLooping(true);
       await controller.play();
 
@@ -448,6 +449,36 @@ class _CapturedPreviewScreenState extends ConsumerState<CapturedPreviewScreen> {
                       size: 34,
                     ),
                   ),
+                Positioned(
+                  right: 12,
+                  bottom: 12,
+                  child: GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _isMuted = !_isMuted;
+                        controller.setVolume(_isMuted ? 0.0 : 1.0);
+                      });
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.62),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.18),
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Icon(
+                        _isMuted
+                            ? Icons.volume_off_rounded
+                            : Icons.volume_up_rounded,
+                        color: _isMuted ? Colors.white60 : AppTheme.cinemaAmber,
+                        size: 18,
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),

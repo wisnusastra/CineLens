@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.5.1 PRO';
+  static const String appVersion = '3.5.2 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,25 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.5.1 PRO',
+        version: 'v3.5.2 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Watermark Frame Video Penuh (Kamera + Live Preview + Gallery Video Editor): 12 frame editorial & film (White | Black | Glass + model iPhone + spesifikasi 4K/FPS + Date Stamp) kini tampil live di viewfinder dan terekam/terekspor mulus ke Video 4K/1080p tanpa distorsi',
+                'Tombol WM & Tab Watermark kini aktif di mode Photo maupun Video (Portrait & Landscape)',
+                'Fix Audio Preview Video: hasil rekaman kini langsung berbunyi saat diputar di Preview dengan tombol Mute/Unmute cepat',
+                'Fix Resep C4 CINE 24P agar tidak memotong video Portrait menjadi letterbox bar hitam + hapus blok duplikat Watermark di tab Crop',
+              ]
+            : const [
+                'Full Video Watermark Frames (Live Camera Viewfinder + Video Recording + Gallery Video Editor): all 12 editorial & film frames (White | Black | Glass + iPhone model + 4K/FPS specs + Date Stamp) now preview live on Metal GPU and bake cleanly into 4K/1080p videos',
+                'WM quick button & dedicated Watermark Editor tab are now enabled for both Photo and Video modes',
+                'Fixed muted Video Preview playback (audio now plays by default with a floating Mute/Unmute toggle)',
+                'Fixed C4 CINE 24P recipe default aspect ratio for vertical video + removed duplicate Watermark controls from the Crop tab',
+              ],
+      ),
+      (
+        version: 'v3.5.1 PRO',
+        tag: 'SKIN & RECIPES',
         items: isId
             ? const [
                 'Fix warna kulit terlalu oranye pada Orange & Teal, Metro Teal Night & Blue Hour Rooftop: perlindungan Skin-Vector penuh untuk cahaya indoor/daylight sambil mempertahankan Petrol Teal (#005F60/#008083/#249EA0) yang tajam',
