@@ -99,10 +99,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       filmLook,
       bakeLook,
       proImaging,
-      favoriteToneIds,
-      recipes,
-      freeStorageMB,
-      watermarkCfg,
+      (favoriteToneIds, recipes, freeStorageMB, watermarkCfg),
     ) = await (
       repository.getAllTones(),
       repository.loadSavedPreferences(),
@@ -110,10 +107,12 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       repository.loadFilmLook(),
       repository.loadBakeLookIntoProRes(),
       repository.loadProImagingSettings(),
-      repository.loadFavoriteToneIds(),
-      repository.loadCameraRecipes(),
-      repository.nativeCameraStorageFreeMB(),
-      repository.loadCameraWatermarkSettings(),
+      (
+        repository.loadFavoriteToneIds(),
+        repository.loadCameraRecipes(),
+        repository.nativeCameraStorageFreeMB(),
+        repository.loadCameraWatermarkSettings(),
+      ).wait,
     ).wait;
 
     final selectedTone = tones.firstWhere(
