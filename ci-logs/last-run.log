@@ -1,0 +1,24 @@
+workflow=Build CineLens iOS IPA sha=9785a09bdad1d3da1716eefa13e86a004eb76761 run=45925217011
+
+===== flutter/xcodebuild errors =====
+(no build-ios.log)
+
+===== build-ios.log (tail 400) =====
+Warning: Building for device with codesigning disabled. You will have to manually codesign before deploying to device.
+Xcode is fetching Swift Package Manager dependencies. This may take several minutes...
+  Fetching from https://github.com/zhangao0086/DKImagePickerController...     
+  Fetching from https://github.com/zhangao0086/DKCamera...      
+  Fetching from https://github.com/zhangao0086/DKPhotoGallery...     
+  Fetching from https://github.com/SDWebImage/SDWebImage...     
+===== pack-ipa.log (tail 120) =====
+(no pack-ipa.log)
+
+===== build/ios tree =====
+build/ios
+build/ios/SourcePackages
+build/ios/SourcePackages/artifacts
+build/ios/SourcePackages/checkouts
+build/ios/SourcePackages/repositories
+build/ios/SourcePackages/repositories/DKPhotoGallery-aabc5a65
+build/ios/SourcePackages/repositories/DKImagePickerController-fc207755
+build/ios/SourcePackages/repositories/DKCamera-7445bb6e
