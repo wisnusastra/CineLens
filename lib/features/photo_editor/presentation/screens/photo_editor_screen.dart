@@ -1619,7 +1619,27 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
             height: 1,
             color: Colors.white.withValues(alpha: 0.06),
           ),
-          Expanded(child: _buildTabContent()),
+          Expanded(
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 190),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.03),
+                    end: Offset.zero,
+                  ).animate(animation),
+                  child: child,
+                ),
+              ),
+              child: KeyedSubtree(
+                key: ValueKey<int>(_tab),
+                child: _buildTabContent(),
+              ),
+            ),
+          ),
         ],
       ),
     );

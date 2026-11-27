@@ -250,48 +250,69 @@ class FilmLookSection extends StatelessWidget {
               ),
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Expanded(
-                      child: Text(
-                        'DESQUEEZE LENSA ANAMORPHIC',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.6,
-                        ),
-                      ),
-                    ),
-                    for (final factor in const <double>[1.0, 1.33, 1.55])
-                      Padding(
-                        padding: const EdgeInsets.only(left: 6),
-                        child: ChoiceChip(
-                          label: Text(
-                            factor == 1.0 ? 'OFF' : '${factor}×',
-                            style: const TextStyle(
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'DESQUEEZE LENSA ANAMORPHIC',
+                            style: TextStyle(
+                              color: Colors.white70,
                               fontSize: 10,
                               fontWeight: FontWeight.w700,
+                              letterSpacing: 0.6,
                             ),
                           ),
-                          selected:
-                              (state.anamorphicDesqueeze - factor).abs() < 0.02,
-                          selectedColor: Colors.amber,
-                          backgroundColor: const Color(0xFF28282E),
-                          labelStyle: TextStyle(
-                            color: (state.anamorphicDesqueeze - factor).abs() <
-                                    0.02
-                                ? Colors.black
-                                : Colors.white70,
-                          ),
-                          onSelected: state.isRecordingVideo
-                              ? null
-                              : (_) {
-                                  if (haptics) HapticFeedback.selectionClick();
-                                  notifier.setAnamorphicDesqueeze(factor);
-                                },
                         ),
+                        for (final factor in const <double>[1.0, 1.33, 1.55])
+                          Padding(
+                            padding: const EdgeInsets.only(left: 6),
+                            child: ChoiceChip(
+                              label: Text(
+                                factor == 1.0 ? 'OFF' : '${factor}×',
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              selected:
+                                  (state.anamorphicDesqueeze - factor).abs() <
+                                      0.02,
+                              selectedColor: Colors.amber,
+                              backgroundColor: const Color(0xFF28282E),
+                              labelStyle: TextStyle(
+                                color: (state.anamorphicDesqueeze - factor)
+                                            .abs() <
+                                        0.02
+                                    ? Colors.black
+                                    : Colors.white70,
+                              ),
+                              onSelected: state.isRecordingVideo
+                                  ? null
+                                  : (_) {
+                                      if (haptics) {
+                                        HapticFeedback.selectionClick();
+                                      }
+                                      notifier.setAnamorphicDesqueeze(factor);
+                                    },
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      state.anamorphicDesqueeze > 1.02
+                          ? '⚠ Aktif (${state.anamorphicDesqueeze}×) — khusus lensa fisik clip-on Anamorphic. Matikan (OFF) untuk lensa iPhone biasa agar foto tidak tertarik.'
+                          : 'Khusus lensa fisik clip-on Anamorphic (Moment/Sandmarc). Biarkan OFF untuk lensa iPhone biasa.',
+                      style: TextStyle(
+                        color: state.anamorphicDesqueeze > 1.02
+                            ? Colors.amber
+                            : Colors.white54,
+                        fontSize: 10.5,
                       ),
+                    ),
                   ],
                 ),
               ),

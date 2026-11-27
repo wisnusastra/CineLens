@@ -613,6 +613,18 @@ class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
         ),
         const SizedBox(height: 14),
         _SectionLabel(s.desqueeze),
+        const SizedBox(height: 4),
+        Text(
+          state.anamorphicDesqueeze > 1.02
+              ? '⚠ Khusus lensa fisik clip-on Anamorphic — matikan ke OFF untuk lensa iPhone biasa agar foto tidak tertarik.'
+              : 'Khusus lensa fisik clip-on Anamorphic (Moment/Sandmarc). Biarkan OFF untuk lensa iPhone normal.',
+          style: TextStyle(
+            color: state.anamorphicDesqueeze > 1.02
+                ? AppTheme.cinemaAmber
+                : AppTheme.textSecondary,
+            fontSize: 10.5,
+          ),
+        ),
         const SizedBox(height: 8),
         Row(
           children: desqueezeChoices.map((factor) {

@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/cinema_camera/presentation/screens/camera_screen.dart';
@@ -6,6 +7,34 @@ import '../../features/cinema_camera/presentation/screens/captured_preview_scree
 import '../../features/opening/presentation/screens/opening_screen.dart';
 import '../../features/photo_editor/presentation/screens/photo_editor_screen.dart';
 import 'capture_args.dart';
+
+/// Builds a silky 120Hz cinema modal transition (gentle zoom-in + easeOutCubic
+/// fade) used when opening full-screen media preview or the Lightroom editor.
+CustomTransitionPage<T> _cinemaFadeScalePage<T>({
+  required GoRouterState state,
+  required Widget child,
+}) {
+  return CustomTransitionPage<T>(
+    key: state.pageKey,
+    child: child,
+    transitionDuration: const Duration(milliseconds: 260),
+    reverseTransitionDuration: const Duration(milliseconds: 220),
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      );
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.965, end: 1.0).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
 
 /// Builds the router after `main` has checked whether this is a first launch.
 ///
@@ -18,32 +47,47 @@ GoRouter createAppRouter({required bool showOpening}) {
       GoRoute(
         path: '/',
         name: 'camera',
-        builder: (context, state) => const CameraScreen(),
+        pageBuilder: (context, state) => CupertinoPage<void>(
+          key: state.pageKey,
+          child: const CameraScreen(),
+        ),
       ),
       GoRoute(
         path: '/opening',
         name: 'opening',
-        builder: (context, state) => const OpeningScreen(),
+        pageBuilder: (context, state) => _cinemaFadeScalePage<void>(
+          state: state,
+          child: const OpeningScreen(),
+        ),
       ),
       GoRoute(
         path: '/preview',
         name: 'preview',
-        builder: (context, state) {
+        pageBuilder: (context, state) {
           final args = state.extra as CapturedPreviewArgs;
-          return CapturedPreviewScreen(args: args);
+          return _cinemaFadeScalePage<bool?>(
+            state: state,
+            child: CapturedPreviewScreen(args: args),
+          );
         },
       ),
       GoRoute(
         path: '/gallery',
         name: 'gallery',
-        builder: (context, state) => const CapturedGalleryScreen(),
+        pageBuilder: (context, state) => CupertinoPage<void>(
+          key: state.pageKey,
+          child: const CapturedGalleryScreen(),
+        ),
       ),
       GoRoute(
         path: '/editor',
         name: 'editor',
-        builder: (context, state) {
+        pageBuilder: (context, state) {
           final args = state.extra as PhotoEditorArgs;
-          return PhotoEditorScreen(args: args);
+          return _cinemaFadeScalePage<bool?>(
+            state: state,
+            child: PhotoEditorScreen(args: args),
+          );
         },
       ),
     ],

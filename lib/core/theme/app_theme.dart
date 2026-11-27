@@ -42,6 +42,21 @@ class AppTheme {
         onSurface: textPrimary,
       ),
       dividerColor: hairline,
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: <TargetPlatform, PageTransitionsBuilder>{
+          TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+          TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+          TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+        },
+      ),
+      bottomSheetTheme: const BottomSheetThemeData(
+        backgroundColor: surfaceDark,
+        surfaceTintColor: Colors.transparent,
+        modalBarrierColor: Color(0x88000000),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        ),
+      ),
       appBarTheme: const AppBarTheme(
         backgroundColor: backgroundBlack,
         surfaceTintColor: Colors.transparent,

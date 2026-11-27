@@ -1,6 +1,8 @@
 // lib/features/cinema_camera/presentation/screens/captured_gallery_screen.dart
 
+import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -41,10 +43,155 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
   bool _selectionMode = false;
   final Set<String> _selectedIds = <String>{};
 
+  // Apple Photos-style slide-to-multi-select gesture state
+  final ScrollController _gridScrollController = ScrollController();
+  Timer? _autoScrollTimer;
+  int? _dragStartIndex;
+  int? _dragLastIndex;
+  bool _dragSelectMode = true;
+  Set<String> _dragInitialSelection = const <String>{};
+  double _dragLocalX = 0;
+  double _dragLocalY = 0;
+  double _gridViewportW = 0;
+  double _gridViewportH = 0;
+  int _gridCols = 3;
+  List<CapturedMedia> _gridVisibleItems = const <CapturedMedia>[];
+
   @override
   void initState() {
     super.initState();
     _loadMedia();
+  }
+
+  @override
+  void dispose() {
+    _autoScrollTimer?.cancel();
+    _gridScrollController.dispose();
+    super.dispose();
+  }
+
+  int? _hitTestGridIndex(Offset localPos) {
+    final count = _gridVisibleItems.length;
+    if (count == 0 || _gridViewportW <= 0 || _gridCols <= 0) return null;
+    const hPad = 3.0;
+    const topPad = 6.0;
+    const spacing = 3.0;
+    const aspectRatio = 0.75;
+    final tileW =
+        (_gridViewportW - hPad * 2 - spacing * (_gridCols - 1)) / _gridCols;
+    if (tileW <= 1) return null;
+    final tileH = tileW / aspectRatio;
+    final scrollOffset =
+        _gridScrollController.hasClients ? _gridScrollController.offset : 0.0;
+    final contentX = (localPos.dx - hPad).clamp(0.0, _gridViewportW - hPad * 2);
+    final contentY = localPos.dy + scrollOffset - topPad;
+    if (contentY < 0) return 0;
+    final col = (contentX / (tileW + spacing)).floor().clamp(0, _gridCols - 1);
+    final row = (contentY / (tileH + spacing)).floor();
+    final idx = row * _gridCols + col;
+    if (idx < 0) return 0;
+    if (idx >= count) return count - 1;
+    return idx;
+  }
+
+  void _onSlideSelectStart(DragStartDetails details) {
+    if (!_selectionMode || _batchBusy) return;
+    _dragLocalX = details.localPosition.dx;
+    _dragLocalY = details.localPosition.dy;
+    final startIdx = _hitTestGridIndex(details.localPosition);
+    if (startIdx == null) return;
+    final startItem = _gridVisibleItems[startIdx];
+    _dragStartIndex = startIdx;
+    _dragLastIndex = startIdx;
+    _dragSelectMode = !_selectedIds.contains(startItem.id);
+    _dragInitialSelection = Set<String>.from(_selectedIds);
+    HapticFeedback.selectionClick();
+    setState(() {
+      if (_dragSelectMode) {
+        _selectedIds.add(startItem.id);
+      } else {
+        _selectedIds.remove(startItem.id);
+      }
+    });
+  }
+
+  void _onSlideSelectUpdate(DragUpdateDetails details) {
+    if (!_selectionMode || _dragStartIndex == null) return;
+    _dragLocalX = details.localPosition.dx;
+    _dragLocalY = details.localPosition.dy;
+    _applySlideSelectionAt(details.localPosition);
+    _updateAutoScroll(details.localPosition.dy);
+  }
+
+  void _applySlideSelectionAt(Offset localPos) {
+    final startIndex = _dragStartIndex;
+    if (startIndex == null) return;
+    final currentIdx = _hitTestGridIndex(localPos);
+    if (currentIdx == null || currentIdx == _dragLastIndex) return;
+    _dragLastIndex = currentIdx;
+
+    final lo = math.min(startIndex, currentIdx);
+    final hi = math.max(startIndex, currentIdx);
+    final next = Set<String>.from(_dragInitialSelection);
+    for (var i = lo; i <= hi && i < _gridVisibleItems.length; i++) {
+      final id = _gridVisibleItems[i].id;
+      if (_dragSelectMode) {
+        next.add(id);
+      } else {
+        next.remove(id);
+      }
+    }
+    HapticFeedback.selectionClick();
+    setState(() {
+      _selectedIds
+        ..clear()
+        ..addAll(next);
+    });
+  }
+
+  void _updateAutoScroll(double localY) {
+    const edgeZone = 68.0;
+    final nearTop = localY < edgeZone;
+    final nearBottom = _gridViewportH > 0 && localY > _gridViewportH - edgeZone;
+    if (!nearTop && !nearBottom) {
+      _autoScrollTimer?.cancel();
+      _autoScrollTimer = null;
+      return;
+    }
+    if (_autoScrollTimer != null) return;
+    _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      if (!mounted ||
+          _dragStartIndex == null ||
+          !_gridScrollController.hasClients) {
+        _autoScrollTimer?.cancel();
+        _autoScrollTimer = null;
+        return;
+      }
+      final pos = _gridScrollController.position;
+      double delta = 0;
+      if (_dragLocalY < edgeZone) {
+        final factor = ((edgeZone - _dragLocalY) / edgeZone).clamp(0.1, 1.0);
+        delta = -10.0 * factor;
+      } else if (_gridViewportH > 0 && _dragLocalY > _gridViewportH - edgeZone) {
+        final factor =
+            ((_dragLocalY - (_gridViewportH - edgeZone)) / edgeZone)
+                .clamp(0.1, 1.0);
+        delta = 10.0 * factor;
+      }
+      if (delta == 0) return;
+      final target = (pos.pixels + delta).clamp(0.0, pos.maxScrollExtent);
+      if ((target - pos.pixels).abs() < 0.2) return;
+      _gridScrollController.jumpTo(target);
+      _applySlideSelectionAt(Offset(_dragLocalX, _dragLocalY));
+    });
+  }
+
+  void _onSlideSelectEnd() {
+    _autoScrollTimer?.cancel();
+    _autoScrollTimer = null;
+    _dragStartIndex = null;
+    _dragLastIndex = null;
+    _dragInitialSelection = const <String>{};
   }
 
   Future<void> _loadMedia() async {
@@ -635,6 +782,47 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
         child: Column(
           children: [
             _buildFilterBar(s),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOutCubic,
+              child: _selectionMode
+                  ? Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppTheme.cinemaAmber.withValues(alpha: 0.10),
+                        border: const Border(
+                          bottom:
+                              BorderSide(color: AppTheme.hairline, width: 0.7),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.swipe_rounded,
+                            size: 13,
+                            color: AppTheme.cinemaAmber,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            s.isId
+                                ? 'Geser menyamping pada foto/video untuk pilih banyak sekaligus'
+                                : 'Slide sideways across items to multi-select',
+                            style: const TextStyle(
+                              color: AppTheme.cinemaAmber,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
             Expanded(
               child: _loading
                   ? const Center(
@@ -648,7 +836,16 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
                           builder: (context, constraints) {
                             final cols =
                                 (constraints.maxWidth / 124).floor().clamp(3, 6);
-                            return GridView.builder(
+                            _gridViewportW = constraints.maxWidth;
+                            _gridViewportH = constraints.maxHeight;
+                            _gridCols = cols;
+                            _gridVisibleItems = visible;
+
+                            final grid = GridView.builder(
+                              controller: _gridScrollController,
+                              physics: const BouncingScrollPhysics(
+                                parent: AlwaysScrollableScrollPhysics(),
+                              ),
                               padding: const EdgeInsets.fromLTRB(3, 6, 3, 16),
                               gridDelegate:
                                   SliverGridDelegateWithFixedCrossAxisCount(
@@ -661,10 +858,33 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
                               itemBuilder: (context, i) =>
                                   _buildTile(visible[i], s),
                             );
+
+                            if (!_selectionMode) return grid;
+
+                            return GestureDetector(
+                              behavior: HitTestBehavior.translucent,
+                              onHorizontalDragStart: _onSlideSelectStart,
+                              onHorizontalDragUpdate: _onSlideSelectUpdate,
+                              onHorizontalDragEnd: (_) => _onSlideSelectEnd(),
+                              onHorizontalDragCancel: _onSlideSelectEnd,
+                              child: grid,
+                            );
                           },
                         ),
             ),
-            if (_selectionMode) _buildBatchActionBar(s, visible),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, anim) => SizeTransition(
+                sizeFactor: anim,
+                axisAlignment: -1.0,
+                child: FadeTransition(opacity: anim, child: child),
+              ),
+              child: _selectionMode
+                  ? _buildBatchActionBar(s, visible)
+                  : const SizedBox.shrink(),
+            ),
           ],
         ),
       ),
@@ -911,45 +1131,54 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
   Widget _buildTile(CapturedMedia media, AppStrings s) {
     final isSelected = _selectedIds.contains(media.id);
 
-    return GestureDetector(
-      onTap: () => _openMedia(media),
-      onLongPress: () {
-        HapticFeedback.mediumImpact();
-        setState(() {
-          _selectionMode = true;
-          _selectedIds.add(media.id);
-        });
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        decoration: BoxDecoration(
-          color: AppTheme.cardDark,
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(
-            color: isSelected ? AppTheme.cinemaAmber : Colors.transparent,
-            width: isSelected ? 2.0 : 0.0,
-          ),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            if (media.isVideo)
-              _VideoPosterTile(path: media.path)
-            else
-              Image.file(
-                File(media.path),
-                fit: BoxFit.cover,
-                cacheWidth: 340,
-                errorBuilder: (_, __, ___) => const ColoredBox(
-                  color: Color(0xFF141418),
-                  child: Icon(
-                    Icons.broken_image_outlined,
-                    color: Colors.white24,
-                    size: 24,
-                  ),
-                ),
+    return RepaintBoundary(
+      child: GestureDetector(
+        onTap: () => _openMedia(media),
+        onLongPress: () {
+          HapticFeedback.mediumImpact();
+          setState(() {
+            _selectionMode = true;
+            _selectedIds.add(media.id);
+          });
+        },
+        child: AnimatedScale(
+          scale: isSelected ? 0.94 : 1.0,
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOutCubic,
+            decoration: BoxDecoration(
+              color: AppTheme.cardDark,
+              borderRadius: BorderRadius.circular(isSelected ? 7 : 4),
+              border: Border.all(
+                color: isSelected ? AppTheme.cinemaAmber : Colors.transparent,
+                width: isSelected ? 2.0 : 0.0,
               ),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (media.isVideo)
+                  _VideoPosterTile(path: media.path)
+                else
+                  Hero(
+                    tag: 'media_${media.path}',
+                    child: Image.file(
+                      File(media.path),
+                      fit: BoxFit.cover,
+                      cacheWidth: 340,
+                      errorBuilder: (_, __, ___) => const ColoredBox(
+                        color: Color(0xFF141418),
+                        child: Icon(
+                          Icons.broken_image_outlined,
+                          color: Colors.white24,
+                          size: 24,
+                        ),
+                      ),
+                    ),
+                  ),
 
             if (isSelected)
               ColoredBox(color: AppTheme.cinemaAmber.withValues(alpha: 0.16)),
@@ -1046,6 +1275,8 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
                 ),
               ),
           ],
+        ),
+          ),
         ),
       ),
     );

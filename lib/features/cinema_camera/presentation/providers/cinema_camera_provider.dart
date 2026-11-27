@@ -60,6 +60,14 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   /// True while the single-session native HEVC+Audio recorder is active.
   bool _nativeRecording = false;
 
+  /// High-frequency DOP telemetry notifiers isolated from `CinemaCameraState`
+  /// so 30–60Hz horizon tilt, audio VU meter, and live RGB scopes never trigger
+  /// full-screen `CameraScreen` rebuilds (keeps UI locked at 120Hz ProMotion!).
+  final ValueNotifier<double> horizonNotifier = ValueNotifier<double>(0.0);
+  final ValueNotifier<double> audioPeakNotifier = ValueNotifier<double>(-60.0);
+  final ValueNotifier<Map<String, dynamic>?> liveScopeNotifier =
+      ValueNotifier<Map<String, dynamic>?>(null);
+
   /// Manual sliders emit dozens of values per second; the native call is
   /// coalesced so the device is not locked for configuration on every tick.
   Timer? _manualSyncTimer;
@@ -74,6 +82,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       _focusIndicatorTimer?.cancel();
       _recordingTimer?.cancel();
       _manualSyncTimer?.cancel();
+      horizonNotifier.dispose();
+      audioPeakNotifier.dispose();
+      liveScopeNotifier.dispose();
       unawaited(ref.read(cinemaCameraRepositoryProvider).nativeCameraDispose());
     });
 
@@ -334,24 +345,21 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   void _handleDopTelemetry(double? horizonDegrees, double? audioPeakDb) {
     if (_disposed) return;
-    final current = state.valueOrNull;
-    if (current == null) return;
-    final nextH = horizonDegrees ?? current.horizonDegrees;
-    final nextA = audioPeakDb ?? current.audioPeakDb;
-    if ((nextH - current.horizonDegrees).abs() < 0.6 &&
-        (nextA - current.audioPeakDb).abs() < 1.5) {
-      return;
+    if (horizonDegrees != null &&
+        (horizonDegrees - horizonNotifier.value).abs() >= 0.25) {
+      horizonNotifier.value = horizonDegrees;
     }
-    state = AsyncData(
-      current.copyWith(horizonDegrees: nextH, audioPeakDb: nextA),
-    );
+    if (audioPeakDb != null &&
+        (audioPeakDb - audioPeakNotifier.value).abs() >= 0.8) {
+      audioPeakNotifier.value = audioPeakDb;
+    }
   }
 
   void _handleLiveScope(Map<String, dynamic> scope) {
     if (_disposed) return;
     final current = state.valueOrNull;
     if (current == null || !current.liveScopeEnabled) return;
-    state = AsyncData(current.copyWith(liveScopeData: scope));
+    liveScopeNotifier.value = scope;
   }
 
   void _handleHardwareShutter() {
@@ -1652,6 +1660,18 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
             dateStamp: dateStamp,
           ),
     );
+  }
+
+  Future<void> setPhotographerSignature(String signature) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final trimmed = signature.trim();
+    final next = current.copyWith(photographerSignature: trimmed);
+    state = AsyncData(next);
+    _syncLiveMetalIfActive(next);
+    await ref
+        .read(cinemaCameraRepositoryProvider)
+        .savePhotographerSignature(trimmed);
   }
 
   Future<void> togglePauseVideoRecording() async {

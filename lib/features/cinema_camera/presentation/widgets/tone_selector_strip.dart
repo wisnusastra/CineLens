@@ -42,6 +42,9 @@ class ToneSelectorStrip extends StatelessWidget {
       height: pillHeight,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(
+          parent: AlwaysScrollableScrollPhysics(),
+        ),
         padding: const EdgeInsets.symmetric(horizontal: 14),
         itemCount: tones.length + (showCustomCard ? 1 : 0),
         separatorBuilder: (_, __) => const SizedBox(width: 7),
@@ -90,9 +93,11 @@ class ToneSelectorStrip extends StatelessWidget {
                 onToggleFavorite!(tone);
               }
             },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 160),
-              padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 12),
+            child: RepaintBoundary(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 190),
+                curve: Curves.easeOutCubic,
+                padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 12),
               decoration: BoxDecoration(
                 color: isSelected
                     ? AppTheme.cinemaAmber.withValues(alpha: 0.16)
@@ -172,6 +177,7 @@ class ToneSelectorStrip extends StatelessWidget {
                     ),
                   ],
                 ],
+              ),
               ),
             ),
           );

@@ -1,5 +1,6 @@
 // lib/main.dart
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -46,6 +47,7 @@ class CineLensApp extends StatelessWidget {
       title: 'CineLens',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkCinemaTheme,
+      scrollBehavior: const CupertinoScrollBehavior(),
       supportedLocales: const <Locale>[
         Locale('en'),
         Locale('id'),

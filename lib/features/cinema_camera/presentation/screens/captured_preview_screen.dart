@@ -347,16 +347,19 @@ class _CapturedPreviewScreenState extends ConsumerState<CapturedPreviewScreen> {
       return InteractiveViewer(
         minScale: 1.0,
         maxScale: 5.0,
-        child: Image.file(
-          File(path),
-          fit: BoxFit.contain,
-          errorBuilder: (_, __, ___) => const ColoredBox(
-            color: Colors.black,
-            child: Center(
-              child: Icon(
-                Icons.broken_image_outlined,
-                color: Colors.white38,
-                size: 36,
+        child: Hero(
+          tag: 'media_$path',
+          child: Image.file(
+            File(path),
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => const ColoredBox(
+              color: Colors.black,
+              child: Center(
+                child: Icon(
+                  Icons.broken_image_outlined,
+                  color: Colors.white38,
+                  size: 36,
+                ),
               ),
             ),
           ),

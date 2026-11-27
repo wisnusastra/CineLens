@@ -658,9 +658,14 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             ),
           ),
 
-        // Tahap 2 Horizon Level Overlay
+        // Tahap 2 Horizon Level Overlay (isolated 120Hz ValueListenableBuilder!)
         if (!zenMode && state.horizonLevelEnabled)
-          HorizonLevelOverlay(degrees: state.horizonDegrees),
+          RepaintBoundary(
+            child: ValueListenableBuilder<double>(
+              valueListenable: _notifier.horizonNotifier,
+              builder: (_, deg, __) => HorizonLevelOverlay(degrees: deg),
+            ),
+          ),
 
         // Split-Screen RAW | LUT micro labels when Live Split Compare is active
         if (state.splitCompareEnabled)
@@ -819,15 +824,21 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (state.liveScopeEnabled) ...[
-                  LiveCameraScopeMini(scopeData: state.liveScopeData),
+                  RepaintBoundary(
+                    child: ValueListenableBuilder<Map<String, dynamic>?>(
+                      valueListenable: _notifier.liveScopeNotifier,
+                      builder: (_, scope, __) =>
+                          LiveCameraScopeMini(scopeData: scope),
+                    ),
+                  ),
                   const SizedBox(height: 6),
                 ],
-                _buildActiveBadges(state, hasLiveMetal),
+                _buildActiveBadges(state, hasLiveMetal, options.hapticFeedback),
               ],
             ),
           ),
 
-        // Top-center Recording SMPTE Timecode or Audio dB Meter
+        // Top-center Recording SMPTE Timecode or Audio dB Meter (isolated 120Hz!)
         if (state.isRecordingVideo)
           Positioned(
             top: 10,
@@ -839,14 +850,24 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           Positioned(
             top: 10,
             right: 10,
-            child: AudioMeterOverlay(peakDb: state.audioPeakDb),
+            child: RepaintBoundary(
+              child: ValueListenableBuilder<double>(
+                valueListenable: _notifier.audioPeakNotifier,
+                builder: (_, db, __) => AudioMeterOverlay(peakDb: db),
+              ),
+            ),
           ),
 
         if (!zenMode && state.isRecordingVideo && state.audioMeterEnabled)
           Positioned(
             top: 10,
             right: 10,
-            child: AudioMeterOverlay(peakDb: state.audioPeakDb),
+            child: RepaintBoundary(
+              child: ValueListenableBuilder<double>(
+                valueListenable: _notifier.audioPeakNotifier,
+                builder: (_, db, __) => AudioMeterOverlay(peakDb: db),
+              ),
+            ),
           ),
 
         if (!zenMode && !isLandscape) ...[
@@ -916,13 +937,15 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     final feedWidth = isLandscape ? previewSize.height : previewSize.width;
     final feedHeight = isLandscape ? previewSize.width : previewSize.height;
 
-    final textureFeed = SizedBox.expand(
-      child: FittedBox(
-        fit: BoxFit.cover,
-        child: SizedBox(
-          width: feedWidth,
-          height: feedHeight,
-          child: Texture(textureId: state.liveMetalTextureId!),
+    final textureFeed = RepaintBoundary(
+      child: SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: feedWidth,
+            height: feedHeight,
+            child: Texture(textureId: state.liveMetalTextureId!),
+          ),
         ),
       ),
     );
@@ -985,7 +1008,12 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     );
   }
 
-  Widget _buildActiveBadges(CinemaCameraState state, bool hasLiveMetal) {
+  Widget _buildActiveBadges(
+    CinemaCameraState state,
+    bool hasLiveMetal,
+    bool haptics,
+  ) {
+    final hasDesqueeze = state.anamorphicDesqueeze > 1.02;
     final chips = <String>[
       if (hasLiveMetal) 'METAL',
       if (state.hiRes48MP && state.captureMode.isPhoto) '48MP',
@@ -1007,34 +1035,71 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       if (state.falseColorEnabled) 'IRE',
       if (state.manualFocusEnabled) 'MF',
     ];
-    if (chips.isEmpty) return const SizedBox.shrink();
+    if (chips.isEmpty && !hasDesqueeze) return const SizedBox.shrink();
 
     return Wrap(
       spacing: 4,
       runSpacing: 4,
-      children: chips
-          .map(
-            (label) => Container(
+      children: [
+        if (hasDesqueeze)
+          GestureDetector(
+            onTap: state.isRecordingVideo
+                ? null
+                : () {
+                    if (haptics) HapticFeedback.mediumImpact();
+                    _notifier.setAnamorphicDesqueeze(1.0);
+                    ScaffoldMessenger.of(context)
+                      ..hideCurrentSnackBar()
+                      ..showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Desqueeze dimatikan (1.0×) — rasio foto kembali normal.',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          backgroundColor: AppTheme.cardDark,
+                          behavior: SnackBarBehavior.floating,
+                          duration: Duration(milliseconds: 1800),
+                        ),
+                      );
+                  },
+            child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.56),
+                color: AppTheme.cinemaRed.withValues(alpha: 0.85),
                 borderRadius: BorderRadius.circular(5),
-                border: Border.all(
-                  color: AppTheme.cinemaAmber.withValues(alpha: 0.55),
-                  width: 0.7,
-                ),
               ),
               child: Text(
-                label,
+                'DESQ ${state.anamorphicDesqueeze.toStringAsFixed(2)}× ✕',
                 style: AppTheme.monoStyle(
-                  color: AppTheme.cinemaAmber,
+                  color: Colors.white,
                   fontSize: 8.5,
-                  fontWeight: FontWeight.w800,
+                  fontWeight: FontWeight.w900,
                 ),
               ),
             ),
-          )
-          .toList(),
+          ),
+        ...chips.map(
+          (label) => Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.56),
+              borderRadius: BorderRadius.circular(5),
+              border: Border.all(
+                color: AppTheme.cinemaAmber.withValues(alpha: 0.55),
+                width: 0.7,
+              ),
+            ),
+            child: Text(
+              label,
+              style: AppTheme.monoStyle(
+                color: AppTheme.cinemaAmber,
+                fontSize: 8.5,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1605,13 +1670,16 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     final innerIdle = size - 16;
     final innerRec = size * 0.35;
 
-    return GestureDetector(
+    return _TactilePress(
+      enabled: !isBusy,
       onTap: isBusy
           ? null
           : () => isVideo
               ? _handleVideoToggle(haptics)
               : _triggerPhotoWithTimer(haptics),
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOutCubic,
         width: size,
         height: size,
         decoration: BoxDecoration(
@@ -1623,7 +1691,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         ),
         child: Center(
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 160),
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
             width: state.isRecordingVideo ? innerRec : innerIdle,
             height: state.isRecordingVideo ? innerRec : innerIdle,
             decoration: BoxDecoration(
@@ -1922,68 +1991,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       backgroundColor: AppTheme.surfaceDark,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
       ),
-      builder: (sheetCtx) => Consumer(
-        builder: (_, sheetRef, __) {
-          final st = sheetRef.watch(cinemaCameraProvider).valueOrNull;
-          if (st == null) return const SizedBox.shrink();
-          final notifier = sheetRef.read(cinemaCameraProvider.notifier);
-          return SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(0, 14, 0, 18),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 36,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.white24,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  WatermarkFramePicker(
-                    selectedStyle: st.watermarkStyle,
-                    selectedTheme: st.watermarkTheme,
-                    onStyleChanged: (style) =>
-                        notifier.setCameraWatermark(style: style),
-                    onThemeChanged: (theme) =>
-                        notifier.setCameraWatermark(theme: theme),
-                  ),
-                  const SizedBox(height: 8),
-                  SwitchListTile(
-                    dense: true,
-                    value: st.watermarkDateStamp,
-                    activeThumbColor: AppTheme.cinemaAmber,
-                    title: Text(
-                      AppStrings.of(sheetCtx).dateStamp,
-                      style: const TextStyle(
-                        color: AppTheme.textPrimary,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    subtitle: const Text(
-                      "Auto-stamp 'YY MM DD + Device & EXIF untuk Foto & Video",
-                      style: TextStyle(
-                        color: AppTheme.textSecondary,
-                        fontSize: 10.5,
-                      ),
-                    ),
-                    onChanged: (v) =>
-                        notifier.setCameraWatermark(dateStamp: v),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
+      builder: (_) => const _CameraWatermarkSheet(),
     );
   }
 
@@ -2392,9 +2402,11 @@ class _GlassMiniButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return _TactilePress(
       onTap: onTap,
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
         width: 32,
         height: 32,
         decoration: BoxDecoration(
@@ -2430,10 +2442,12 @@ class _GlassTextChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return _TactilePress(
       onTap: onTap,
       onLongPress: onLongPress,
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
         decoration: BoxDecoration(
           color: active
@@ -2522,71 +2536,78 @@ class _FrameAspectMask extends StatelessWidget {
         // In portrait, aspect ratios > 1.8 (like 2.39:1 or 65:24 XPan) remain
         // horizontal panoramic frames; classic photography ratios (3:2, 16:9)
         // orient naturally with the device unless already portrait (4:5, 6:7).
-        final double effectiveRatio;
+        final double targetRatio;
         if (isLandscape) {
-          effectiveRatio = aspectRatio < 1.0 ? 1.0 / aspectRatio : aspectRatio;
+          targetRatio = aspectRatio < 1.0 ? 1.0 / aspectRatio : aspectRatio;
         } else {
-          effectiveRatio = aspectRatio;
+          targetRatio = aspectRatio;
         }
 
-        double frameW = w;
-        double frameH = w / effectiveRatio;
-        if (frameH > h) {
-          frameH = h;
-          frameW = h * effectiveRatio;
-        }
+        return TweenAnimationBuilder<double>(
+          tween: Tween<double>(end: targetRatio),
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+          builder: (_, effectiveRatio, __) {
+            double frameW = w;
+            double frameH = w / effectiveRatio;
+            if (frameH > h) {
+              frameH = h;
+              frameW = h * effectiveRatio;
+            }
 
-        final barH = ((h - frameH) / 2).clamp(0.0, h);
-        final barW = ((w - frameW) / 2).clamp(0.0, w);
-        final maskColor = Colors.black.withValues(alpha: 0.72);
+            final barH = ((h - frameH) / 2).clamp(0.0, h);
+            final barW = ((w - frameW) / 2).clamp(0.0, w);
+            final maskColor = Colors.black.withValues(alpha: 0.72);
 
-        return Stack(
-          children: [
-            if (barH > 0.5) ...[
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: barH,
-                child: ColoredBox(color: maskColor),
-              ),
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: barH,
-                child: ColoredBox(color: maskColor),
-              ),
-            ],
-            if (barW > 0.5) ...[
-              Positioned(
-                top: barH,
-                bottom: barH,
-                left: 0,
-                width: barW,
-                child: ColoredBox(color: maskColor),
-              ),
-              Positioned(
-                top: barH,
-                bottom: barH,
-                right: 0,
-                width: barW,
-                child: ColoredBox(color: maskColor),
-              ),
-            ],
-            Center(
-              child: Container(
-                width: frameW,
-                height: frameH,
-                decoration: BoxDecoration(
-                  border: Border.all(
-                    color: AppTheme.cinemaAmber.withValues(alpha: 0.45),
-                    width: 0.9,
+            return Stack(
+              children: [
+                if (barH > 0.5) ...[
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: barH,
+                    child: ColoredBox(color: maskColor),
+                  ),
+                  Positioned(
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    height: barH,
+                    child: ColoredBox(color: maskColor),
+                  ),
+                ],
+                if (barW > 0.5) ...[
+                  Positioned(
+                    top: barH,
+                    bottom: barH,
+                    left: 0,
+                    width: barW,
+                    child: ColoredBox(color: maskColor),
+                  ),
+                  Positioned(
+                    top: barH,
+                    bottom: barH,
+                    right: 0,
+                    width: barW,
+                    child: ColoredBox(color: maskColor),
+                  ),
+                ],
+                Center(
+                  child: Container(
+                    width: frameW,
+                    height: frameH,
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: AppTheme.cinemaAmber.withValues(alpha: 0.45),
+                        width: 0.9,
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-          ],
+              ],
+            );
+          },
         );
       },
     );
@@ -2722,4 +2743,230 @@ class _GrainPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _GrainPainter oldDelegate) =>
       oldDelegate.strength != strength || oldDelegate.size != size;
+}
+
+/// Tactile iOS-style press-scale wrapper (`0.93` on press, snappy spring-back
+/// on release) for silky 120Hz micro-interactions on camera buttons.
+class _TactilePress extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+  final bool enabled;
+
+  const _TactilePress({
+    required this.child,
+    this.onTap,
+    this.onLongPress,
+    this.enabled = true,
+  });
+
+  @override
+  State<_TactilePress> createState() => _TactilePressState();
+}
+
+class _TactilePressState extends State<_TactilePress> {
+  bool _pressed = false;
+
+  void _setPressed(bool v) {
+    if (!widget.enabled || _pressed == v) return;
+    setState(() => _pressed = v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: widget.enabled ? widget.onTap : null,
+      onLongPress: widget.enabled ? widget.onLongPress : null,
+      onTapDown: (_) => _setPressed(true),
+      onTapUp: (_) => _setPressed(false),
+      onTapCancel: () => _setPressed(false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.92 : 1.0,
+        duration: Duration(milliseconds: _pressed ? 70 : 180),
+        curve: _pressed ? Curves.easeOut : Curves.easeOutBack,
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// Camera Watermark Frame Studio sheet with live Photographer Signature input
+/// + `SAVE` button directly accessible from the viewfinder `WM` pill.
+class _CameraWatermarkSheet extends ConsumerStatefulWidget {
+  const _CameraWatermarkSheet();
+
+  @override
+  ConsumerState<_CameraWatermarkSheet> createState() =>
+      _CameraWatermarkSheetState();
+}
+
+class _CameraWatermarkSheetState extends ConsumerState<_CameraWatermarkSheet> {
+  late final TextEditingController _sigCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    final initial =
+        ref.read(cinemaCameraProvider).valueOrNull?.photographerSignature ?? '';
+    _sigCtrl = TextEditingController(text: initial);
+  }
+
+  @override
+  void dispose() {
+    _sigCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final st = ref.watch(cinemaCameraProvider).valueOrNull;
+    if (st == null) return const SizedBox.shrink();
+    final notifier = ref.read(cinemaCameraProvider.notifier);
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottomInset),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(0, 14, 0, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              WatermarkFramePicker(
+                selectedStyle: st.watermarkStyle,
+                selectedTheme: st.watermarkTheme,
+                onStyleChanged: (style) =>
+                    notifier.setCameraWatermark(style: style),
+                onThemeChanged: (theme) =>
+                    notifier.setCameraWatermark(theme: theme),
+              ),
+              if (st.watermarkStyle != 'none') ...[
+                const SizedBox(height: 10),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _sigCtrl,
+                          style: const TextStyle(
+                            color: AppTheme.textPrimary,
+                            fontSize: 12,
+                          ),
+                          decoration: InputDecoration(
+                            isDense: true,
+                            hintText: 'Signature (mis. WISNU SASTRA)',
+                            hintStyle: const TextStyle(
+                              color: AppTheme.textSecondary,
+                              fontSize: 11.5,
+                            ),
+                            filled: true,
+                            fillColor: Colors.white.withValues(alpha: 0.06),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 9,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(9),
+                              borderSide:
+                                  const BorderSide(color: AppTheme.hairline),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(9),
+                              borderSide:
+                                  const BorderSide(color: AppTheme.hairline),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(9),
+                              borderSide:
+                                  const BorderSide(color: AppTheme.cinemaAmber),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppTheme.cinemaAmber,
+                          side: BorderSide(
+                            color: AppTheme.cinemaAmber.withValues(alpha: 0.55),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 9,
+                          ),
+                          minimumSize: Size.zero,
+                        ),
+                        onPressed: () async {
+                          HapticFeedback.mediumImpact();
+                          await notifier.setPhotographerSignature(_sigCtrl.text);
+                          if (!context.mounted) return;
+                          FocusScope.of(context).unfocus();
+                          ScaffoldMessenger.of(context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Signature disimpan untuk Foto & Video.',
+                                  style: TextStyle(fontSize: 12),
+                                ),
+                                backgroundColor: AppTheme.cardDark,
+                                behavior: SnackBarBehavior.floating,
+                                duration: Duration(milliseconds: 1600),
+                              ),
+                            );
+                        },
+                        child: const Text(
+                          'SAVE',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 6),
+              SwitchListTile(
+                dense: true,
+                value: st.watermarkDateStamp,
+                activeThumbColor: AppTheme.cinemaAmber,
+                title: Text(
+                  AppStrings.of(context).dateStamp,
+                  style: const TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                subtitle: const Text(
+                  "Auto-stamp 'YY MM DD + Device & EXIF untuk Foto & Video",
+                  style: TextStyle(
+                    color: AppTheme.textSecondary,
+                    fontSize: 10.5,
+                  ),
+                ),
+                onChanged: (v) => notifier.setCameraWatermark(dateStamp: v),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

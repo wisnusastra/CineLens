@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.5.3 PRO';
+  static const String appVersion = '3.6.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,25 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.5.3 PRO',
+        version: 'v3.6.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                '120Hz ProMotion Fluid UI & Transisi Cinema: isolasi total sensor Horizon, Audio VU Meter & Live Scope ke ValueNotifier + RepaintBoundary (0% rebuild layar kamera utama), Cupertino swipe-back & Hero Zoom Galeri → Preview, AnimatedSwitcher tab Editor, animasi halus rasio FRAME, tactile press-scale & scroll bouncing khas iOS',
+                'Gallery Slide-to-Select (ala Apple Photos): saat mode Select aktif di Galeri, cukup geser jari menyamping (dan turun/naik lintas baris dengan auto-scroll tepi) untuk memilih atau membatalkan banyak foto/video sekaligus tanpa mengetuk satu per satu',
+                'Pelindung Desqueeze Anti-Foto Ketarik: badge peringatan merah DESQ 1.33× ✕ di kamera (tap langsung matikan ke 1.0×) + keterangan jelas bahwa Desqueeze khusus lensa fisik clip-on Anamorphic',
+                'Input Photographer Signature + SAVE kini tersedia langsung di tombol WM pada layar Kamera (selain di tab Watermark Gallery Editor)',
+              ]
+            : const [
+                '120Hz ProMotion Fluid UI & Cinema Transitions: isolated Horizon, Audio VU Meter & Live Scope onto ValueNotifiers + RepaintBoundaries (zero full-screen camera rebuilds), Cupertino swipe-back & Hero Zoom from Gallery to Preview, smooth Editor tab switcher, animated FRAME aspect masks, tactile press-scale & native iOS bouncing scroll',
+                'Apple Photos-Style Gallery Slide-to-Select: when Select mode is active, slide sideways (and diagonally across rows with automatic edge-scroll) to multi-select or deselect items effortlessly',
+                'Anamorphic Desqueeze Guard: prominent tappable red DESQ warning pill on the viewfinder (1-tap reset to 1.0×) + clear physical-lens helper copy so normal iPhone shots never get accidentally stretched',
+                'Photographer Signature + SAVE input is now accessible directly inside the Camera WM sheet as well as the Gallery Editor Watermark tab',
+              ],
+      ),
+      (
+        version: 'v3.5.3 PRO',
+        tag: 'WM POLISH',
         items: isId
             ? const [
                 'Fix preview kamera mengecil & bergaris hitam kiri-kanan saat WM aktif: viewfinder kamera kini selalu penuh (full-screen), bersih tanpa menumpuk tombol kontrol atau tergelapkan mask 1:1, sementara Watermark Frame tetap otomatis terpasang rapi ke setiap Foto & Video yang direkam',
