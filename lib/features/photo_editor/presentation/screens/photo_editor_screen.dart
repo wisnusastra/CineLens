@@ -1032,10 +1032,12 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
           }
         }
       } else {
+        final nativeSavesHeif10 = _edit.heif10Bit && socialPreset == 'none';
         final bytes = await repository.exportPhoto(
           path: widget.args.path,
           payload: payload,
           socialPreset: socialPreset,
+          saveToPhotos: toPhotos,
         );
         await camera.storePhoto(
           jpegBytes: bytes,
@@ -1044,7 +1046,9 @@ class _PhotoEditorScreenState extends ConsumerState<PhotoEditorScreen> {
           intensity: _toneIntensity,
           isAnamorphic: false,
         );
-        if (toPhotos) {
+        // When native Swift already saved the 10-bit Display P3 `.heic` (with
+        // automatic JPEG fallback), skip the duplicate 8-bit JPEG Photos save!
+        if (toPhotos && !nativeSavesHeif10) {
           try {
             await camera.saveImageToIosGallery(bytes);
           } catch (_) {

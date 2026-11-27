@@ -1932,12 +1932,18 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         warning = 'Foto tidak masuk galeri CineLens: ${_describeError(error)}';
       }
 
-      try {
-        await repository.saveImageToIosGallery(gradedBytes);
-      } catch (error) {
-        final message =
-            'Gagal menyimpan ke Apple Photos: ${_describeError(error)}';
-        warning = warning == null ? message : '$warning · $message';
+      // When 10-bit HEIF is enabled, native Swift (`renderGradedStill`) already
+      // saves the single true 10-bit Display P3 `.heic` master (with automatic
+      // JPEG fallback) directly to Apple Photos — skip the duplicate 8-bit JPEG
+      // copy so Apple Photos never receives 2 copies of the same shot!
+      if (!current.heif10Bit) {
+        try {
+          await repository.saveImageToIosGallery(gradedBytes);
+        } catch (error) {
+          final message =
+              'Gagal menyimpan ke Apple Photos: ${_describeError(error)}';
+          warning = warning == null ? message : '$warning · $message';
+        }
       }
 
       final latest = state.valueOrNull ?? current;

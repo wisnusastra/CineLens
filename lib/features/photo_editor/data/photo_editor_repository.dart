@@ -99,10 +99,13 @@ class PhotoEditorRepository {
   /// Renders the edit at full resolution and returns JPEG bytes.
   /// Optional [socialPreset] (`none`, `ig_4_5`, `reels_9_16`, `wa_hd`) crops
   /// and exports in safe sRGB so social apps never wash out P3 colors.
+  /// Set [saveToPhotos] to `true` only when the user chose to also export to
+  /// Apple Photos (so native 10-bit HEIF archiving honors CineLens-only saves).
   Future<Uint8List> exportPhoto({
     required String path,
     required Map<String, dynamic> payload,
     String socialPreset = 'none',
+    bool saveToPhotos = false,
   }) async {
     final bytes = await _channel.invokeMethod<Uint8List>(
       'editorExportPhoto',
@@ -110,6 +113,7 @@ class PhotoEditorRepository {
         'path': path,
         ...payload,
         'socialPreset': socialPreset,
+        'saveToPhotos': saveToPhotos,
         'quality': 0.95,
       },
     ).timeout(const Duration(minutes: 3));

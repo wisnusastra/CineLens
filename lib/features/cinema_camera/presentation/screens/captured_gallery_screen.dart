@@ -220,7 +220,7 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
   }
 
   List<CapturedMedia> get _selectedItems =>
-      _items.where((m) => _selectedIds.contains(m.id)).toList();
+      _filteredItems.where((m) => _selectedIds.contains(m.id)).toList();
 
   void _toggleSelectionMode() {
     HapticFeedback.selectionClick();
@@ -719,8 +719,8 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
       appBar: AppBar(
         backgroundColor: AppTheme.backgroundBlack,
         title: Text(
-          _selectionMode && _selectedIds.isNotEmpty
-              ? s.selectedCount(_selectedIds.length).toUpperCase()
+          _selectionMode && _selectedItems.isNotEmpty
+              ? s.selectedCount(_selectedItems.length).toUpperCase()
               : s.gallery,
         ),
         actions: [
@@ -910,7 +910,13 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
             GestureDetector(
               onTap: () {
                 HapticFeedback.selectionClick();
-                setState(() => _filter = filter);
+                setState(() {
+                  _filter = filter;
+                  if (_selectionMode && _selectedIds.isNotEmpty) {
+                    final visibleIds = _filteredItems.map((m) => m.id).toSet();
+                    _selectedIds.retainAll(visibleIds);
+                  }
+                });
               },
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 140),
@@ -951,7 +957,7 @@ class _CapturedGalleryScreenState extends ConsumerState<CapturedGalleryScreen> {
   }
 
   Widget _buildBatchActionBar(AppStrings s, List<CapturedMedia> visible) {
-    final count = _selectedIds.length;
+    final count = _selectedItems.length;
     final allSelected =
         visible.isNotEmpty && visible.every((m) => _selectedIds.contains(m.id));
 

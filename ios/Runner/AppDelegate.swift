@@ -2496,6 +2496,7 @@ final class ExportProgressReporter {
     // Smart 10-bit Display P3 HEIF quality (0.92 ≈ 4–5 MB vs 12.4 MB at 0.98
     // with visually identical 10-bit precision and 2.5× faster Photos loading).
     let heifQuality = min(clampedQuality, 0.92)
+    var savedHeifToPhotos = false
     if heif10Bit,
        let heifData: Data = try? context.heif10Representation(
          of: output,
@@ -2512,6 +2513,7 @@ final class ExportProgressReporter {
       let heicUrl = dir.appendingPathComponent("CINELENS_10BIT_\(Int(Date().timeIntervalSince1970)).heic")
       try? heifData.write(to: heicUrl, options: Data.WritingOptions.atomic)
       AppDelegate.saveRawHeifToPhotosIfAuthorized(heifData)
+      savedHeifToPhotos = true
     }
 
     guard let cgImage = context.createCGImage(
@@ -2556,7 +2558,14 @@ final class ExportProgressReporter {
 
     CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
     guard CGImageDestinationFinalize(destination) else { return nil }
-    return jpeg as Data
+    let jpegData = jpeg as Data
+    // Bulletproof fallback: if 10-bit HEIF encoding wasn't available on an older
+    // device, save the JPEG directly to Photos so Dart skipping duplicates never
+    // leaves Apple Photos empty.
+    if heif10Bit && !savedHeifToPhotos {
+      AppDelegate.saveRawHeifToPhotosIfAuthorized(jpegData)
+    }
+    return jpegData
     }
   }
 
@@ -3175,12 +3184,22 @@ final class ExportProgressReporter {
   }
 
   private static func saveRawHeifToPhotosIfAuthorized(_ data: Data) {
+    let writeAsset = {
+      PHPhotoLibrary.shared().performChanges({
+        let req = PHAssetCreationRequest.forAsset()
+        req.addResource(with: .photo, data: data, options: nil)
+      }, completionHandler: nil)
+    }
     let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-    guard status == .authorized || status == .limited else { return }
-    PHPhotoLibrary.shared().performChanges({
-      let req = PHAssetCreationRequest.forAsset()
-      req.addResource(with: .photo, data: data, options: nil)
-    }, completionHandler: nil)
+    if status == .authorized || status == .limited {
+      writeAsset()
+    } else if status == .notDetermined {
+      PHPhotoLibrary.requestAuthorization(for: .addOnly) { newStatus in
+        if newStatus == .authorized || newStatus == .limited {
+          writeAsset()
+        }
+      }
+    }
   }
 
   private func editorLoadPreview(
@@ -3306,6 +3325,7 @@ final class ExportProgressReporter {
     let matrix = args["matrix"] as? [Double]
     let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.95
     let socialPreset = (args["socialPreset"] as? String) ?? "none"
+    let saveToPhotos = (args["saveToPhotos"] as? Bool) ?? false
 
     DispatchQueue.global(qos: .userInitiated).async {
       var output: CIImage?
@@ -3354,6 +3374,7 @@ final class ExportProgressReporter {
         output = img
       }
 
+      var savedHeifToPhotos = false
       if socialPreset == "none",
          params.heif10Bit,
          let outImg = output,
@@ -3372,11 +3393,18 @@ final class ExportProgressReporter {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let heicUrl = dir.appendingPathComponent("CINELENS_EDIT_10BIT_\(Int(Date().timeIntervalSince1970)).heic")
         try? heifData.write(to: heicUrl, options: Data.WritingOptions.atomic)
-        AppDelegate.saveRawHeifToPhotosIfAuthorized(heifData)
+        if saveToPhotos {
+          AppDelegate.saveRawHeifToPhotosIfAuthorized(heifData)
+          savedHeifToPhotos = true
+        }
       }
       let outQuality = (socialPreset == "wa_hd") ? min(quality, 0.90) : quality
       let data = output.flatMap {
         PhotoEditor.jpegData(from: $0, quality: outQuality)
+      }
+      if saveToPhotos && socialPreset == "none" && params.heif10Bit && !savedHeifToPhotos,
+         let fallbackJpeg = data {
+        AppDelegate.saveRawHeifToPhotosIfAuthorized(fallbackJpeg)
       }
       AppDelegate.p3GradingContext.clearCaches()
       AppDelegate.gradingContext.clearCaches()
@@ -11618,26 +11646,38 @@ final class NativeCinemaCameraEngine: NSObject,
     } catch {}
   }
 
+  private static func mapNormalizedPointToSensor(
+    x: Double,
+    y: Double,
+    orientation: AVCaptureVideoOrientation,
+    mirrored: Bool
+  ) -> CGPoint {
+    let effX = mirrored ? (1.0 - x) : x
+    switch orientation {
+    case .landscapeRight:
+      return CGPoint(x: effX, y: y)
+    case .landscapeLeft:
+      return CGPoint(x: 1.0 - effX, y: 1.0 - y)
+    case .portraitUpsideDown:
+      return CGPoint(x: 1.0 - y, y: effX)
+    default:
+      return CGPoint(x: y, y: 1.0 - effX)
+    }
+  }
+
   func setFocusPoint(x: Double, y: Double, focus: Bool, exposure: Bool) -> Bool {
     let clampedX = min(max(x, 0.0), 1.0)
     let clampedY = min(max(y, 0.0), 1.0)
     let orient = Self.resolveMainThreadOrientation()
-    // Map normalized UI coordinates (top-left origin) to AVFoundation sensor coordinates
-    // (landscapeRight sensor origin) accurately for all 4 orientations!
-    let sensorPoint: CGPoint
-    switch orient {
-    case .landscapeRight:
-      sensorPoint = CGPoint(x: clampedX, y: clampedY)
-    case .landscapeLeft:
-      sensorPoint = CGPoint(x: 1.0 - clampedX, y: 1.0 - clampedY)
-    case .portraitUpsideDown:
-      sensorPoint = CGPoint(x: 1.0 - clampedY, y: clampedX)
-    default:
-      sensorPoint = CGPoint(x: clampedY, y: 1.0 - clampedX)
-    }
 
     sessionQueue.async { [weak self] in
       guard let self = self, let device = self.activeDevice else { return }
+      let sensorPoint = Self.mapNormalizedPointToSensor(
+        x: clampedX,
+        y: clampedY,
+        orientation: orient,
+        mirrored: self.currentPosition == .front
+      )
       do {
         try device.lockForConfiguration()
         if focus && device.isFocusPointOfInterestSupported {
@@ -11661,26 +11701,22 @@ final class NativeCinemaCameraEngine: NSObject,
     return triggerRackFocus(x: clampedX, y: clampedY, forceBackground: nil)
   }
 
-  /// Long-Press AE/AF Lock: locks focus + exposure at `(x, y)` (4-orientation mapped),
-  /// or unlocks back to smooth continuous AF/AE when `locked == false`.
+  /// Long-Press AE/AF Lock: locks focus + exposure at `(x, y)` (4-orientation +
+  /// front-camera mirror mapped), or unlocks back to smooth continuous AF/AE when
+  /// `locked == false`.
   func setAeAfLock(locked: Bool, x: Double, y: Double) {
     let clampedX = min(max(x, 0.0), 1.0)
     let clampedY = min(max(y, 0.0), 1.0)
     let orient = Self.resolveMainThreadOrientation()
-    let sensorPoint: CGPoint
-    switch orient {
-    case .landscapeRight:
-      sensorPoint = CGPoint(x: clampedX, y: clampedY)
-    case .landscapeLeft:
-      sensorPoint = CGPoint(x: 1.0 - clampedX, y: 1.0 - clampedY)
-    case .portraitUpsideDown:
-      sensorPoint = CGPoint(x: 1.0 - clampedY, y: clampedX)
-    default:
-      sensorPoint = CGPoint(x: clampedY, y: 1.0 - clampedX)
-    }
 
     sessionQueue.async { [weak self] in
       guard let self = self, let device = self.activeDevice else { return }
+      let sensorPoint = Self.mapNormalizedPointToSensor(
+        x: clampedX,
+        y: clampedY,
+        orientation: orient,
+        mirrored: self.currentPosition == .front
+      )
       do {
         try device.lockForConfiguration()
         if locked {
@@ -12970,8 +13006,9 @@ final class NativeCinemaCameraEngine: NSObject,
       do {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        var useProRes = recordProRes
         var videoSettings: [String: Any] = [
-          AVVideoCodecKey: recordProRes
+          AVVideoCodecKey: useProRes
             ? AVVideoCodecType.proRes422.rawValue
             : AVVideoCodecType.hevc.rawValue,
           AVVideoWidthKey: w,
@@ -12982,9 +13019,13 @@ final class NativeCinemaCameraEngine: NSObject,
             AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
           ],
         ]
-        if !recordProRes {
+        if useProRes && !writer.canApply(outputSettings: videoSettings, forMediaType: .video) {
+          useProRes = false
+          videoSettings[AVVideoCodecKey] = AVVideoCodecType.hevc.rawValue
+        }
+        if !useProRes {
           videoSettings[AVVideoCompressionPropertiesKey] = [
-            AVVideoAverageBitRateKey: recordBitrate,
+            AVVideoAverageBitRateKey: recordProRes ? max(recordBitrate, 80_000_000) : recordBitrate,
             AVVideoExpectedSourceFrameRateKey: recordFps,
           ]
         }
@@ -13060,7 +13101,8 @@ final class NativeCinemaCameraEngine: NSObject,
 
     stateLock.lock()
     if isRecording, recordWriter?.status == .writing, recordVideoInput?.isReadyForMoreMediaData == true {
-      if recordAdaptor?.append(pixelBuf, withPresentationTime: pts) == true {
+      let monotonic = lastWrittenVideoPTS.map { CMTimeCompare(pts, $0) > 0 } ?? true
+      if monotonic, recordAdaptor?.append(pixelBuf, withPresentationTime: pts) == true {
         lastWrittenVideoPTS = pts
       }
     }

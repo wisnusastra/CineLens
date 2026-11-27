@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.7.0 PRO';
+  static const String appVersion = '3.7.1 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,27 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.7.0 PRO',
+        version: 'v3.7.1 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Audit Bug Mendalam & Stabilitas Menyeluruh (5 Perbaikan Edge-Case Swift & Dart):',
+                'Fix Duplikat Foto 10-Bit HEIF di Apple Photos (C1/C2 & Photo Editor): kini hanya menyimpan 1 file 10-bit Display P3 .heic (dengan fallback otomatis & permintaan izin Photos pertama kali), serta menghormati opsi simpan Galeri CineLens saja & Batch Edit',
+                'Fix Fokus & AE/AF Lock Kamera Depan (Selfie): titik ketuk fokus & tahan kunci eksposur kini tidak lagi terbalik kiri-kanan pada preview cermin kamera depan',
+                'Fix Multi-Select Galeri + Ganti Tab Filter: berpindah filter (ALL/PHOTO/VIDEO/IMPORTED) saat mode Select kini otomatis menyaring pilihan agar item tersembunyi tidak ikut terhapus atau ter-Batch Edit',
+                'Pelindung ProRes 422 & Timestamp Video: cek kompatibilitas hardware ProRes otomatis (fallback aman ke HEVC 80 Mbps di iPhone non-Pro/dimensi khusus) + proteksi timestamp monotonik anti-error setelah Pause/Resume cepat',
+              ]
+            : const [
+                'Deep Full-Codebase Bug Audit & Hardening (5 Swift & Dart Edge-Case Fixes):',
+                'Fixed 10-Bit HEIF Duplicate Photo Saves in Apple Photos (C1/C2 & Photo Editor): now writes a single true 10-bit Display P3 .heic (with automatic JPEG fallback & first-run addOnly permission prompt) and honors CineLens-only / Batch Edit saves',
+                'Fixed Front Camera (Selfie) Tap-to-Focus & Long-Press AE/AF Lock: mirrored preview X-coordinates now map accurately to sensor space across all 4 orientations',
+                'Fixed Gallery Multi-Select across Filter Tabs: switching filters while Select mode is active now scopes & prunes selection strictly to visible items so hidden media can never be deleted or batch-edited',
+                'Hardened ProRes 422 & Video Writer Stability: automatic hardware ProRes capability check (graceful 80 Mbps HEVC fallback on non-Pro iPhones/custom frame sizes) + monotonic PTS guard against rapid Pause/Resume stalls',
+              ],
+      ),
+      (
+        version: 'v3.7.0 PRO',
+        tag: 'COOL LUTS',
         items: isId
             ? const [
                 'Rombak Total 6 3D LUT Cool & Cinema + CineStill 800T (Kalibrasi Color-Science Baru): tiap tone kini punya karakter dingin yang sangat berbeda & tegas bahkan di cahaya kafe kuning (Metro Teal Night dingin cyan-petrol elektrik, Blue Hour Rooftop biru safir + kulit ivory cerah, Nordic Slate steel-blue dingin tanpa hijau, Tokyo Petrol 500T hijau zamrud Wong Kar-wai + merah neon, Cool Chrome 100 putih salju bersih, Orange & Teal dual-tone sejati dengan Skin-Tone Recovery dari RGB asli)',
