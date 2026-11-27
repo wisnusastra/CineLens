@@ -334,7 +334,7 @@ class CinemaCameraRepository {
       directLutRecording:
           prefs.getBool(AppConstants.prefDirectLutRecording) ?? false,
       liveMetalPreview:
-          prefs.getBool(AppConstants.prefLiveMetalPreview) ?? false,
+          prefs.getBool(AppConstants.prefLiveMetalPreview) ?? true,
     );
   }
 

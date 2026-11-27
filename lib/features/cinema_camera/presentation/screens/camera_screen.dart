@@ -50,6 +50,12 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
 
   int _countdownRemaining = 0;
   Timer? _countdownTimer;
+  DateTime _ignoreHardwareShutterUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _armHardwareShutterCooldown([int ms = 1500]) {
+    _ignoreHardwareShutterUntil =
+        DateTime.now().add(Duration(milliseconds: ms));
+  }
 
   CinemaCameraNotifier get _notifier => ref.read(cinemaCameraProvider.notifier);
 
@@ -91,6 +97,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         return;
       }
       if (ModalRoute.of(context)?.isCurrent != true) return;
+      if (DateTime.now().isBefore(_ignoreHardwareShutterUntil)) return;
+      if (_isTogglingVideo || _isCapturingPhoto) return;
       final isVideo = nextState.captureMode.isVideo;
       if (isVideo) {
         _handleVideoToggle(options.hapticFeedback);
@@ -459,7 +467,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _buildShutterButton(state, haptics, size: 66),
-                    if (state.isRecordingVideo && !state.proResEnabled) ...[
+                    if (state.isRecordingVideo) ...[
                       const SizedBox(height: 8),
                       _CircleControl(
                         icon: state.isRecordingPaused
@@ -496,6 +504,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                               if (haptics) HapticFeedback.selectionClick();
                               await context.push('/gallery');
                               if (mounted) {
+                                _armHardwareShutterCooldown();
                                 _notifier.resumeCameraSession();
                                 unawaited(_notifier.refreshLatestThumb());
                               }
@@ -1535,7 +1544,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           width: 96,
           child: Align(
             alignment: Alignment.centerLeft,
-            child: state.isRecordingVideo && !state.proResEnabled
+            child: state.isRecordingVideo
                 ? _CircleControl(
                     icon: state.isRecordingPaused
                         ? Icons.play_arrow_rounded
@@ -1553,6 +1562,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                       if (haptics) HapticFeedback.selectionClick();
                       await context.push('/gallery');
                       if (mounted) {
+                        _armHardwareShutterCooldown();
                         _notifier.resumeCameraSession();
                         unawaited(_notifier.refreshLatestThumb());
                       }
@@ -1663,10 +1673,13 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     double size = 74,
   }) {
     final isVideo = state.captureMode.isVideo;
-    final isBusy = state.isCapturing ||
-        _isCapturingPhoto ||
-        _isTogglingVideo ||
-        state.isProcessingVideo;
+    // Always allow tapping STOP while recording (never lock user inside a take!).
+    final isBusy = state.isRecordingVideo
+        ? state.isProcessingVideo
+        : (state.isCapturing ||
+            _isCapturingPhoto ||
+            _isTogglingVideo ||
+            state.isProcessingVideo);
     final innerIdle = size - 16;
     final innerRec = size * 0.35;
 
@@ -1741,48 +1754,66 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     final rem = state.remainingStorageLabel;
     final paused = state.isRecordingPaused;
     final tl = state.isTimelapseArmed;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-      decoration: BoxDecoration(
-        color: paused
-            ? AppTheme.cinemaAmber.withValues(alpha: 0.92)
-            : AppTheme.cinemaRed.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            paused ? Icons.pause_rounded : Icons.fiber_manual_record,
-            color: paused ? Colors.black : Colors.white,
-            size: 11,
-          ),
-          const SizedBox(width: 5),
-          Text(
-            paused
-                ? 'PAUSED · ${state.smpteTimecode}'
-                : tl
-                    ? 'TL ${state.timelapseInterval.round()}s · ${state.smpteTimecode}'
-                    : state.smpteTimecode,
-            style: AppTheme.monoStyle(
-              color: paused ? Colors.black : Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.w800,
+    final fps = state.frameRate.value;
+    return RepaintBoundary(
+      child: ValueListenableBuilder<Duration>(
+        valueListenable: _notifier.recordingDurationNotifier,
+        builder: (_, dur, __) {
+          final totalMs = dur.inMilliseconds;
+          final hours = (totalMs ~/ 3600000) % 100;
+          final minutes = (totalMs ~/ 60000) % 60;
+          final seconds = (totalMs ~/ 1000) % 60;
+          final frames = ((totalMs % 1000) * fps) ~/ 1000;
+          String two(int n) => n.toString().padLeft(2, '0');
+          final tc =
+              '${two(hours)}:${two(minutes)}:${two(seconds)}:${two(frames)}';
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+            decoration: BoxDecoration(
+              color: paused
+                  ? AppTheme.cinemaAmber.withValues(alpha: 0.92)
+                  : AppTheme.cinemaRed.withValues(alpha: 0.92),
+              borderRadius: BorderRadius.circular(16),
             ),
-          ),
-          if (rem.isNotEmpty) ...[
-            const SizedBox(width: 7),
-            Text(
-              '~$rem',
-              style: AppTheme.monoStyle(
-                color: (paused ? Colors.black : Colors.white)
-                    .withValues(alpha: 0.78),
-                fontSize: 9.5,
-                fontWeight: FontWeight.w700,
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  paused ? Icons.pause_rounded : Icons.fiber_manual_record,
+                  color: paused ? Colors.black : Colors.white,
+                  size: 11,
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  paused
+                      ? 'PAUSED · $tc'
+                      : tl
+                          ? 'TL ${state.timelapseInterval.round()}s · $tc'
+                          : state.proResEnabled
+                              ? 'PRORES · $tc'
+                              : tc,
+                  style: AppTheme.monoStyle(
+                    color: paused ? Colors.black : Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                if (rem.isNotEmpty) ...[
+                  const SizedBox(width: 7),
+                  Text(
+                    '~$rem',
+                    style: AppTheme.monoStyle(
+                      color: (paused ? Colors.black : Colors.white)
+                          .withValues(alpha: 0.78),
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ],
             ),
-          ],
-        ],
+          );
+        },
       ),
     );
   }
@@ -2153,7 +2184,10 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           isAnamorphic: state.isAnamorphicRatio,
         ),
       );
-      if (mounted) _notifier.resumeCameraSession();
+      if (mounted) {
+        _armHardwareShutterCooldown();
+        _notifier.resumeCameraSession();
+      }
     } catch (error) {
       _toast(_describe(error), isError: true);
     } finally {
@@ -2162,13 +2196,15 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   }
 
   Future<void> _handleVideoToggle(bool haptics) async {
-    if (_isTogglingVideo) return;
-    if (haptics) HapticFeedback.mediumImpact();
     final state = ref.read(cinemaCameraProvider).valueOrNull;
     if (state == null) return;
-
     final wasRecording = state.isRecordingVideo;
+    // Allow STOP even if a previous start flag lingered; only debounce starts.
+    if (_isTogglingVideo && !wasRecording) return;
+    if (haptics) HapticFeedback.mediumImpact();
+
     setState(() => _isTogglingVideo = true);
+    String? completedPath;
     try {
       if (wasRecording) {
         final result = await _notifier.stopVideo24fpsRecording();
@@ -2179,16 +2215,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
           return;
         }
         if (result.warning != null) _toast(result.warning!);
-        await context.push(
-          '/preview',
-          extra: CapturedPreviewArgs.video(
-            videoFilePath: result.path,
-            tone: state.selectedTone,
-            intensity: state.intensity,
-            isAnamorphic: state.isAnamorphicRatio,
-          ),
-        );
-        if (mounted) _notifier.resumeCameraSession();
+        completedPath = result.path;
       } else {
         await _lockOrientationForRecording();
         if (!mounted) return;
@@ -2199,6 +2226,22 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       _toast(_describe(error), isError: true);
     } finally {
       if (mounted) setState(() => _isTogglingVideo = false);
+    }
+
+    if (completedPath != null && mounted) {
+      await context.push(
+        '/preview',
+        extra: CapturedPreviewArgs.video(
+          videoFilePath: completedPath,
+          tone: state.selectedTone,
+          intensity: state.intensity,
+          isAnamorphic: state.isAnamorphicRatio,
+        ),
+      );
+      if (mounted) {
+        _armHardwareShutterCooldown(1800);
+        _notifier.resumeCameraSession();
+      }
     }
   }
 

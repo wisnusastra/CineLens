@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.6.0 PRO';
+  static const String appVersion = '3.7.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,23 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.6.0 PRO',
+        version: 'v3.7.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Rombak Total 6 3D LUT Cool & Cinema + CineStill 800T (Kalibrasi Color-Science Baru): tiap tone kini punya karakter dingin yang sangat berbeda & tegas bahkan di cahaya kafe kuning (Metro Teal Night dingin cyan-petrol elektrik, Blue Hour Rooftop biru safir + kulit ivory cerah, Nordic Slate steel-blue dingin tanpa hijau, Tokyo Petrol 500T hijau zamrud Wong Kar-wai + merah neon, Cool Chrome 100 putih salju bersih, Orange & Teal dual-tone sejati dengan Skin-Tone Recovery dari RGB asli)',
+                'Fix Total Bug ProRes Merekam Sendiri & Tidak Bisa Dihentikan: pindahkan ProRes 422 langsung ke engine single-session NativeCinemaCameraEngine (hapus konflik dual AVCaptureSession audio & mendukung Pause/Resume!), blokir pemicu palsu Volume Shutter saat keluar dari Preview Video/ganti rute audio, dan jamin tombol Stop selalu bisa diketuk kapan saja',
+                'Live Metal 3D LUT Preview kini aktif otomatis secara default agar layar kamera 100% cocok dengan hasil 3D LUT + Skin-Tone Recovery, plus isolasi timer rekam (0 rebuild selama rekam 4K/ProRes)',
+              ]
+            : const [
+                'Complete Color-Science Overhaul of all 6 Cool & Cinema 3D LUTs + CineStill 800T: every stock now delivers an unmistakable, distinct cool character even under warm tungsten lighting (electric cyan Metro Teal, sapphire twilight Blue Hour Rooftop, pure steel-blue Nordic Slate, Wong Kar-wai emerald Tokyo Petrol 500T, crisp ice-white Cool Chrome 100, and true dual-tone Orange & Teal with Original-RGB Skin-Tone Recovery)',
+                'Fixed ProRes Runaway Auto-Recording & Unstoppable Lock: unified ProRes 422 directly inside single-session NativeCinemaCameraEngine (eliminating competing audio sessions and enabling Pause/Resume), suppressed phantom Volume Shutter KVO triggers on audio-route changes / preview return, and guaranteed Stop button responsiveness at all times',
+                'Enabled Live Metal 3D LUT Preview by default so live viewfinder matches final 3D LUT renders 1:1, plus isolated SMPTE recording clock to eliminate 10Hz camera rebuilds during 4K/ProRes takes',
+              ],
+      ),
+      (
+        version: 'v3.6.0 PRO',
+        tag: '120HZ UX',
         items: isId
             ? const [
                 '120Hz ProMotion Fluid UI & Transisi Cinema: isolasi total sensor Horizon, Audio VU Meter & Live Scope ke ValueNotifier + RepaintBoundary (0% rebuild layar kamera utama), Cupertino swipe-back & Hero Zoom Galeri → Preview, AnimatedSwitcher tab Editor, animasi halus rasio FRAME, tactile press-scale & scroll bouncing khas iOS',

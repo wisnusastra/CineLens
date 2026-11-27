@@ -175,6 +175,29 @@ final class ExportProgressReporter {
   private var hiddenVolumeView: MPVolumeView?
   private var lastVolumeShutterTime: TimeInterval = 0
   private var suppressingVolumeReset = false
+  private var suppressVolumeShutterUntil: CFTimeInterval = 0
+  private let volumeShutterLock = NSLock()
+  private var audioRouteObserver: NSObjectProtocol?
+  private var audioInterruptObserver: NSObjectProtocol?
+
+  /// Suppresses phantom `AVAudioSession.outputVolume` KVO triggers caused by
+  /// iOS switching audio categories/routes (e.g. closing Video Preview, starting
+  /// or stopping ProRes/HEVC recording, or resuming the camera session).
+  func suppressVolumeShutter(for seconds: Double = 1.6) {
+    volumeShutterLock.lock()
+    let target = CACurrentMediaTime() + seconds
+    if target > suppressVolumeShutterUntil {
+      suppressVolumeShutterUntil = target
+    }
+    volumeShutterLock.unlock()
+  }
+
+  private func isVolumeShutterSuppressed() -> Bool {
+    volumeShutterLock.lock()
+    let suppressed = CACurrentMediaTime() < suppressVolumeShutterUntil
+    volumeShutterLock.unlock()
+    return suppressed
+  }
 
   /// Flutter texture registry + 100% Native Swift Cinema Camera Engine (v3.0).
   private var textureRegistry: FlutterTextureRegistry?
@@ -3965,14 +3988,39 @@ final class ExportProgressReporter {
       if !enabled {
         self.volumeObservation?.invalidate()
         self.volumeObservation = nil
+        if let obs = self.audioRouteObserver {
+          NotificationCenter.default.removeObserver(obs)
+          self.audioRouteObserver = nil
+        }
+        if let obs = self.audioInterruptObserver {
+          NotificationCenter.default.removeObserver(obs)
+          self.audioInterruptObserver = nil
+        }
         self.hiddenVolumeView?.removeFromSuperview()
         self.hiddenVolumeView = nil
         return
       }
       guard self.volumeObservation == nil else { return }
 
+      self.suppressVolumeShutter(for: 1.5)
       let session = AVAudioSession.sharedInstance()
       try? session.setActive(true)
+
+      let nc = NotificationCenter.default
+      self.audioRouteObserver = nc.addObserver(
+        forName: AVAudioSession.routeChangeNotification,
+        object: session,
+        queue: .main
+      ) { [weak self] _ in
+        self?.suppressVolumeShutter(for: 1.5)
+      }
+      self.audioInterruptObserver = nc.addObserver(
+        forName: AVAudioSession.interruptionNotification,
+        object: session,
+        queue: .main
+      ) { [weak self] _ in
+        self?.suppressVolumeShutter(for: 1.5)
+      }
 
       if self.hiddenVolumeView == nil,
          let win = UIApplication.shared.connectedScenes
@@ -3987,9 +4035,10 @@ final class ExportProgressReporter {
 
       self.volumeObservation = session.observe(\.outputVolume, options: [.old, .new]) { [weak self] _, change in
         guard let self = self, !self.suppressingVolumeReset else { return }
+        guard !self.isVolumeShutterSuppressed() else { return }
         guard let oldV = change.oldValue, let newV = change.newValue, abs(newV - oldV) > 0.001 else { return }
         let now = Date().timeIntervalSince1970
-        guard now - self.lastVolumeShutterTime > 0.45 else { return }
+        guard now - self.lastVolumeShutterTime > 0.55 else { return }
         self.lastVolumeShutterTime = now
 
         // Keep system volume away from 0.0 / 1.0 limits so subsequent presses still emit KVO.
@@ -3998,13 +4047,15 @@ final class ExportProgressReporter {
             self.suppressingVolumeReset = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
               slider.value = 0.5
-              DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+              DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 self.suppressingVolumeReset = false
               }
             }
           }
         }
         DispatchQueue.main.async {
+          guard UIApplication.shared.applicationState == .active else { return }
+          guard !self.isVolumeShutterSuppressed() else { return }
           self.nativeChannel?.invokeMethod("hardwareShutterPressed", arguments: nil)
         }
       }
@@ -5204,6 +5255,9 @@ enum FilmEngine {
         r: min(max(outR, 0.0), 1.0),
         g: min(max(outG, 0.0), 1.0),
         b: min(max(outB, 0.0), 1.0),
+        origR: r,
+        origG: g,
+        origB: b,
         luma: luma,
         profile: profile
       )
@@ -5286,120 +5340,86 @@ enum FilmEngine {
     r: Double,
     g: Double,
     b: Double,
+    origR: Double,
+    origG: Double,
+    origB: Double,
     luma: Double,
     profile: String
   ) -> (Double, Double, Double) {
+    // Detect human skin & bright warm tungsten/neon lights from the ORIGINAL
+    // un-cooled RGB BEFORE strong cool white-balance (`mix`) runs, so human
+    // skin is ALWAYS recovered cleanly without turning blue or carrot-orange!
+    let (h0, s0, v0) = rgbToHsv(origR, origG, origB)
+    let skinOrig = hueBell(h0, center: 21.0, halfWidth: 22.0)
+      * smoothstep(0.10, 0.25, s0)
+      * smoothstep(0.14, 0.32, v0)
+      * (1.0 - smoothstep(0.84, 0.96, v0))
+    let warmLightOrig = hueBell(h0, center: 28.0, halfWidth: 32.0)
+      * smoothstep(0.76, 0.94, v0)
+      * smoothstep(0.28, 0.55, s0)
+
     var (h, s, v) = rgbToHsv(r, g, b)
-    let chromaMask = smoothstep(0.04, 0.22, s)
-    let shadowMask = 1.0 - smoothstep(0.06, 0.52, luma)
-    let midMask = smoothstep(0.08, 0.35, luma) * (1.0 - smoothstep(0.62, 0.92, luma))
+    let chromaMask = smoothstep(0.04, 0.20, s)
     let hlMask = smoothstep(0.50, 0.92, luma)
+    var skinKeep = 0.0
 
     switch profile {
     case "teal_orange":
-      // Exact SchemeColor Orange & Teal (#FD5901 / #F78104 / #FAAB36 vs #249EA0 / #008083 / #005F60)
-      // WITH strict Cinema Skin-Tone Protection so indoor/daylight human skin NEVER turns carrot-orange!
-      let tealZone = hueBell(h, center: 185.0, halfWidth: 96.0)
+      // Hollywood Orange & Teal (#FD5901/#F78104/#FAAB36 vs #249EA0/#008083/#005F60)
+      // with full original-RGB skin recovery so skin stays clean peach, never carrot-orange!
+      let tealZone = hueBell(h, center: 190.0, halfWidth: 95.0)
       let greenZone = hueBell(h, center: 118.0, halfWidth: 52.0)
-      // Broad skin guard covering fair, warm indoor tungsten, tan & deep skin (8°..44°)
-      let skinZone = hueBell(h, center: 24.0, halfWidth: 20.0)
-        * smoothstep(0.10, 0.24, s)
-        * smoothstep(0.10, 0.26, v)
-        * (1.0 - smoothstep(0.84, 0.96, v))
-      // Only bright specular lights / vivid non-skin accents get fiery orange boost!
-      let brightLightMask = smoothstep(0.74, 0.92, v) * smoothstep(0.30, 0.60, s)
-      let warmAccent = hueBell(h, center: 28.0, halfWidth: 46.0) * (1.0 - 0.88 * skinZone)
-
-      // Pull blues & greens cleanly toward pure 181° cinema petrol teal (#008083 / #249EA0)
-      h += shortestHueDelta(from: h, to: 181.0) * (0.64 * tealZone + 0.56 * greenZone) * chromaMask
-      // Pull non-skin yellows/reds toward clean golden-tangerine (#F78104/#FAAB36); keep skin natural peach (20°)
-      let orangeTarget = 22.0 + 13.0 * hlMask
-      h += shortestHueDelta(from: h, to: orangeTarget) * (0.50 * warmAccent + 0.35 * brightLightMask) * chromaMask
-      h += shortestHueDelta(from: h, to: 20.0) * 0.22 * skinZone
-
-      // Lush teal saturation; calm over-saturated indoor tungsten skin cleanly instead of boosting it!
-      let tealBoost = 1.0 + 0.24 * (tealZone + greenZone * 0.6) * (0.65 + 0.35 * shadowMask)
-      let orangeBoost = 1.0 + 0.18 * (warmAccent + brightLightMask * 0.6)
-      s = min(s * tealBoost * orangeBoost, 1.0)
-      if skinZone > 0.01 && s > 0.34 {
-        // Soft-compress excess orange saturation on skin (keeps skin clean, natural & creamy!)
-        let excess = s - 0.34
-        s = 0.34 + excess * (1.0 - 0.42 * skinZone)
-      }
-      v = min(max(v * (1.0 - 0.06 * tealZone * shadowMask + 0.03 * skinZone), 0.0), 1.0)
+      let warmAccent = hueBell(h, center: 28.0, halfWidth: 44.0) * (1.0 - 0.80 * skinOrig)
+      h += shortestHueDelta(from: h, to: 183.0) * (0.68 * tealZone + 0.58 * greenZone) * chromaMask
+      h += shortestHueDelta(from: h, to: 26.0 + 10.0 * hlMask) * (0.55 * warmAccent + 0.45 * warmLightOrig) * chromaMask
+      s = min(max(s * (1.0 + 0.30 * (tealZone + greenZone * 0.6) + 0.28 * (warmAccent + warmLightOrig)), 0.0), 1.0)
+      skinKeep = 0.65
 
     case "metro_teal":
-      // Photo #1: Night urban light-trails — deep petrol #005F60, electric #249EA0, blazing neon lights #FD5901,
-      // while protecting human skin tones from turning neon burnt-orange!
-      let coolZone = hueBell(h, center: 192.0, halfWidth: 105.0)
-      let skinZone = hueBell(h, center: 24.0, halfWidth: 20.0)
-        * smoothstep(0.10, 0.24, s)
-        * smoothstep(0.10, 0.26, v)
-        * (1.0 - smoothstep(0.84, 0.96, v))
-      let neonLight = hueBell(h, center: 24.0, halfWidth: 48.0)
-        * (smoothstep(0.72, 0.90, v) + (1.0 - skinZone) * 0.55)
-
-      h += shortestHueDelta(from: h, to: 184.0) * 0.70 * coolZone * chromaMask
-      let fireTarget = 18.0 + 16.0 * hlMask
-      h += shortestHueDelta(from: h, to: fireTarget) * min(0.55, 0.45 * neonLight) * chromaMask
-      h += shortestHueDelta(from: h, to: 19.0) * 0.24 * skinZone
-
-      s = min(s * (1.0 + 0.28 * coolZone * (0.5 + 0.5 * midMask) + 0.22 * neonLight * hlMask), 1.0)
-      if skinZone > 0.01 && s > 0.32 {
-        let excess = s - 0.32
-        s = 0.32 + excess * (1.0 - 0.48 * skinZone)
-      }
-      v = min(max(v * (1.0 - 0.08 * coolZone * shadowMask + 0.04 * skinZone + 0.05 * neonLight * hlMask), 0.0), 1.0)
+      // Electric Cyber-Petrol Night (calibrated to User Cool Helmet video & Ref #1):
+      // crisp icy-cyan walls/asphalt + deep obsidian-teal shadows + blazing warm streetlamps
+      let coolZone = hueBell(h, center: 195.0, halfWidth: 108.0)
+      h += shortestHueDelta(from: h, to: 186.0) * 0.72 * coolZone * chromaMask
+      h += shortestHueDelta(from: h, to: 20.0 + 14.0 * hlMask) * 0.52 * warmLightOrig * chromaMask
+      s = min(max(s * (1.0 + 0.30 * coolZone + 0.34 * warmLightOrig), 0.0), 1.0)
+      skinKeep = 0.58
 
     case "rooftop_cyan":
-      // Photo #2: Blue-hour rooftop portrait — cool cyan-slate concrete/sky (#008083/#249EA0),
-      // luminous clean ivory-peach skin (ZERO orange cast!), glowing amber city bokeh (#FAAB36)
-      let coolZone = hueBell(h, center: 196.0, halfWidth: 102.0)
-      let skinZone = hueBell(h, center: 23.0, halfWidth: 21.0)
-        * smoothstep(0.08, 0.22, s)
-        * smoothstep(0.12, 0.28, v)
-        * (1.0 - smoothstep(0.86, 0.97, v))
-      let cityBokeh = hueBell(h, center: 34.0, halfWidth: 34.0) * smoothstep(0.75, 0.94, v)
-
-      h += shortestHueDelta(from: h, to: 188.0) * 0.62 * coolZone * chromaMask
-      h += shortestHueDelta(from: h, to: 34.0) * 0.40 * cityBokeh * chromaMask
-      h += shortestHueDelta(from: h, to: 18.0) * 0.28 * skinZone
-
-      s = min(s * (1.0 + 0.22 * coolZone + 0.16 * cityBokeh), 1.0)
-      if skinZone > 0.01 && s > 0.28 {
-        // Creamy pale-peach editorial portrait skin like Photo #2!
-        let excess = s - 0.28
-        s = 0.28 + excess * (1.0 - 0.54 * skinZone)
-      }
-      v = min(max(v * (1.0 + 0.06 * skinZone - 0.05 * coolZone * shadowMask), 0.0), 1.0)
+      // Blue Hour Rooftop Twilight Portrait (Ref #2):
+      // deep sapphire-cyan twilight concrete/sky + luminous creamy ivory-peach portrait skin
+      let coolZone = hueBell(h, center: 200.0, halfWidth: 105.0)
+      h += shortestHueDelta(from: h, to: 198.0) * 0.65 * coolZone * chromaMask
+      h += shortestHueDelta(from: h, to: 34.0) * 0.45 * warmLightOrig * chromaMask
+      s = min(max(s * (1.0 + 0.28 * coolZone + 0.24 * warmLightOrig), 0.0), 1.0)
+      skinKeep = 0.74
 
     case "nordic_ice":
-      // Pure Cold Scandinavian Cinema: icy steel-blue 205°, dark pine-slate greens, ZERO warmth
-      let blueZone = hueBell(h, center: 210.0, halfWidth: 85.0)
-      let greenZone = hueBell(h, center: 115.0, halfWidth: 58.0)
-      let warmZone = hueBell(h, center: 36.0, halfWidth: 54.0)
-      h += shortestHueDelta(from: h, to: 204.0) * 0.55 * blueZone * chromaMask
-      h += shortestHueDelta(from: h, to: 168.0) * 0.45 * greenZone * chromaMask
-      // Cool down & gently desaturate yellows/oranges so nothing looks warm
-      s = min(max(s * (1.0 + 0.14 * blueZone - 0.34 * greenZone - 0.28 * warmZone), 0.0), 1.0)
-      v = min(max(v * (1.0 - 0.06 * greenZone), 0.0), 1.0)
+      // Pure Glacial Scandinavian Steel-Blue / Slate (ZERO teal-green, desaturated pine greens)
+      let blueZone = hueBell(h, center: 215.0, halfWidth: 88.0)
+      let greenZone = hueBell(h, center: 115.0, halfWidth: 60.0)
+      let warmZone = hueBell(h, center: 40.0, halfWidth: 48.0) * (1.0 - 0.75 * skinOrig)
+      h += shortestHueDelta(from: h, to: 214.0) * 0.60 * blueZone * chromaMask
+      h += shortestHueDelta(from: h, to: 188.0) * 0.50 * greenZone * chromaMask
+      s = min(max(s * (1.0 + 0.16 * blueZone - 0.48 * greenZone - 0.40 * warmZone), 0.0), 1.0)
+      skinKeep = 0.56
 
     case "tokyo_petrol":
-      // Cool Tungsten Night 500T: emerald-petrol shadows (174°), cool cyan highlights, crimson neon
-      let coolZone = hueBell(h, center: 180.0, halfWidth: 92.0)
-      let yellowZone = hueBell(h, center: 54.0, halfWidth: 32.0)
-      let redZone = hueBell(h, center: 356.0, halfWidth: 28.0)
-      h += shortestHueDelta(from: h, to: 176.0) * 0.62 * coolZone * chromaMask
-      h += shortestHueDelta(from: h, to: 34.0) * 0.35 * yellowZone * chromaMask
-      s = min(max(s * (1.0 + 0.20 * coolZone + 0.24 * redZone - 0.18 * yellowZone), 0.0), 1.0)
-      v = min(max(v * (1.0 - 0.06 * coolZone * shadowMask), 0.0), 1.0)
+      // Wong Kar-wai 500T Emerald-Jade Night: lush green-petrol shadows & fluorescent jade + crimson neon
+      let coolZone = hueBell(h, center: 172.0, halfWidth: 96.0)
+      let redZone = hueBell(h, center: 355.0, halfWidth: 26.0) * (1.0 - 0.70 * skinOrig)
+      let yellowZone = hueBell(h, center: 56.0, halfWidth: 32.0) * (1.0 - 0.70 * skinOrig)
+      h += shortestHueDelta(from: h, to: 168.0) * 0.72 * coolZone * chromaMask
+      h += shortestHueDelta(from: h, to: 145.0) * 0.30 * yellowZone * chromaMask
+      s = min(max(s * (1.0 + 0.28 * coolZone + 0.35 * redZone - 0.22 * yellowZone), 0.0), 1.0)
+      skinKeep = 0.58
 
     case "cool_chrome":
-      // Crisp Neutral-Cool Daylight Slide: cobalt skies, clean whites, zero yellow cast
-      let skyZone = hueBell(h, center: 210.0, halfWidth: 65.0)
-      let yellowZone = hueBell(h, center: 56.0, halfWidth: 34.0)
-      h += shortestHueDelta(from: h, to: 202.0) * 0.35 * skyZone * chromaMask
-      s = min(max(s * (1.0 + 0.16 * skyZone - 0.14 * yellowZone), 0.0), 1.0)
+      // Airy Japanese Editorial Ice-White Daylight: crisp pure whites, vivid cobalt, zero yellow cast
+      let blueZone = hueBell(h, center: 212.0, halfWidth: 72.0)
+      let yellowZone = hueBell(h, center: 52.0, halfWidth: 34.0) * (1.0 - 0.80 * skinOrig)
+      h += shortestHueDelta(from: h, to: 208.0) * 0.42 * blueZone * chromaMask
+      s = min(max(s * (1.0 + 0.24 * blueZone - 0.32 * yellowZone), 0.0), 1.0)
+      skinKeep = 0.68
 
     default:
       break
@@ -5407,41 +5427,25 @@ enum FilmEngine {
 
     var (nr, ng, nb) = hsvToRgb(h, s, v)
 
-    // Inject cool petrol-teal / slate-cyan into neutral low-saturation shadows & concrete
-    // (because pure greys have S=0 so HSV rotation alone cannot tint neutral concrete/asphalt!)
-    switch profile {
-    case "teal_orange":
-      let nMask = (1.0 - smoothstep(0.18, 0.55, s)) * shadowMask
-      nr -= 0.042 * nMask
-      ng += 0.018 * nMask
-      nb += 0.024 * nMask
-    case "metro_teal":
-      let nMask = (1.0 - smoothstep(0.22, 0.60, s)) * (0.75 * shadowMask + 0.25 * midMask)
-      nr -= 0.056 * nMask
-      ng += 0.022 * nMask
-      nb += 0.028 * nMask
-    case "rooftop_cyan":
-      let nMask = (1.0 - smoothstep(0.16, 0.48, s)) * (0.55 * shadowMask + 0.45 * midMask)
-      nr -= 0.048 * nMask
-      ng += 0.016 * nMask
-      nb += 0.032 * nMask
-    case "nordic_ice":
-      let nMask = (1.0 - smoothstep(0.18, 0.50, s))
-      nr -= 0.030 * nMask * (0.65 * shadowMask + 0.35 * midMask)
-      ng += 0.004 * nMask * midMask
-      nb += 0.034 * nMask * (0.55 * shadowMask + 0.45 * midMask)
-    case "tokyo_petrol":
-      let nMask = (1.0 - smoothstep(0.20, 0.55, s)) * shadowMask
-      nr -= 0.045 * nMask
-      ng += 0.022 * nMask
-      nb += 0.020 * nMask
-    case "cool_chrome":
-      let nMask = (1.0 - smoothstep(0.18, 0.48, s)) * (0.5 * shadowMask + 0.5 * hlMask)
-      nr -= 0.016 * nMask
-      ng += 0.004 * nMask
-      nb += 0.020 * nMask
-    default:
-      break
+    // Smart Skin-Tone Recovery: gently restores original human skin toward clean
+    // natural peach (removing excess indoor tungsten orange AND preventing blue cast!)
+    if skinKeep > 0.0 && skinOrig > 0.001 {
+      let skR0 = min(max(sCurve(origR * 0.98, k: 5.5, pivot: 0.51), 0.0), 1.0)
+      let skG0 = min(max(sCurve(origG * 1.00, k: 5.5, pivot: 0.51), 0.0), 1.0)
+      let skB0 = min(max(sCurve(origB * 1.04, k: 5.5, pivot: 0.51), 0.0), 1.0)
+      var (shH, shS, shV) = rgbToHsv(skR0, skG0, skB0)
+      if shS > 0.30 {
+        shS = 0.30 + (shS - 0.30) * 0.52
+      }
+      if profile == "rooftop_cyan" {
+        shV = min(shV * 1.04, 1.0)
+        shS *= 0.86
+      }
+      let (skR, skG, skB) = hsvToRgb(shH, shS, shV)
+      let w = skinOrig * skinKeep
+      nr = nr * (1.0 - w) + skR * w
+      ng = ng * (1.0 - w) + skG * w
+      nb = nb * (1.0 - w) + skB * w
     }
 
     return (min(max(nr, 0.0), 1.0), min(max(ng, 0.0), 1.0), min(max(nb, 0.0), 1.0))
@@ -5988,11 +5992,11 @@ enum FilmEngine {
         vignette: 0.2, soften: 0.12
       ),
       "teal_orange": FilmStockParams(
-        mix: [1.01, 0.0, -0.01, -0.01, 1.02, -0.01, -0.02, 0.02, 1.02],
-        ev: -0.02,
-        k: [6.2, 6.1, 6.0], pivot: [0.51, 0.52, 0.52],
-        sat: 1.00, hlDesat: 0.14, shDesat: 0.06,
-        shadowTint: [-0.044, 0.020, 0.026], hlTint: [0.012, 0.006, -0.008],
+        mix: [0.91, -0.02, 0.00, -0.02, 1.02, 0.01, -0.03, 0.06, 1.13],
+        ev: -0.03,
+        k: [5.9, 5.8, 5.7], pivot: [0.51, 0.51, 0.51],
+        sat: 1.05, hlDesat: 0.14, shDesat: 0.05,
+        shadowTint: [-0.068, 0.028, 0.042], hlTint: [0.018, 0.004, -0.012],
         black: 0.004, white: 0.985, mono: nil,
         grain: 0.12, grainSize: 0.65,
         halation: 0.24, bloom: 0.06,
@@ -6000,60 +6004,60 @@ enum FilmEngine {
         hueProfile: "teal_orange"
       ),
       "metro_teal": FilmStockParams(
-        mix: [1.01, -0.01, 0.0, -0.01, 1.03, -0.01, -0.02, 0.02, 1.02],
-        ev: -0.04,
-        k: [6.5, 6.4, 6.3], pivot: [0.50, 0.51, 0.52],
-        sat: 1.02, hlDesat: 0.12, shDesat: 0.04,
-        shadowTint: [-0.052, 0.022, 0.028], hlTint: [0.008, 0.004, -0.004],
-        black: 0.0, white: 0.99, mono: nil,
+        mix: [0.78, 0.00, 0.00, -0.01, 1.03, 0.02, -0.02, 0.07, 1.22],
+        ev: -0.02,
+        k: [6.1, 6.0, 5.8], pivot: [0.50, 0.50, 0.50],
+        sat: 1.08, hlDesat: 0.12, shDesat: 0.04,
+        shadowTint: [-0.082, 0.036, 0.054], hlTint: [-0.048, 0.020, 0.038],
+        black: 0.0, white: 0.988, mono: nil,
         grain: 0.12, grainSize: 0.65,
-        halation: 0.36, bloom: 0.10,
-        vignette: 0.22, soften: 0.0,
+        halation: 0.34, bloom: 0.08,
+        vignette: 0.20, soften: 0.0,
         hueProfile: "metro_teal"
       ),
       "rooftop_cyan": FilmStockParams(
-        mix: [1.00, 0.0, 0.0, -0.01, 1.02, 0.0, -0.01, 0.02, 1.02],
-        ev: -0.01,
-        k: [6.0, 6.0, 5.9], pivot: [0.51, 0.51, 0.51],
-        sat: 0.98, hlDesat: 0.14, shDesat: 0.08,
-        shadowTint: [-0.048, 0.018, 0.034], hlTint: [0.002, 0.004, 0.004],
+        mix: [0.76, 0.00, 0.01, -0.01, 1.02, 0.02, 0.00, 0.06, 1.28],
+        ev: 0.00,
+        k: [5.7, 5.7, 5.5], pivot: [0.51, 0.51, 0.50],
+        sat: 1.02, hlDesat: 0.16, shDesat: 0.06,
+        shadowTint: [-0.074, 0.026, 0.078], hlTint: [-0.024, 0.014, 0.042],
         black: 0.006, white: 0.985, mono: nil,
         grain: 0.10, grainSize: 0.60,
-        halation: 0.20, bloom: 0.06,
+        halation: 0.18, bloom: 0.05,
         vignette: 0.18, soften: 0.0,
         hueProfile: "rooftop_cyan"
       ),
       "nordic_ice": FilmStockParams(
-        mix: [0.98, 0.01, 0.01, -0.01, 1.02, 0.0, -0.03, 0.02, 1.04],
-        ev: -0.04,
-        k: [6.3, 6.2, 6.0], pivot: [0.51, 0.51, 0.50],
-        sat: 0.92, hlDesat: 0.14, shDesat: 0.12,
-        shadowTint: [-0.036, 0.002, 0.040], hlTint: [-0.014, 0.004, 0.022],
-        black: 0.006, white: 0.99, mono: nil,
+        mix: [0.81, 0.02, 0.02, -0.01, 0.99, 0.03, 0.00, 0.02, 1.24],
+        ev: -0.03,
+        k: [6.0, 5.9, 5.7], pivot: [0.51, 0.51, 0.50],
+        sat: 0.84, hlDesat: 0.16, shDesat: 0.10,
+        shadowTint: [-0.052, 0.000, 0.076], hlTint: [-0.032, 0.004, 0.050],
+        black: 0.010, white: 0.980, mono: nil,
         grain: 0.10, grainSize: 0.60,
         halation: 0.08, bloom: 0.02,
         vignette: 0.18, soften: 0.0,
         hueProfile: "nordic_ice"
       ),
       "tokyo_petrol": FilmStockParams(
-        mix: [1.02, -0.02, 0.0, -0.02, 1.05, -0.02, -0.04, 0.03, 1.03],
+        mix: [0.82, -0.02, 0.00, -0.01, 1.09, 0.00, -0.03, 0.08, 1.04],
         ev: -0.03,
-        k: [6.2, 6.1, 6.0], pivot: [0.51, 0.52, 0.52],
-        sat: 1.06, hlDesat: 0.14, shDesat: 0.05,
-        shadowTint: [-0.052, 0.026, 0.024], hlTint: [-0.010, 0.012, 0.016],
-        black: 0.008, white: 0.985, mono: nil,
-        grain: 0.20, grainSize: 0.80,
-        halation: 0.42, bloom: 0.10,
+        k: [6.0, 5.8, 5.7], pivot: [0.51, 0.51, 0.52],
+        sat: 1.10, hlDesat: 0.14, shDesat: 0.04,
+        shadowTint: [-0.084, 0.052, 0.024], hlTint: [-0.044, 0.036, 0.014],
+        black: 0.008, white: 0.982, mono: nil,
+        grain: 0.18, grainSize: 0.78,
+        halation: 0.38, bloom: 0.08,
         vignette: 0.22, soften: 0.0,
         hueProfile: "tokyo_petrol"
       ),
       "cool_chrome": FilmStockParams(
-        mix: [1.02, -0.02, 0.0, -0.01, 1.03, -0.02, -0.02, 0.0, 1.04],
-        ev: -0.02,
-        k: [6.4, 6.4, 6.2], pivot: [0.52, 0.52, 0.51],
-        sat: 1.04, hlDesat: 0.12, shDesat: 0.08,
-        shadowTint: [-0.022, 0.004, 0.028], hlTint: [-0.008, 0.002, 0.014],
-        black: 0.004, white: 0.992, mono: nil,
+        mix: [0.88, 0.00, 0.01, 0.00, 1.01, 0.01, 0.00, 0.02, 1.19],
+        ev: 0.01,
+        k: [5.6, 5.6, 5.5], pivot: [0.52, 0.52, 0.51],
+        sat: 1.05, hlDesat: 0.12, shDesat: 0.06,
+        shadowTint: [-0.030, 0.006, 0.044], hlTint: [-0.022, 0.006, 0.034],
+        black: 0.004, white: 0.990, mono: nil,
         grain: 0.08, grainSize: 0.55,
         halation: 0.10, bloom: 0.03,
         vignette: 0.12, soften: 0.0,
@@ -6154,15 +6158,15 @@ enum FilmEngine {
         vignette: 0.18, soften: 0.05
       ),
       "cinestill_800t": FilmStockParams(
-        mix: [1.04, -0.02, -0.02, -0.03, 1.06, -0.02, -0.04, 0.02, 1.02],
-        ev: 0.02,
-        k: [5.6, 5.5, 5.2], pivot: [0.52, 0.53, 0.55],
-        sat: 1.0, hlDesat: 0.3, shDesat: 0.14,
-        shadowTint: [0.004, 0.006, 0.042], hlTint: [0.06, -0.004, -0.03],
-        black: 0.028, white: 0.96, mono: nil,
-        grain: 0.36, grainSize: 1.2,
-        halation: 0.62, bloom: 0.18,
-        vignette: 0.24, soften: 0.12
+        mix: [0.89, -0.01, 0.00, -0.02, 1.04, 0.01, -0.02, 0.05, 1.15],
+        ev: 0.00,
+        k: [5.7, 5.6, 5.4], pivot: [0.51, 0.52, 0.53],
+        sat: 1.04, hlDesat: 0.22, shDesat: 0.10,
+        shadowTint: [-0.046, 0.018, 0.058], hlTint: [0.028, -0.002, -0.010],
+        black: 0.020, white: 0.968, mono: nil,
+        grain: 0.30, grainSize: 1.05,
+        halation: 0.62, bloom: 0.16,
+        vignette: 0.22, soften: 0.06
       ),
       "eterna_vivid_500_2383": FilmStockParams(
         mix: [1.08, -0.03, -0.04, -0.02, 1.05, -0.02, -0.05, 0.02, 1.02],
@@ -10919,6 +10923,7 @@ final class NativeCinemaCameraEngine: NSObject,
   private var recordStartPTS: CMTime?
   private var recordBitrate: Int = 45_000_000
   private var recordFps: Int = 24
+  private var recordProRes: Bool = false
   private var recordSize: (Int, Int) = (0, 0)
   private var recordStartResult: FlutterResult?
 
@@ -11073,6 +11078,7 @@ final class NativeCinemaCameraEngine: NSObject,
   }
 
   private func ensurePlayAndRecordAudioSession() {
+    appDelegate?.suppressVolumeShutter(for: 1.6)
     let audioSession = AVAudioSession.sharedInstance()
     do {
       try audioSession.setCategory(
@@ -11138,6 +11144,7 @@ final class NativeCinemaCameraEngine: NSObject,
   }
 
   func resume() {
+    appDelegate?.suppressVolumeShutter(for: 1.6)
     DispatchQueue.main.async { [weak self] in
       self?.syncOrientationIfNeeded()
     }
@@ -12099,12 +12106,14 @@ final class NativeCinemaCameraEngine: NSObject,
   // MARK: - Single-Session Direct Video + Audio Recording
 
   func startVideoRecording(args: [String: Any], result: @escaping FlutterResult) {
+    appDelegate?.suppressVolumeShutter(for: 1.6)
     if let grading = args["grading"] as? [String: Any] {
       updateGrading(args: grading)
     }
     let fps = (args["fps"] as? NSNumber)?.intValue ?? currentFps
     let bitrate = (args["bitrate"] as? NSNumber)?.intValue ?? 45_000_000
     let burnLut = (args["burnLut"] as? Bool) ?? true
+    let proRes = (args["proRes"] as? Bool) ?? false
     let tlInterval = (args["timelapseInterval"] as? NSNumber)?.doubleValue ?? 0.0
 
     stateLock.lock()
@@ -12124,6 +12133,7 @@ final class NativeCinemaCameraEngine: NSObject,
     recordFps = max(fps, 1)
     recordBitrate = max(bitrate, 12_000_000)
     burnLutOnRecord = burnLut
+    recordProRes = proRes
     timelapseInterval = max(0.0, tlInterval)
     lastTimelapseWallTime = 0.0
     timelapseFrameIndex = 0
@@ -12131,8 +12141,9 @@ final class NativeCinemaCameraEngine: NSObject,
     needsPauseOffsetUpdate = false
     pausedAccumulatedOffset = .zero
     lastWrittenVideoPTS = nil
+    let prefix = proRes ? "CINELENS_PRORES_" : "CINELENS_REC_"
     recordURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("CINELENS_REC_\(Int(Date().timeIntervalSince1970)).mov")
+      .appendingPathComponent("\(prefix)\(Int(Date().timeIntervalSince1970)).mov")
     recordWriter = nil
     recordVideoInput = nil
     recordAdaptor = nil
@@ -12186,18 +12197,40 @@ final class NativeCinemaCameraEngine: NSObject,
   }
 
   func stopVideoRecording(result: @escaping FlutterResult) {
+    appDelegate?.suppressVolumeShutter(for: 1.8)
+    let done = ReplyOnce(result)
     stateLock.lock()
     let active = isRecording
     isRecording = false
     isRecordingPaused = false
     needsPauseOffsetUpdate = false
-    recordStartResult = nil
+    recordProRes = false
+    if let staleStart = recordStartResult {
+      recordStartResult = nil
+      DispatchQueue.main.async {
+        staleStart(FlutterError(code: "stopped", message: "Recording stopped early.", details: nil))
+      }
+    }
     stateLock.unlock()
+
+    // Guarantee stop NEVER hangs forever even if AVAssetWriter stalls on low disk.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+      done.send(FlutterError(
+        code: "stop_timeout",
+        message: "Finalisasi video terlalu lama — rekaman dihentikan.",
+        details: nil
+      ))
+    }
 
     // Drain writerQueue cleanly before finishing AVAssetWriter so the last frame
     // is never clipped and finishWriting always succeeds!
     writerQueue.async { [weak self] in
-      guard let self = self else { return }
+      guard let self = self else {
+        DispatchQueue.main.async {
+          done.send(FlutterError(code: "deallocated", message: "Engine released.", details: nil))
+        }
+        return
+      }
       self.stateLock.lock()
       let writer = self.recordWriter
       let vIn = self.recordVideoInput
@@ -12211,7 +12244,7 @@ final class NativeCinemaCameraEngine: NSObject,
 
       guard active, let writer = writer, writer.status == .writing, let url = url else {
         DispatchQueue.main.async {
-          result(FlutterError(code: "not_recording", message: "No recorded frames.", details: nil))
+          done.send(FlutterError(code: "not_recording", message: "No recorded frames.", details: nil))
         }
         return
       }
@@ -12222,9 +12255,9 @@ final class NativeCinemaCameraEngine: NSObject,
         AppDelegate.gradingContext.clearCaches()
         DispatchQueue.main.async {
           if writer.status == .completed {
-            result(url.path)
+            done.send(url.path)
           } else {
-            result(FlutterError(
+            done.send(FlutterError(
               code: "write_failed",
               message: writer.error?.localizedDescription ?? "Video write failed.",
               details: nil
@@ -12937,8 +12970,10 @@ final class NativeCinemaCameraEngine: NSObject,
       do {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
-        let videoSettings: [String: Any] = [
-          AVVideoCodecKey: AVVideoCodecType.hevc.rawValue,
+        var videoSettings: [String: Any] = [
+          AVVideoCodecKey: recordProRes
+            ? AVVideoCodecType.proRes422.rawValue
+            : AVVideoCodecType.hevc.rawValue,
           AVVideoWidthKey: w,
           AVVideoHeightKey: h,
           AVVideoColorPropertiesKey: [
@@ -12946,11 +12981,13 @@ final class NativeCinemaCameraEngine: NSObject,
             AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
             AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
           ],
-          AVVideoCompressionPropertiesKey: [
+        ]
+        if !recordProRes {
+          videoSettings[AVVideoCompressionPropertiesKey] = [
             AVVideoAverageBitRateKey: recordBitrate,
             AVVideoExpectedSourceFrameRateKey: recordFps,
-          ],
-        ]
+          ]
+        }
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         vIn.expectsMediaDataInRealTime = true
         if writer.canAdd(vIn) { writer.add(vIn) }

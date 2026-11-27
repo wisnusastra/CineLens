@@ -67,6 +67,8 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
   final ValueNotifier<double> audioPeakNotifier = ValueNotifier<double>(-60.0);
   final ValueNotifier<Map<String, dynamic>?> liveScopeNotifier =
       ValueNotifier<Map<String, dynamic>?>(null);
+  final ValueNotifier<Duration> recordingDurationNotifier =
+      ValueNotifier<Duration>(Duration.zero);
 
   /// Manual sliders emit dozens of values per second; the native call is
   /// coalesced so the device is not locked for configuration on every tick.
@@ -85,6 +87,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       horizonNotifier.dispose();
       audioPeakNotifier.dispose();
       liveScopeNotifier.dispose();
+      recordingDurationNotifier.dispose();
       unawaited(ref.read(cinemaCameraRepositoryProvider).nativeCameraDispose());
     });
 
@@ -455,19 +458,6 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     } catch (_) {
       // Apple Photos permission can be denied; the app gallery still has it.
     }
-  }
-
-  /// Frame size requested from the ProRes recorder.
-  ///
-  /// `MAX` is a photo-only setting, so its video path uses 4K.
-  ({int width, int height}) _proResFrameSize(CaptureResolution resolution) {
-    return switch (resolution) {
-      CaptureResolution.fullHD => (width: 1920, height: 1080),
-      CaptureResolution.uhd4K || CaptureResolution.maxSensor => (
-          width: 3840,
-          height: 2160
-        ),
-    };
   }
 
   // ------------------------------------------------------- manual controls
@@ -1676,7 +1666,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
   Future<void> togglePauseVideoRecording() async {
     final current = state.valueOrNull;
-    if (current == null || !current.isRecordingVideo || _proResRecording) return;
+    if (current == null || !current.isRecordingVideo) return;
     final repo = ref.read(cinemaCameraRepositoryProvider);
     if (current.isRecordingPaused) {
       await repo.nativeCameraResumeVideo();
@@ -1973,34 +1963,40 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       return;
     }
 
-    // ProRes writes a 10-bit 4:2:2 `.mov` master through the native ProRes recorder.
-    if (current.proResEnabled && current.proCapabilities.supportsProRes) {
-      await _startProResTake(current);
-      return;
-    }
+    // Unified single-session Native Swift recorder for BOTH HEVC Display P3 AND
+    // ProRes 422 `.mov` — eliminates dual AVCaptureSession audio collisions,
+    // delegate hijacking, and unstoppable ProRes hangs!
+    final useProRes =
+        current.proResEnabled && current.proCapabilities.supportsProRes;
+    final burnLut = useProRes
+        ? (current.bakeLookIntoProRes && current.hasRenderableLook)
+        : (current.directLutRecordingEnabled || current.hasRenderableLook);
 
-    // Single-session Native Swift HEVC Display P3 + AAC 192kbps recorder!
     final repo = ref.read(cinemaCameraRepositoryProvider);
+    _proResRecording = false;
     _nativeRecording = true;
+    recordingDurationNotifier.value = Duration.zero;
     try {
       await repo.nativeCameraStartVideo(<String, dynamic>{
         'fps': current.frameRate.value,
         'bitrate': _videoBitrateFor(current.resolution, current.frameRate),
-        'burnLut': current.directLutRecordingEnabled ||
-            current.hasRenderableLook,
+        'proRes': useProRes,
+        'burnLut': burnLut,
         'timelapseInterval': current.timelapseInterval,
         'grading': _liveMetalConfigFor(current),
       });
     } catch (error) {
       _nativeRecording = false;
       _recordingTimer?.cancel();
+      recordingDurationNotifier.value = Duration.zero;
       _writeRecordingStopped();
       rethrow;
     }
 
-    if (_disposed) return;
+    if (_disposed || !_nativeRecording) return;
+    final latest = state.valueOrNull ?? current;
     state = AsyncData(
-      current.copyWith(
+      latest.copyWith(
         isRecordingVideo: true,
         isRecordingPaused: false,
         isProcessingVideo: false,
@@ -2011,52 +2007,16 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     unawaited(refreshStorageInfo());
   }
 
-  /// Starts the native ProRes take and marks the UI as recording.
-  Future<void> _startProResTake(CinemaCameraState current) async {
-    final frame = _proResFrameSize(current.resolution);
-
-    _proResRecording = true;
-
-    try {
-      await ref.read(cinemaCameraRepositoryProvider).startProResRecording(
-            width: frame.width,
-            height: frame.height,
-            fps: current.frameRate.value,
-          );
-    } catch (error) {
-      _proResRecording = false;
-      _recordingTimer?.cancel();
-      _writeRecordingStopped();
-      _setProError(_describeError(error));
-      rethrow;
-    }
-
-    if (_disposed || !_proResRecording) return;
-
-    final latest = state.valueOrNull ?? current;
-    state = AsyncData(
-      latest.copyWith(
-        isRecordingVideo: true,
-        isProcessingVideo: false,
-        recordingDuration: Duration.zero,
-      ),
-    );
-    _startRecordingClock();
-  }
-
   void _startRecordingClock() {
     _recordingTimer?.cancel();
+    recordingDurationNotifier.value = Duration.zero;
     _recordingTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       final latest = state.valueOrNull;
       if (latest != null &&
           latest.isRecordingVideo &&
           !latest.isRecordingPaused) {
-        state = AsyncData(
-          latest.copyWith(
-            recordingDuration:
-                latest.recordingDuration + const Duration(milliseconds: 100),
-          ),
-        );
+        recordingDurationNotifier.value =
+            recordingDurationNotifier.value + const Duration(milliseconds: 100);
       }
     });
   }
@@ -2073,18 +2033,18 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     }
 
     _recordingTimer?.cancel();
+    recordingDurationNotifier.value = Duration.zero;
     if (!_disposed) {
-      final bakingProRes = isProResTake && current.bakeLookIntoProRes;
+      final wasProRes =
+          isProResTake || (current.proResEnabled && current.proCapabilities.supportsProRes);
       state = AsyncData(
         current.copyWith(
           isRecordingVideo: false,
+          isRecordingPaused: false,
           isProcessingVideo: true,
           recordingDuration: Duration.zero,
-          videoProcessingLabel: bakingProRes
-              ? 'Baking ProRes...'
-              : isProResTake
-                  ? 'Finalizing ProRes...'
-                  : 'Saving HEVC...',
+          videoProcessingLabel:
+              wasProRes ? 'Finalizing ProRes...' : 'Saving HEVC...',
           clearVideoProcessingProgress: true,
         ),
       );
