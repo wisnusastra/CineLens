@@ -561,8 +561,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     final resText = isVideo
         ? '${state.resolution.isMaxSensor ? '4K' : state.resolution.label}·${state.frameRate.label}'
         : (state.hiRes48MP ? '48MP' : state.resolution.label);
-    final shutterText =
-        state.manualExposureEnabled ? state.shutterLabel : 'AUTO';
+    final antiFlickerActive =
+        isVideo && !state.manualExposureEnabled && state.antiFlickerMode != 'off';
+    final shutterText = state.manualExposureEnabled
+        ? state.shutterLabel
+        : (antiFlickerActive ? '${state.antiFlickerLabel} AF' : 'AUTO');
     final isoText =
         state.manualExposureEnabled ? '${state.iso.round()}' : 'AUTO';
     final wbText =
@@ -594,7 +597,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
               _TelemetryCell(
                 label: s.shutter,
                 value: shutterText,
-                accent: state.manualExposureEnabled,
+                accent: state.manualExposureEnabled || antiFlickerActive,
                 onTap: () => _openDrawer(0, haptics),
               ),
               _TelemetryDivider(),

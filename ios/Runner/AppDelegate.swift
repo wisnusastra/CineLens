@@ -661,6 +661,12 @@ final class ExportProgressReporter {
         self?.nativeEngine?.setAeAfLock(locked: locked, x: x, y: y)
         result(locked)
 
+      case "nativeCameraSetAntiFlicker":
+        let args = call.arguments as? [String: Any] ?? [:]
+        let mode = (args["mode"] as? String) ?? "50hz"
+        self?.nativeEngine?.setAntiFlickerMode(mode)
+        result(true)
+
       case "nativeCameraUpdateGrading":
         let args = call.arguments as? [String: Any] ?? [:]
         self?.nativeEngine?.updateGrading(args: args)
@@ -888,8 +894,8 @@ final class ExportProgressReporter {
     }
   }
 
-  func cameraCapabilities() -> [String: Any] {
-    guard let device = activeDevice else {
+  func cameraCapabilities(for overrideDevice: AVCaptureDevice? = nil) -> [String: Any] {
+    guard let device = overrideDevice ?? activeDevice else {
       return ["available": false]
     }
 
@@ -1015,6 +1021,7 @@ final class ExportProgressReporter {
         completionHandler: nil
       )
       self.manualExposure = (seconds: clampedSeconds, iso: Double(clampedISO))
+      self.nativeEngine?.setManualExposureActive(true)
 
       return [
         "seconds": clampedSeconds,
@@ -1025,10 +1032,13 @@ final class ExportProgressReporter {
 
   private func applyAutoExposure(result: @escaping FlutterResult) {
     withActiveDevice(result) { device in
-      if device.isExposureModeSupported(.continuousAutoExposure) {
+      self.manualExposure = nil
+      self.nativeEngine?.setManualExposureActive(false)
+      if self.nativeEngine?.isAntiFlickerEngaged == true {
+        self.nativeEngine?.restartAntiFlickerIfNeeded()
+      } else if device.isExposureModeSupported(.continuousAutoExposure) {
         device.exposureMode = .continuousAutoExposure
       }
-      self.manualExposure = nil
       return true
     }
   }
@@ -10996,6 +11006,25 @@ final class NativeCinemaCameraEngine: NSObject,
   private var sessionObservers: [NSObjectProtocol] = []
   private var activeVideoOrientation: AVCaptureVideoOrientation = .portrait
 
+  // v3.8 Anti-Flicker Shutter-Priority Auto-ISO & Video Highlight Protection
+  private var antiFlickerMode: String = "50hz"   // "50hz" | "60hz" | "off"
+  private var isVideoModeSnapshot: Bool = false
+  private var manualExposureActive: Bool = false
+  private var aeAfLocked: Bool = false
+  private var desiredExposureBias: Double = 0.0
+  private var antiFlickerTimer: DispatchSourceTimer?
+  private var antiFlickerStepIndex: Int = 0
+  private var antiFlickerInitialized: Bool = false
+
+  var isAntiFlickerEngaged: Bool {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return isVideoModeSnapshot
+      && antiFlickerMode != "off"
+      && !manualExposureActive
+      && !aeAfLocked
+  }
+
   init(
     registry: FlutterTextureRegistry,
     channel: FlutterMethodChannel?,
@@ -11165,6 +11194,7 @@ final class NativeCinemaCameraEngine: NSObject,
   func pause() {
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
+      self.cancelAntiFlickerTimer()
       if self.session.isRunning {
         self.session.stopRunning()
       }
@@ -11184,6 +11214,7 @@ final class NativeCinemaCameraEngine: NSObject,
       if !self.session.isRunning && self.videoInput != nil {
         self.session.startRunning()
       }
+      self.syncAntiFlickerTimerOnSessionQueue(resetStep: true)
     }
   }
 
@@ -11193,6 +11224,7 @@ final class NativeCinemaCameraEngine: NSObject,
     sessionObservers.removeAll()
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
+      self.cancelAntiFlickerTimer()
       if self.session.isRunning { self.session.stopRunning() }
       self.depthOutput.setDelegate(nil, callbackQueue: nil)
       self.videoOutput.setSampleBufferDelegate(nil, queue: nil)
@@ -11284,6 +11316,11 @@ final class NativeCinemaCameraEngine: NSObject,
     let requestedLensId = args["lensId"] as? String
     let requestedZoom = (args["initialZoom"] as? NSNumber)?.doubleValue ?? 1.0
     let hiRes48MP = (args["hiRes48MP"] as? Bool) ?? currentHiRes48MP
+    if let af = args["antiFlicker"] as? String {
+      stateLock.lock()
+      antiFlickerMode = (af == "60hz" || af == "off") ? af : "50hz"
+      stateLock.unlock()
+    }
     let desiredOrientation = Self.resolveMainThreadOrientation()
 
     sessionQueue.async { [weak self] in
@@ -11312,6 +11349,7 @@ final class NativeCinemaCameraEngine: NSObject,
         let minZoom = Double(targetDevice.minAvailableVideoZoomFactor)
         self.applyZoomLocked(device: targetDevice, factor: max(minZoom, requestedZoom))
         self.currentLensId = requestedLensId ?? targetDevice.uniqueID
+        self.syncAntiFlickerTimerOnSessionQueue(resetStep: false)
         self.sendConfigReply(device: targetDevice, result: result)
         return
       }
@@ -11425,14 +11463,18 @@ final class NativeCinemaCameraEngine: NSObject,
 
       self.session.commitConfiguration()
 
-      // 7. Lock video frame rate, disable SDR->HLG HDR, engage smooth AF & ZERO-DELAY stabilization
+      // 7. Lock video frame rate, disable SDR->HLG HDR unconditionally, engage smooth AF & ZERO-DELAY stabilization
       var stabActive = false
       var stabMode = 0
       do {
         try targetDevice.lockForConfiguration()
-        if targetDevice.isVideoHDREnabled {
-          targetDevice.automaticallyAdjustsVideoHDREnabled = false
-          targetDevice.isVideoHDREnabled = false
+        if targetDevice.activeFormat.isVideoHDRSupported {
+          if targetDevice.automaticallyAdjustsVideoHDREnabled {
+            targetDevice.automaticallyAdjustsVideoHDREnabled = false
+          }
+          if targetDevice.isVideoHDREnabled {
+            targetDevice.isVideoHDREnabled = false
+          }
         }
         if isVideo {
           let desiredFps = Double(fps)
@@ -11453,6 +11495,16 @@ final class NativeCinemaCameraEngine: NSObject,
           if targetDevice.isSmoothAutoFocusSupported {
             targetDevice.isSmoothAutoFocusEnabled = true
           }
+        }
+        self.stateLock.lock()
+        let savedBias = self.desiredExposureBias
+        let isManualExp = self.manualExposureActive
+        self.stateLock.unlock()
+        if !isManualExp {
+          let clampedBias = Float(
+            min(max(savedBias, Double(targetDevice.minExposureTargetBias)), Double(targetDevice.maxExposureTargetBias))
+          )
+          targetDevice.setExposureTargetBias(clampedBias, completionHandler: nil)
         }
         targetDevice.unlockForConfiguration()
       } catch {}
@@ -11497,7 +11549,9 @@ final class NativeCinemaCameraEngine: NSObject,
       self.hasHardwareDepth = false
 
       self.stateLock.lock()
+      self.isVideoModeSnapshot = isVideo
       self.cinematicActive = false
+      self.aeAfLocked = false
       self.latestDisparityBuffer = nil
       self.latestVisionMatte = nil
       if self.isRecording && self.recordWriter == nil {
@@ -11511,6 +11565,9 @@ final class NativeCinemaCameraEngine: NSObject,
         }
       }
       self.stateLock.unlock()
+
+      // Engage or disengage 50Hz/60Hz Anti-Flicker Shutter-Priority Auto-ISO cleanly.
+      self.syncAntiFlickerTimerOnSessionQueue(resetStep: true)
 
       DispatchQueue.main.async {
         self.onSessionUpdated?(self.session, targetDevice, stabActive, stabMode)
@@ -11526,7 +11583,7 @@ final class NativeCinemaCameraEngine: NSObject,
     let minExp = Double(device.minExposureTargetBias)
     let maxExp = Double(device.maxExposureTargetBias)
     let lenses = discoverLensList()
-    let caps = appDelegate?.cameraCapabilities() ?? ["available": true]
+    let caps = appDelegate?.cameraCapabilities(for: device) ?? ["available": true]
 
     let payload: [String: Any] = [
       "textureId": textureId,
@@ -11602,6 +11659,9 @@ final class NativeCinemaCameraEngine: NSObject,
   }
 
   func setExposureBias(_ ev: Double) {
+    stateLock.lock()
+    desiredExposureBias = ev
+    stateLock.unlock()
     sessionQueue.async { [weak self] in
       guard let self = self, let device = self.activeDevice else { return }
       let clamped = Float(min(max(ev, Double(device.minExposureTargetBias)), Double(device.maxExposureTargetBias)))
@@ -11611,6 +11671,212 @@ final class NativeCinemaCameraEngine: NSObject,
         device.unlockForConfiguration()
       } catch {}
     }
+  }
+
+  // MARK: - v3.8 Anti-Flicker 50Hz/60Hz Shutter-Priority Auto-ISO Controller
+
+  func setAntiFlickerMode(_ mode: String) {
+    let normalized = (mode == "60hz" || mode == "off") ? mode : "50hz"
+    stateLock.lock()
+    antiFlickerMode = normalized
+    stateLock.unlock()
+    sessionQueue.async { [weak self] in
+      guard let self = self else { return }
+      self.syncAntiFlickerTimerOnSessionQueue(resetStep: true)
+    }
+  }
+
+  func setManualExposureActive(_ active: Bool) {
+    stateLock.lock()
+    manualExposureActive = active
+    stateLock.unlock()
+    sessionQueue.async { [weak self] in
+      guard let self = self else { return }
+      if active {
+        self.cancelAntiFlickerTimer()
+      } else {
+        self.syncAntiFlickerTimerOnSessionQueue(resetStep: true)
+      }
+    }
+  }
+
+  func restartAntiFlickerIfNeeded() {
+    sessionQueue.async { [weak self] in
+      self?.syncAntiFlickerTimerOnSessionQueue(resetStep: true)
+    }
+  }
+
+  private func cancelAntiFlickerTimer() {
+    antiFlickerTimer?.cancel()
+    antiFlickerTimer = nil
+    antiFlickerInitialized = false
+  }
+
+  private func validAntiFlickerSteps(for device: AVCaptureDevice, mode: String) -> [Double] {
+    let baseSteps: [Double] = (mode == "60hz")
+      ? [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0, 1.0 / 480.0, 1.0 / 960.0, 1.0 / 1920.0]
+      : [1.0 / 50.0, 1.0 / 100.0, 1.0 / 200.0, 1.0 / 400.0, 1.0 / 800.0, 1.0 / 1600.0]
+    let fmt = device.activeFormat
+    let minSec = CMTimeGetSeconds(fmt.minExposureDuration)
+    let fpsLimit = 1.0 / Double(max(currentFps, 24))
+    let maxSec = min(CMTimeGetSeconds(fmt.maxExposureDuration), fpsLimit)
+    let filtered = baseSteps.filter { $0 >= minSec - 0.00001 && $0 <= maxSec + 0.0002 }
+    if !filtered.isEmpty { return filtered }
+    return [min(max(1.0 / 100.0, minSec), maxSec)]
+  }
+
+  private func syncAntiFlickerTimerOnSessionQueue(resetStep: Bool) {
+    stateLock.lock()
+    let mode = antiFlickerMode
+    let isManual = manualExposureActive
+    let isLocked = aeAfLocked
+    stateLock.unlock()
+
+    let shouldRun = (currentMode == "video24fps")
+      && (mode != "off")
+      && !isManual
+      && !isLocked
+      && session.isRunning
+
+    guard shouldRun, let device = activeDevice, device.isExposureModeSupported(.custom) else {
+      cancelAntiFlickerTimer()
+      // Restore continuous auto exposure cleanly when turning Anti-Flicker OFF
+      // (only if neither manual exposure nor AE/AF lock is holding exposure).
+      if !isManual && !isLocked, let dev = activeDevice,
+         dev.exposureMode == .custom,
+         dev.isExposureModeSupported(.continuousAutoExposure) {
+        do {
+          try dev.lockForConfiguration()
+          dev.exposureMode = .continuousAutoExposure
+          dev.unlockForConfiguration()
+        } catch {}
+      }
+      return
+    }
+
+    if resetStep {
+      antiFlickerInitialized = false
+    }
+    if antiFlickerTimer != nil { return }
+
+    let timer = DispatchSource.makeTimerSource(queue: sessionQueue)
+    timer.schedule(
+      deadline: .now() + .milliseconds(120),
+      repeating: .milliseconds(125),
+      leeway: .milliseconds(25)
+    )
+    timer.setEventHandler { [weak self] in
+      self?.stepAntiFlickerAutoISO()
+    }
+    antiFlickerTimer = timer
+    timer.resume()
+  }
+
+  /// Damped Shutter-Priority Auto-ISO loop:
+  /// Keeps shutter strictly on pure 50Hz (1/50, 1/100, 1/200...) or 60Hz
+  /// (1/60, 1/120, 1/240...) steps so indoor AC LED lights NEVER flicker or band,
+  /// while smoothly gliding ISO with anti-pumping damping & highlight headroom.
+  private func stepAntiFlickerAutoISO() {
+    guard session.isRunning, currentMode == "video24fps", let device = activeDevice else {
+      cancelAntiFlickerTimer()
+      return
+    }
+    stateLock.lock()
+    let mode = antiFlickerMode
+    let isManual = manualExposureActive
+    let isLocked = aeAfLocked
+    let userBias = desiredExposureBias
+    stateLock.unlock()
+    guard mode != "off", !isManual, !isLocked else {
+      cancelAntiFlickerTimer()
+      return
+    }
+
+    let steps = validAntiFlickerSteps(for: device, mode: mode)
+    guard !steps.isEmpty else { return }
+
+    let fmt = device.activeFormat
+    let minISO = Double(fmt.minISO)
+    let maxISO = Double(fmt.maxISO)
+    let minSec = CMTimeGetSeconds(fmt.minExposureDuration)
+    let maxSec = CMTimeGetSeconds(fmt.maxExposureDuration)
+    let curISO = Double(device.iso)
+    let curDur = CMTimeGetSeconds(device.exposureDuration)
+    guard curISO.isFinite, curISO > 0, curDur.isFinite, curDur > 0 else { return }
+
+    // 1. Seamless zero-flash handoff on first tick after entering Video / switching lens
+    if !antiFlickerInitialized || device.exposureMode != .custom {
+      // Apply soft -0.30 EV video highlight protection headroom when user hasn't set custom EV
+      let initGain = abs(userBias) < 0.05 ? pow(2.0, -0.30) : 1.0
+      let evProduct = curDur * curISO * initGain
+      var chosenIdx = 0
+      for i in 0..<steps.count {
+        chosenIdx = i
+        if evProduct / steps[i] >= minISO * 1.05 {
+          break
+        }
+      }
+      let targetDur = min(max(steps[chosenIdx], minSec), maxSec)
+      let targetISO = min(max(evProduct / targetDur, minISO), maxISO)
+      do {
+        try device.lockForConfiguration()
+        device.setExposureModeCustom(
+          duration: CMTime(seconds: targetDur, preferredTimescale: 1_000_000),
+          iso: Float(targetISO),
+          completionHandler: nil
+        )
+        device.unlockForConfiguration()
+        antiFlickerStepIndex = chosenIdx
+        antiFlickerInitialized = true
+      } catch {}
+      return
+    }
+
+    // 2. Smooth damped Auto-ISO tracking via live iOS metering `exposureTargetOffset`
+    let idx = min(max(antiFlickerStepIndex, 0), steps.count - 1)
+    let autoHeadroom: Double = abs(userBias) < 0.05 ? 0.30 : 0.0
+    let errEV = Double(device.exposureTargetOffset) + autoHeadroom
+    guard errEV.isFinite else { return }
+
+    // Deadband prevents micro-hunting on steady indoor scenes
+    if abs(errEV) < 0.08 { return }
+
+    // Smooth proportional damping (max 0.35 EV per 125ms tick = cinema glide!)
+    let correction = min(max(errEV * 0.28, -0.35), 0.35)
+    var nextIdx = idx
+    var nextISO = curISO * pow(2.0, -correction)
+
+    // Seamless Shutter-Priority step-up when ISO bottoms out in bright scenes (halve shutter, double ISO!)
+    if idx + 1 < steps.count && curISO <= minISO * 1.15 && errEV > 0.22 {
+      nextIdx = idx + 1
+      let ratio = steps[idx] / steps[nextIdx]
+      nextISO = curISO * ratio * pow(2.0, -correction)
+    } else if idx > 0 {
+      // Seamless Shutter-Priority step-down when low light pushes ISO high (strong hysteresis prevents bounce!)
+      let stepDownThreshold = min(maxISO * 0.45, max(minISO * 3.2, 220.0))
+      if curISO >= stepDownThreshold && errEV < -0.22 {
+        nextIdx = idx - 1
+        let ratio = steps[idx] / steps[nextIdx]
+        nextISO = curISO * ratio * pow(2.0, -correction)
+      }
+    }
+
+    let clampedDur = min(max(steps[nextIdx], minSec), maxSec)
+    let clampedISO = min(max(nextISO, minISO), maxISO)
+    if nextIdx == idx && abs(clampedISO - curISO) < max(0.8, curISO * 0.008) {
+      return
+    }
+
+    do {
+      try device.lockForConfiguration()
+      device.setExposureModeCustom(
+        duration: CMTime(seconds: clampedDur, preferredTimescale: 1_000_000),
+        iso: Float(clampedISO),
+        completionHandler: nil
+      )
+      device.unlockForConfiguration()
+      antiFlickerStepIndex = nextIdx
+    } catch {}
   }
 
   func setFlashMode(_ mode: String) {
@@ -11690,20 +11956,27 @@ final class NativeCinemaCameraEngine: NSObject,
         }
         if exposure && device.isExposurePointOfInterestSupported {
           device.exposurePointOfInterest = sensorPoint
-          if device.isExposureModeSupported(.continuousAutoExposure) {
+          // Never override .custom exposure when Manual Exposure or 50Hz/60Hz Anti-Flicker is active!
+          self.stateLock.lock()
+          let keepCustom = self.manualExposureActive
+            || (self.currentMode == "video24fps" && self.antiFlickerMode != "off")
+          self.aeAfLocked = false
+          self.stateLock.unlock()
+          if !keepCustom && device.isExposureModeSupported(.continuousAutoExposure) {
             device.exposureMode = .continuousAutoExposure
           }
         }
         device.unlockForConfiguration()
       } catch {}
+      self.syncAntiFlickerTimerOnSessionQueue(resetStep: false)
     }
 
     return triggerRackFocus(x: clampedX, y: clampedY, forceBackground: nil)
   }
 
   /// Long-Press AE/AF Lock: locks focus + exposure at `(x, y)` (4-orientation +
-  /// front-camera mirror mapped), or unlocks back to smooth continuous AF/AE when
-  /// `locked == false`.
+  /// front-camera mirror mapped), or unlocks back to smooth continuous AF/AE (or
+  /// active 50Hz/60Hz Anti-Flicker Shutter-Priority) when `locked == false`.
   func setAeAfLock(locked: Bool, x: Double, y: Double) {
     let clampedX = min(max(x, 0.0), 1.0)
     let clampedY = min(max(y, 0.0), 1.0)
@@ -11717,6 +11990,16 @@ final class NativeCinemaCameraEngine: NSObject,
         orientation: orient,
         mirrored: self.currentPosition == .front
       )
+      self.stateLock.lock()
+      self.aeAfLocked = locked
+      let keepCustom = self.manualExposureActive
+        || (self.currentMode == "video24fps" && self.antiFlickerMode != "off")
+      self.stateLock.unlock()
+
+      if locked {
+        self.cancelAntiFlickerTimer()
+      }
+
       do {
         try device.lockForConfiguration()
         if locked {
@@ -11731,32 +12014,46 @@ final class NativeCinemaCameraEngine: NSObject,
           } else if device.isFocusModeSupported(.locked) {
             device.focusMode = .locked
           }
-          if device.isExposureModeSupported(.autoExpose) {
-            device.exposureMode = .autoExpose
-          } else if device.isExposureModeSupported(.locked) {
-            device.exposureMode = .locked
+          // When Anti-Flicker or Manual Exposure is holding a flicker-free .custom shutter,
+          // simply freezing the timer locks the exact current shutter+ISO with ZERO flicker!
+          if !keepCustom {
+            if device.isExposureModeSupported(.autoExpose) {
+              device.exposureMode = .autoExpose
+            } else if device.isExposureModeSupported(.locked) {
+              device.exposureMode = .locked
+            }
           }
         } else {
           if device.isFocusModeSupported(.continuousAutoFocus) {
             device.focusMode = .continuousAutoFocus
           }
-          if device.isExposureModeSupported(.continuousAutoExposure) {
+          if !keepCustom && device.isExposureModeSupported(.continuousAutoExposure) {
             device.exposureMode = .continuousAutoExposure
           }
         }
         device.unlockForConfiguration()
       } catch {}
 
+      if !locked {
+        self.syncAntiFlickerTimerOnSessionQueue(resetStep: false)
+      }
+
       // Lock solidly once auto-focus/auto-expose settles on the subject (~350ms).
       if locked {
         self.sessionQueue.asyncAfter(deadline: .now() + 0.35) { [weak self] in
           guard let self = self, let dev = self.activeDevice else { return }
+          self.stateLock.lock()
+          let stillLocked = self.aeAfLocked
+          let keepCustomNow = self.manualExposureActive
+            || (self.currentMode == "video24fps" && self.antiFlickerMode != "off")
+          self.stateLock.unlock()
+          guard stillLocked else { return }
           do {
             try dev.lockForConfiguration()
             if dev.focusMode == .autoFocus && dev.isFocusModeSupported(.locked) {
               dev.focusMode = .locked
             }
-            if dev.exposureMode == .autoExpose && dev.isExposureModeSupported(.locked) {
+            if !keepCustomNow && dev.exposureMode == .autoExpose && dev.isExposureModeSupported(.locked) {
               dev.exposureMode = .locked
             }
             dev.unlockForConfiguration()
@@ -12555,7 +12852,13 @@ final class NativeCinemaCameraEngine: NSObject,
             )
           }
           if burnLut {
-            fullCI = Self.gradeLiveImage(fullCI, look: look, matrix: matrix, forPreview: false)
+            fullCI = Self.gradeLiveImage(
+              fullCI,
+              look: look,
+              matrix: matrix,
+              forPreview: false,
+              isVideo: true
+            )
           }
           if aspect > 0.1 {
             fullCI = Self.applyFrameAspect(to: fullCI, ratio: aspect, trueCrop: crop)
@@ -12616,8 +12919,17 @@ final class NativeCinemaCameraEngine: NSObject,
             )
           }
 
+          self.stateLock.lock()
+          let isVidPrev = self.isVideoModeSnapshot
+          self.stateLock.unlock()
           var displayImage = liveMetal
-            ? Self.gradeLiveImage(ci, look: look, matrix: matrix, forPreview: true)
+            ? Self.gradeLiveImage(
+                ci,
+                look: look,
+                matrix: matrix,
+                forPreview: true,
+                isVideo: isVidPrev
+              )
             : ci
 
           // Live 50/50 Before | After LUT Split-Screen Preview (left: RAW sensor, right: 3D LUT)
@@ -12932,7 +13244,8 @@ final class NativeCinemaCameraEngine: NSObject,
     _ ci: CIImage,
     look: FilmLook?,
     matrix: [Double],
-    forPreview: Bool
+    forPreview: Bool,
+    isVideo: Bool = false
   ) -> CIImage {
     let extent = ci.extent
     var graded: CIImage
@@ -12948,18 +13261,21 @@ final class NativeCinemaCameraEngine: NSObject,
       } else {
         graded = ci
       }
-      // On live viewfinder preview, run 1 single 3D LUT pass (< 1ms!) so preview
-      // stays locked at 60fps; recorded video & captured photos run the full 3-pass curve.
-      if !forPreview {
-        if look.shadowDepth > 0.005 {
-          graded = FilmEngine.applyShadowDepth(to: graded, strength: look.shadowDepth).cropped(to: extent)
-        }
-        if look.filmicRollOff > 0.005 {
-          graded = FilmEngine.applyFilmicRollOff(to: graded, strength: look.filmicRollOff).cropped(to: extent)
-        }
+      if !forPreview && look.shadowDepth > 0.005 {
+        graded = FilmEngine.applyShadowDepth(to: graded, strength: look.shadowDepth).cropped(to: extent)
+      }
+      // Smooth ACES/AgX Filmic Highlight Roll-Off: always keep a minimum 0.38 knee
+      // on Video (both live preview and recorded file!) so bright indoor ceiling lamps
+      // and white surfaces roll off organically instead of hard-clipping at 255/255.
+      let effectiveRollOff = isVideo ? max(look.filmicRollOff, 0.38) : look.filmicRollOff
+      if effectiveRollOff > 0.005 {
+        graded = FilmEngine.applyFilmicRollOff(to: graded, strength: effectiveRollOff).cropped(to: extent)
       }
     } else {
       graded = AppDelegate.colorMatrixImage(matrix, to: ci)
+      if isVideo {
+        graded = FilmEngine.applyFilmicRollOff(to: graded, strength: 0.38).cropped(to: extent)
+      }
     }
     return graded
   }

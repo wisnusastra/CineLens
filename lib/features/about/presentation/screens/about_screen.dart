@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.7.1 PRO';
+  static const String appVersion = '3.8.0 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,23 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.7.1 PRO',
+        version: 'v3.8.0 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Anti-Flicker Video 50Hz/60Hz Shutter-Priority Auto-ISO (Default 50Hz Aktif): mengunci shutter secara ketat di kelipatan murni listrik PLN Indonesia (1/50s, 1/100s, 1/200s, 1/400s...) agar lampu LED minimarket/kafe/indoor TIDAK lagi berkedip atau bergaris, sambil mengatur ISO secara halus (anti-pumping) dan menjaga sudut 180°/172.8° (1/50s @ 24fps)',
+                'Proteksi Highlight Video & Filmic Roll-Off ACES/AgX Otomatis: headroom eksposur lembut -0.30 EV saat rekam video + kompresi highlight filmic aktif secara seragam di Live Viewfinder maupun file rekaman (menghentikan putih plafon/lampu pecah over-exposure)',
+                'Fix 6 Bug Mendalam Exposure & Lensa: matikan Video HDR otomatis iOS tanpa syarat (anti-pindah HDR di tengah rekam), Tap-to-Focus & AE/AF Lock kini tidak lagi merusak Manual Exposure / Anti-Flicker, sinkronisasi status Manual↔Auto dengan mesin kamera native, fix race pembacaan batas ISO/shutter saat cold-launch, serta pertahankan bias Highlight Metering saat ganti kamera depan/belakang',
+              ]
+            : const [
+                'Native 50Hz/60Hz Anti-Flicker Shutter-Priority Auto-ISO (Default 50Hz ON): strictly quantizes video shutter to pure mains multiples (1/50s, 1/100s, 1/200s, 1/400s...) to eliminate indoor LED light flicker & rolling-shutter banding while smoothly gliding ISO with anti-pumping damping, plus 172.8° (1/50s @ 24fps) support in 180° Shutter Lock',
+                'Video Highlight Protection & Automatic ACES/AgX Filmic Roll-Off: soft -0.30 EV video highlight headroom + unified filmic highlight knee applied identically on both Live Metal Preview and recorded 4K/1080p video so bright overhead lamps & ceilings roll off smoothly without blowing out',
+                '6 Deep Exposure & Lens-Switch Fixes: unconditional automatic Video HDR disable, Tap-to-Focus & Long-Press AE/AF Lock no longer clobber Manual Exposure or Anti-Flicker locks, full native Manual↔Auto state sync, cold-launch capabilities race fix, and preserved Highlight Metering EV bias across camera flips',
+              ],
+      ),
+      (
+        version: 'v3.7.1 PRO',
+        tag: 'STABILITY',
         items: isId
             ? const [
                 'Audit Bug Mendalam & Stabilitas Menyeluruh (5 Perbaikan Edge-Case Swift & Dart):',

@@ -315,8 +315,12 @@ class CinemaCameraRepository {
         String? frameFormat,
         bool directLutRecording,
         bool liveMetalPreview,
+        String antiFlickerMode,
       })> loadProImagingSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    final rawAf = prefs.getString(AppConstants.prefAntiFlickerMode) ?? '50hz';
+    final antiFlickerMode =
+        (rawAf == '60hz' || rawAf == 'off') ? rawAf : '50hz';
     return (
       processZero: prefs.getBool(AppConstants.prefProcessZeroRaw) ?? false,
       saveDngRaw: prefs.getBool(AppConstants.prefSaveDngRaw) ?? false,
@@ -335,7 +339,13 @@ class CinemaCameraRepository {
           prefs.getBool(AppConstants.prefDirectLutRecording) ?? false,
       liveMetalPreview:
           prefs.getBool(AppConstants.prefLiveMetalPreview) ?? true,
+      antiFlickerMode: antiFlickerMode,
     );
+  }
+
+  Future<void> saveAntiFlickerMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(AppConstants.prefAntiFlickerMode, mode);
   }
 
   Future<void> saveHeif10Bit(bool enabled) async {
@@ -1417,6 +1427,15 @@ class CinemaCameraRepository {
       await _videoChannel.invokeMethod<bool>(
         'nativeCameraSetAeAfLock',
         <String, dynamic>{'locked': locked, 'x': x, 'y': y},
+      );
+    } catch (_) {}
+  }
+
+  Future<void> nativeCameraSetAntiFlicker(String mode) async {
+    try {
+      await _videoChannel.invokeMethod<bool>(
+        'nativeCameraSetAntiFlicker',
+        <String, dynamic>{'mode': mode},
       );
     } catch (_) {}
   }

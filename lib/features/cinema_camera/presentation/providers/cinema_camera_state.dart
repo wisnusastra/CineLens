@@ -222,6 +222,9 @@ class CinemaCameraState {
   final bool watermarkDateStamp;
   final String photographerSignature;
 
+  // v3.8 Anti-Flicker Shutter-Priority Auto-ISO (`'50hz'` | `'60hz'` | `'off'`)
+  final String antiFlickerMode;
+
   const CinemaCameraState({
     required this.tones,
     required this.selectedTone,
@@ -309,6 +312,7 @@ class CinemaCameraState {
     this.watermarkTheme = 'white',
     this.watermarkDateStamp = false,
     this.photographerSignature = '',
+    this.antiFlickerMode = '50hz',
   });
 
   /// Matrix the live preview uses.
@@ -339,12 +343,27 @@ class CinemaCameraState {
       ? frameFormat.aspectRatio
       : (isAnamorphicRatio ? 2.39 : 0.0);
 
-  /// True when the shutter speed is locked to the 180° cinema rule (`1 / 2×fps`).
+  /// Target shutter speed for the 180° cinema rule (`1/50s` = 172.8° when
+  /// shooting 24fps under 50Hz AC mains to eliminate indoor LED flicker!).
+  double get target180ShutterSeconds {
+    if (antiFlickerMode == '50hz' && frameRate.value == 24) {
+      return 1.0 / 50.0;
+    }
+    return 1.0 / (frameRate.value * 2);
+  }
+
+  /// True when the shutter speed is locked to the 180° (or 172.8° 50Hz) cinema rule.
   bool get is180ShutterLocked {
     if (!manualExposureEnabled || shutterSeconds <= 0) return false;
-    final target = 1.0 / (frameRate.value * 2);
+    final target = target180ShutterSeconds;
     return (shutterSeconds - target).abs() < target * 0.08;
   }
+
+  String get antiFlickerLabel => switch (antiFlickerMode) {
+        '60hz' => '60Hz',
+        'off' => 'OFF',
+        _ => '50Hz',
+      };
 
   /// Payload for `AppDelegate.FilmEffects.from` & `ImportedLut.from`.
   Map<String, dynamic> get nativeLook {
@@ -553,6 +572,7 @@ class CinemaCameraState {
     String? watermarkTheme,
     bool? watermarkDateStamp,
     String? photographerSignature,
+    String? antiFlickerMode,
   }) {
     return CinemaCameraState(
       tones: tones ?? this.tones,
@@ -659,6 +679,7 @@ class CinemaCameraState {
       watermarkDateStamp: watermarkDateStamp ?? this.watermarkDateStamp,
       photographerSignature:
           photographerSignature ?? this.photographerSignature,
+      antiFlickerMode: antiFlickerMode ?? this.antiFlickerMode,
     );
   }
 }

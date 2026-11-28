@@ -251,5 +251,36 @@ void main() {
       expect(restored.frameTheme, 'glass');
       expect(restored.frameCustomText, 'WISNU SASTRA');
     });
+
+    test('v3.8 Anti-Flicker 50Hz/60Hz defaults & 172.8/180 shutter targets', () {
+      const source = CinemaTonesPresetSource();
+      final tones = source.getHollywoodTones();
+      final state50 = CinemaCameraState(
+        tones: tones,
+        selectedTone: tones.first,
+        frameRate: CaptureFrameRate.fps24,
+        manualExposureEnabled: true,
+        shutterSeconds: 1.0 / 50.0,
+      );
+      expect(state50.antiFlickerMode, '50hz');
+      expect(state50.antiFlickerLabel, '50Hz');
+      expect(state50.target180ShutterSeconds, closeTo(1.0 / 50.0, 1e-6));
+      expect(state50.is180ShutterLocked, isTrue);
+
+      final state60 = state50.copyWith(
+        antiFlickerMode: '60hz',
+        shutterSeconds: 1.0 / 48.0,
+      );
+      expect(state60.antiFlickerLabel, '60Hz');
+      expect(state60.target180ShutterSeconds, closeTo(1.0 / 48.0, 1e-6));
+      expect(state60.is180ShutterLocked, isTrue);
+
+      final state30 = state50.copyWith(
+        frameRate: CaptureFrameRate.fps30,
+        shutterSeconds: 1.0 / 60.0,
+      );
+      expect(state30.target180ShutterSeconds, closeTo(1.0 / 60.0, 1e-6));
+      expect(state30.is180ShutterLocked, isTrue);
+    });
   });
 }

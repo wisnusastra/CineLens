@@ -316,7 +316,99 @@ class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
               notifier.setManualFocusEnabled(!state.manualFocusEnabled),
           onChanged: notifier.previewManualFocus,
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
+        // Anti-Flicker Shutter-Priority Selector (50Hz ID/EU/Asia | 60Hz US/JP | OFF)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: AppTheme.cardDark,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: state.antiFlickerMode != 'off'
+                  ? AppTheme.cinemaAmber.withValues(alpha: 0.45)
+                  : AppTheme.hairline,
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'ANTI-FLICKER VIDEO',
+                      style: AppTheme.monoStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      s.isId
+                          ? 'Kunci shutter anti-kedip LED + Auto-ISO halus'
+                          : 'Flicker-free shutter lock + smooth Auto-ISO',
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 9.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: AppTheme.backgroundBlack,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppTheme.hairline),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final opt in const [
+                      ('50hz', '50Hz'),
+                      ('60hz', '60Hz'),
+                      ('off', 'OFF'),
+                    ])
+                      GestureDetector(
+                        onTap: () {
+                          if (haptics) HapticFeedback.selectionClick();
+                          notifier.setAntiFlickerMode(opt.$1);
+                        },
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 130),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: state.antiFlickerMode == opt.$1
+                                ? AppTheme.cinemaAmber
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            opt.$2,
+                            style: AppTheme.monoStyle(
+                              color: state.antiFlickerMode == opt.$1
+                                  ? Colors.black
+                                  : AppTheme.textSecondary,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
         _ToggleGrid(
           cards: [
             _SwitchCardData(
@@ -363,7 +455,10 @@ class _CameraOptionsSheetState extends ConsumerState<CameraOptionsSheet> {
             ),
             _SwitchCardData(
               title: s.rule180,
-              subtitle: '1/${state.frameRate.value * 2}s',
+              subtitle: state.antiFlickerMode == '50hz' &&
+                      state.frameRate.value == 24
+                  ? '1/50s · 50Hz'
+                  : '1/${(1 / state.target180ShutterSeconds).round()}s',
               active: state.is180ShutterLocked,
               enabled: available,
               onTap: notifier.toggle180DegreeShutter,

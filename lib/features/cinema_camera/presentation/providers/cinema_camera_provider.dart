@@ -157,6 +157,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       'fps': frameRate.value,
       'position': 'back',
       'hiRes48MP': proImaging.hiRes48MP,
+      'antiFlicker': proImaging.antiFlickerMode,
       'grading': <String, dynamic>{
         'liveMetal': proImaging.liveMetalPreview,
         'matrix': initialMatrix,
@@ -263,8 +264,9 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       watermarkTheme: watermarkCfg.theme,
       watermarkDateStamp: watermarkCfg.dateStamp,
       photographerSignature: watermarkCfg.signature,
+      antiFlickerMode: proImaging.antiFlickerMode,
       iso: 400.0.clamp(capabilities.minIso, capabilities.maxIso).toDouble(),
-      shutterSeconds: (1 / 48)
+      shutterSeconds: (proImaging.antiFlickerMode == '50hz' ? 1 / 50 : 1 / 48)
           .clamp(
             capabilities.minShutterSeconds,
             capabilities.maxShutterSeconds,
@@ -935,8 +937,24 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
     unawaited(repo.saveHighlightMetering(enabled));
   }
 
-  /// Locks shutter to the 180° cinema rule (`1 / 2×fps`: 1/48 @ 24fps,
-  /// 1/60 @ 30fps, 1/120 @ 60fps) for authentic motion blur.
+  /// Sets Anti-Flicker Shutter-Priority frequency (`'50hz'` | `'60hz'` | `'off'`).
+  /// Default `'50hz'` eliminates indoor LED light flicker & rolling-shutter banding
+  /// on 50Hz AC power grids (Indonesia/Asia/Europe) by keeping shutter quantized to
+  /// `1/50`, `1/100`, `1/200`, `1/400`s while Auto-ISO glides smoothly.
+  Future<void> setAntiFlickerMode(String mode) async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final normalized = (mode == '60hz' || mode == 'off') ? mode : '50hz';
+    if (current.antiFlickerMode == normalized) return;
+
+    final repo = ref.read(cinemaCameraRepositoryProvider);
+    state = AsyncData(current.copyWith(antiFlickerMode: normalized));
+    await repo.nativeCameraSetAntiFlicker(normalized);
+    unawaited(repo.saveAntiFlickerMode(normalized));
+  }
+
+  /// Locks shutter to the 180° cinema rule (`1/50s` = 172.8° when shooting
+  /// 24fps under 50Hz AC mains to avoid LED flicker, or `1 / 2×fps`).
   Future<void> toggle180DegreeShutter() async {
     final current = state.valueOrNull;
     if (current == null) return;
@@ -950,7 +968,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
       return;
     }
 
-    final targetShutter = (1.0 / (current.frameRate.value * 2)).clamp(
+    final targetShutter = current.target180ShutterSeconds.clamp(
       current.proCapabilities.minShutterSeconds,
       current.proCapabilities.maxShutterSeconds,
     );
@@ -996,6 +1014,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
         'lensId': option.id,
         'initialZoom': option.initialZoom,
         'hiRes48MP': current.hiRes48MP,
+        'antiFlicker': current.antiFlickerMode,
         'grading': _liveMetalConfigFor(current),
       });
       if (_disposed) return;
@@ -1172,6 +1191,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           'initialZoom': activeLens.initialZoom,
         },
         'hiRes48MP': current.hiRes48MP,
+        'antiFlicker': current.antiFlickerMode,
         'grading': _liveMetalConfigFor(switched),
       });
       if (_disposed) return;
@@ -1827,6 +1847,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           'initialZoom': activeLens.initialZoom,
         },
         'hiRes48MP': current.hiRes48MP,
+        'antiFlicker': current.antiFlickerMode,
         'grading': _liveMetalConfigFor(current),
       });
       if (_disposed) return;
@@ -1847,12 +1868,19 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
           : current.proCapabilities;
       _lastAppliedZoom = zoomLevel;
 
+      var nextOffset = 0.0;
+      if (current.highlightMeteringEnabled && !current.manualExposureEnabled) {
+        final bias = (-0.9).clamp(minExposure, maxExposure);
+        unawaited(repo.nativeCameraSetExposureBias(bias));
+        nextOffset = bias;
+      }
+
       final latest = state.valueOrNull ?? current;
       state = AsyncData(
         latest.copyWith(
           lensDirection: targetDirection,
           flashMode: FlashMode.off,
-          exposureOffset: 0.0,
+          exposureOffset: nextOffset,
           minExposure: minExposure,
           maxExposure: maxExposure,
           zoomLevel: zoomLevel,
