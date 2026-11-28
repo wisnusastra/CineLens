@@ -12,7 +12,7 @@ class AboutScreen extends StatelessWidget {
 
   static const String developerName = 'Wisnu Sastra Wijaya';
   static const String supportEmail = 'wisnusastra9@gmail.com';
-  static const String appVersion = '3.8.0 PRO';
+  static const String appVersion = '3.8.1 PRO';
 
   void _copyEmail(BuildContext context, AppStrings s) {
     Clipboard.setData(const ClipboardData(text: supportEmail));
@@ -46,8 +46,27 @@ class AboutScreen extends StatelessWidget {
 
     final releases = <({String version, String tag, List<String> items})>[
       (
-        version: 'v3.8.0 PRO',
+        version: 'v3.8.1 PRO',
         tag: isId ? 'TERBARU' : 'LATEST',
+        items: isId
+            ? const [
+                'Audit Hardware Langsung iPhone 14 Pro Max (4 Perbaikan Storage, Galeri, Baterai & Audio):',
+                'Fix Kebocoran Storage /tmp/ Video: hasil rekam 4K/ProRes kini langsung dipindah instan (0-byte APFS rename) ke Galeri CineLens tanpa menyisakan file duplikat di /tmp/, plus pembersihan otomatis file temp lama saat aplikasi dibuka',
+                'Auto-Heal Indeks Galeri Anti-Rotasi UUID iOS: jika UUID sandbox aplikasi berubah setelah update iOS / restore / re-sign, seluruh foto & video di Galeri CineLens otomatis ditemukan kembali tanpa hilang',
+                'Optimasi Baterai & Suhu Gyroscope Horizon: samakan interval CoreMotion 10Hz + otomatis hentikan sensor gyroscope saat masuk Galeri, Preview, atau Background',
+                'Fix Audio Route-Change Storm saat membuka drawer M: cegah pergantian ulang kategori AVAudioSession yang tidak perlu dan lindungi Volume Shutter',
+              ]
+            : const [
+                'Live iPhone 14 Pro Max Hardware & Syslog Audit (4 Storage, Gallery, Battery & Audio Fixes):',
+                'Fixed /tmp/ Video Storage Leak: recorded 4K/ProRes clips now move instantaneously via 0-byte APFS rename into CineLens Gallery (eliminating duplicate /tmp/ copies) + automatic startup sweep for orphaned temp recordings',
+                'Auto-Healing Gallery Index across Container UUID Rotations: automatically resolves gallery files inside Documents/cinelens_media if iOS rotates the sandbox UUID after updates, restores, or re-signing',
+                'CoreMotion Gyroscope Battery & Thermal Optimization: aligned sensor rate to 10Hz and cleanly pauses/resumes motion updates when navigating to Gallery, Preview, or background',
+                'Prevented unnecessary AVAudioSession category flips & route-change storms when opening the M control drawer',
+              ],
+      ),
+      (
+        version: 'v3.8.0 PRO',
+        tag: 'ANTI-FLICKER',
         items: isId
             ? const [
                 'Anti-Flicker Video 50Hz/60Hz Shutter-Priority Auto-ISO (Default 50Hz Aktif): mengunci shutter secara ketat di kelipatan murni listrik PLN Indonesia (1/50s, 1/100s, 1/200s, 1/400s...) agar lampu LED minimarket/kafe/indoor TIDAK lagi berkedip atau bergaris, sambil mengatur ISO secara halus (anti-pumping) dan menjaga sudut 180°/172.8° (1/50s @ 24fps)',

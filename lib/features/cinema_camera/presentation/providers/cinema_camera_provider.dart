@@ -214,6 +214,7 @@ class CinemaCameraNotifier extends AsyncNotifier<CinemaCameraState>
 
     unawaited(repository.setDopTelemetry(horizon: true, audio: false));
     unawaited(repository.setVolumeShutterEnabled(proImaging.volumeShutter));
+    unawaited(repository.cleanupStaleTempRecordings());
     // Hydrate gallery thumbnail right after camera viewfinder renders its first frame.
     Future<void>.microtask(refreshLatestThumb);
 

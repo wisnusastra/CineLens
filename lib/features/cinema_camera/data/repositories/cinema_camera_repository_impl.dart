@@ -1054,7 +1054,22 @@ class CinemaCameraRepository {
     final source = File(sourcePath);
     if (await source.exists()) {
       if (source.absolute.path != target.absolute.path) {
-        await source.copy(target.path);
+        final isTempRec = sourcePath.contains('/tmp/') ||
+            sourcePath.contains('CINELENS_REC_') ||
+            sourcePath.contains('cinelens_');
+        if (isTempRec) {
+          try {
+            // Instant 0-byte move on APFS — zero duplicate storage in /tmp!
+            await source.rename(target.path);
+          } catch (_) {
+            await source.copy(target.path);
+            try {
+              await source.delete();
+            } catch (_) {}
+          }
+        } else {
+          await source.copy(target.path);
+        }
       }
     }
 
@@ -1122,15 +1137,69 @@ class CinemaCameraRepository {
           .whereType<CapturedMedia>()
           .toList();
 
-      // Drop entries whose file disappeared (for example after iOS cleaned
-      // the temporaries up).
+      // Heal absolute sandbox paths if iOS rotated the app container UUID
+      // (after iOS update / restore / re-sign) and drop truly missing entries.
+      final mediaDir = await _mediaDirectory();
       final alive = <CapturedMedia>[];
+      var healedAny = false;
       for (final media in entries) {
-        if (await File(media.path).exists()) alive.add(media);
+        if (await File(media.path).exists()) {
+          alive.add(media);
+          continue;
+        }
+        final baseName = media.path.split(RegExp(r'[/\\]')).last;
+        if (baseName.isNotEmpty) {
+          final candidate =
+              File('${mediaDir.path}${Platform.pathSeparator}$baseName');
+          if (await candidate.exists()) {
+            alive.add(
+              CapturedMedia(
+                id: media.id,
+                type: media.type,
+                path: candidate.path,
+                createdAt: media.createdAt,
+                toneId: media.toneId,
+                toneName: media.toneName,
+                intensity: media.intensity,
+                isAnamorphic: media.isAnamorphic,
+                source: media.source,
+              ),
+            );
+            healedAny = true;
+          }
+        }
+      }
+      if (healedAny) {
+        unawaited(_writeLibrary(alive));
       }
       return alive;
     } catch (_) {
       return [];
+    }
+  }
+
+  /// Sweeps orphaned `CINELENS_REC_*.mov` temporary recordings in `/tmp` older
+  /// than 5 minutes (e.g. left over from earlier versions or interrupted takes).
+  Future<void> cleanupStaleTempRecordings() async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      if (!await tempDir.exists()) return;
+      final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
+      await for (final entity in tempDir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = entity.path.split(RegExp(r'[/\\]')).last;
+        if (!name.startsWith('CINELENS_REC_') || !name.endsWith('.mov')) {
+          continue;
+        }
+        try {
+          final stat = await entity.stat();
+          if (stat.modified.isBefore(cutoff)) {
+            await entity.delete();
+          }
+        } catch (_) {}
+      }
+    } catch (_) {
+      // Best-effort cleanup only.
     }
   }
 

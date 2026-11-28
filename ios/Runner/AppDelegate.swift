@@ -718,13 +718,16 @@ final class ExportProgressReporter {
 
       case "nativeCameraPause":
         self?.nativeEngine?.pause()
+        self?.pauseDopTelemetry()
         result(true)
 
       case "nativeCameraResume":
         self?.nativeEngine?.resume()
+        self?.resumeDopTelemetry()
         result(true)
 
       case "nativeCameraDispose":
+        self?.pauseDopTelemetry()
         self?.nativeEngine?.dispose()
         self?.nativeEngine = nil
         result(true)
@@ -3686,7 +3689,7 @@ final class ExportProgressReporter {
         dopMotionManager = CMMotionManager()
       }
       if let mm = dopMotionManager, mm.isDeviceMotionAvailable, !mm.isDeviceMotionActive {
-        mm.deviceMotionUpdateInterval = 1.0 / 20.0
+        mm.deviceMotionUpdateInterval = 1.0 / 10.0
         mm.startDeviceMotionUpdates()
       }
     } else {
@@ -3709,6 +3712,17 @@ final class ExportProgressReporter {
       dopTelemetryTimer?.invalidate()
       dopTelemetryTimer = nil
     }
+  }
+
+  private func pauseDopTelemetry() {
+    dopMotionManager?.stopDeviceMotionUpdates()
+    dopTelemetryTimer?.invalidate()
+    dopTelemetryTimer = nil
+  }
+
+  private func resumeDopTelemetry() {
+    guard dopHorizonEnabled || dopAudioEnabled else { return }
+    configureDopTelemetry(horizon: dopHorizonEnabled, audio: dopAudioEnabled)
   }
 
   private func startAudioMeterIfNeeded() {
@@ -4102,7 +4116,10 @@ final class ExportProgressReporter {
 
   private func listAudioInputs() -> [[String: Any]] {
     let session = AVAudioSession.sharedInstance()
-    try? session.setCategory(.playAndRecord, mode: .videoRecording, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth])
+    if session.category != .playAndRecord {
+      suppressVolumeShutter(for: 1.5)
+      try? session.setCategory(.playAndRecord, mode: .videoRecording, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth])
+    }
     let currentUID = session.preferredInput?.uid ?? session.currentRoute.inputs.first?.uid
     let inputs = session.availableInputs ?? []
     return inputs.map { port in
